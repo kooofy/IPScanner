@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+
+# 个人数据（本地生成的 MAC 地址库，含内部设备信息，不入库）
+mac_library.db
+
+# 用户导入的清单 / 导出结果（含内部信息，不入库）
+*.xls
+Downloads_*
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+*.log
+.workbuddy/
