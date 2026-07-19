@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 网络扫描引擎 — ICMP Ping + ARP + 主机名 + 端口探测
 支持 CIDR (192.168.1.0/24)、范围 (192.168.1.1-254)、单 IP
@@ -15,6 +15,12 @@ import os
 import locale
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+
+try:
+    from oui_database import get_mac_vendor
+except ImportError:
+    def get_mac_vendor(mac: str) -> str:
+        return ""
 
 # Windows 中文系统命令输出编码处理
 # Python 3.13 默认 UTF-8 模式，但 Windows 命令行输出为 GBK
@@ -57,6 +63,7 @@ class ScanResult:
     vendor: str = ""
     response_time: float = 0.0       # ms
     open_ports: List[int] = field(default_factory=list)
+    services: List[str] = field(default_factory=list)
     # Excel 匹配字段
     device_type: str = ""
     location: str = ""
@@ -90,6 +97,13 @@ PORT_NAMES = {
     443: "HTTPS", 445: "SMB", 993: "IMAPS", 995: "POP3S",
     1433: "MSSQL", 1521: "Oracle", 3306: "MySQL", 3389: "RDP",
     5432: "PostgreSQL", 5900: "VNC", 8080: "HTTP-Alt", 8443: "HTTPS-Alt",
+}
+
+PROTOCOL_PORTS = {
+    "HTTP": 80,
+    "HTTPS": 443,
+    "FTP": 21,
+    "RDP": 3389,
 }
 
 
@@ -220,8 +234,93 @@ def get_arp_table() -> Dict[str, str]:
     return arp_table
 
 
+def get_local_ips() -> List[str]:
+    """获取本机所有网卡的IP地址"""
+    ips = []
+    try:
+        hostname = socket.gethostname()
+        addrs = socket.getaddrinfo(hostname, None)
+        for addr in addrs:
+            ip = addr[4][0]
+            if ip and "." in ip and not ip.startswith("127."):
+                if ip not in ips:
+                    ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
+def get_local_mac_map() -> Dict[str, str]:
+    """
+    获取本机所有网卡的 {ip: mac} 映射
+    Windows 下使用 ipconfig /all，Linux 下使用 ifconfig/ip addr
+    """
+    mac_map = {}
+    is_windows = platform.system() == "Windows"
+    
+    try:
+        if is_windows:
+            output = _run_cmd(["ipconfig", "/all"], timeout=10)
+            # 解析 ipconfig /all 输出
+            current_mac = None
+            for line in output.splitlines():
+                line = line.strip()
+                # 匹配物理地址行
+                mac_match = re.search(r"物理地址[ .]+: ([0-9a-fA-F\-]{17})", line)
+                if not mac_match:
+                    mac_match = re.search(r"Physical Address[ .]+: ([0-9a-fA-F\-]{17})", line)
+                if mac_match:
+                    current_mac = mac_match.group(1).replace("-", ":").lower()
+                    continue
+                # 匹配 IPv4 地址行
+                ip_match = re.search(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                if not ip_match:
+                    ip_match = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                if ip_match and current_mac:
+                    ip = ip_match.group(1)
+                    mac_map[ip] = current_mac
+        else:
+            # Linux: 使用 ip addr
+            try:
+                output = _run_cmd(["ip", "addr"], timeout=10)
+                current_mac = None
+                for line in output.splitlines():
+                    line = line.strip()
+                    if "link/ether" in line:
+                        mac_match = re.search(r"link/ether ([0-9a-fA-F:]{17})", line)
+                        if mac_match:
+                            current_mac = mac_match.group(1).lower()
+                    elif "inet " in line and current_mac:
+                        ip_match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
+                        if ip_match:
+                            ip = ip_match.group(1)
+                            if not ip.startswith("127."):
+                                mac_map[ip] = current_mac
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
+    return mac_map
+
+
+_LOCAL_MAC_CACHE = None
+
+def get_local_mac_for_ip(ip: str) -> str:
+    """获取本机指定IP对应的MAC地址"""
+    global _LOCAL_MAC_CACHE
+    if _LOCAL_MAC_CACHE is None:
+        _LOCAL_MAC_CACHE = get_local_mac_map()
+    return _LOCAL_MAC_CACHE.get(ip, "")
+
+
 def get_mac_for_ip(ip: str, arp_cache: Optional[Dict[str, str]] = None) -> str:
     """获取指定 IP 的 MAC 地址"""
+    # 先检查是否是本机IP
+    local_mac = get_local_mac_for_ip(ip)
+    if local_mac:
+        return local_mac
+    
     if arp_cache and ip in arp_cache:
         return arp_cache[ip]
 
@@ -321,6 +420,7 @@ class NetworkScanner:
 
     def scan(self, ip_ranges: List[str], timeout_ms: int = 1000,
              max_threads: int = 100, scan_ports_flag: bool = False,
+             protocols: List[str] = None,
              progress_callback=None, result_callback=None) -> List[ScanResult]:
         """
         扫描多个 IP 范围。
@@ -330,6 +430,7 @@ class NetworkScanner:
             timeout_ms: ping 超时(毫秒)
             max_threads: 最大并发线程数
             scan_ports_flag: 是否扫描端口
+            protocols: 要检测的应用层协议列表 (HTTP, HTTPS, FTP, RDP 等)
             progress_callback: 进度回调 (current, total, current_ip)
             result_callback: 单个结果回调 (ScanResult)
 
@@ -352,7 +453,7 @@ class NetworkScanner:
         results: Dict[str, ScanResult] = {ip: ScanResult(ip=ip) for ip in all_ips}
         completed = 0
 
-        # Phase 1: Ping 扫描
+        # Phase 1: Ping 扫描 (只更新进度，不回调UI，避免分两批显示)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = {}
             for ip in all_ips:
@@ -380,8 +481,6 @@ class NetworkScanner:
                 completed += 1
                 if progress_callback:
                     progress_callback(completed, total, ip)
-                if result_callback:
-                    result_callback(result)
 
         if self._stop_flag:
             self.is_scanning = False
@@ -390,8 +489,16 @@ class NetworkScanner:
         # Phase 2: 获取 ARP 表 (一次性)
         arp_table = get_arp_table()
 
-        # Phase 3: 对在线设备补充信息 (MAC, 主机名, 端口)
+        # Phase 3: 对在线设备补充信息 (MAC, 主机名, 端口, 服务)
         online_ips = [ip for ip in all_ips if results[ip].status == "online"]
+        
+        # 构建协议端口映射 (协议名 -> 端口号)
+        proto_port_map = {}
+        if protocols:
+            for proto in protocols:
+                proto_upper = proto.upper()
+                if proto_upper in PROTOCOL_PORTS:
+                    proto_port_map[proto_upper] = PROTOCOL_PORTS[proto_upper]
 
         def enrich_device(ip: str):
             if self._stop_flag:
@@ -404,6 +511,10 @@ class NetworkScanner:
                 mac = get_mac_for_ip(ip)
             result.mac = mac
 
+            # 厂商识别 (通过 MAC OUI)
+            if mac:
+                result.vendor = get_mac_vendor(mac)
+
             # 主机名 (先试 DNS，再试 NetBIOS)
             hostname = resolve_hostname(ip, timeout=1.0)
             if not hostname:
@@ -413,6 +524,21 @@ class NetworkScanner:
             # 端口扫描
             if scan_ports_flag:
                 result.open_ports = scan_ports(ip, timeout=0.5)
+            
+            # 服务检测 (独立于端口扫描，只要选了协议就探测对应端口)
+            if proto_port_map:
+                svc_list = []
+                proto_ports = list(proto_port_map.values())
+                # 探测协议端口
+                detected_proto_ports = scan_ports(ip, ports=proto_ports, timeout=0.5)
+                for proto, port in proto_port_map.items():
+                    if port in detected_proto_ports:
+                        svc_list.append(proto)
+                        # 如果没开完整端口扫描，也把协议端口加入开放端口列表
+                        if not scan_ports_flag and port not in result.open_ports:
+                            result.open_ports.append(port)
+                            result.open_ports.sort()
+                result.services = svc_list
 
             if result_callback:
                 result_callback(result)
