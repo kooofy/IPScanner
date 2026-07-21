@@ -15,13 +15,30 @@ import threading
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "oui.db")
 _LOCK = threading.Lock()
 
+# 进程级单例连接：扫描期并发查大量 MAC，避免每次查询都新建/关闭 SQLite 连接。
+# check_same_thread=False 允许跨线程复用，查询时用 _LOCK 串行化以保证线程安全。
+_conn = None
+_conn_init_lock = threading.Lock()
+
+
+def _get_conn():
+    """返回进程级单例只读连接（惰性初始化，双检锁保证只建一次）。"""
+    global _conn
+    if _conn is None:
+        with _conn_init_lock:
+            if _conn is None:
+                _conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    return _conn
+
+
 @functools.lru_cache(maxsize=2048)
 def _query_oui(prefix: str) -> str:
     """查询单个 OUI 前缀，SQLite 索引查找 O(1) + LRU 缓存"""
     try:
-        conn = sqlite3.connect(_DB_PATH)
-        row = conn.execute("SELECT vendor FROM oui WHERE prefix=?", (prefix,)).fetchone()
-        conn.close()
+        with _LOCK:
+            row = _get_conn().execute(
+                "SELECT vendor FROM oui WHERE prefix=?", (prefix,)
+            ).fetchone()
         return row[0] if row else ""
     except Exception:
         return ""

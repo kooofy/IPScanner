@@ -8,6 +8,7 @@ import subprocess
 import socket
 import ssl
 import struct
+import threading
 import concurrent.futures
 import ipaddress
 import re
@@ -26,19 +27,24 @@ except ImportError:
     def get_mac_vendor(mac: str) -> str:
         return ""
 
-# Windows 中文系统命令输出编码处理
-# Python 3.13 默认 UTF-8 模式，但 Windows 命令行输出为 GBK
+# Windows 命令输出编码处理
+# 关键：用控制台「实际输出代码页」判断，而非 locale.getpreferredencoding ——
+# 后者在「Win11 系统区域 UTF-8 Beta」与「Python UTF-8 模式」下都会返回 utf-8，
+# 但两者控制台实际输出不同：Win11 UTF-8 模式 cmd 输出真 UTF-8，Python UTF-8 模式 cmd 仍输出 GBK。
+# GetConsoleOutputCP(): 65001=UTF-8, 936=GBK(中文), 437=OEM 美国 ...
 _IS_WINDOWS = platform.system() == "Windows"
 _CMD_ENCODING = None
 if _IS_WINDOWS:
     try:
-        # 尝试获取系统编码
-        _CMD_ENCODING = locale.getpreferredencoding(False)
-        # 如果是 UTF-8，说明是 Python 3.13 的 UTF-8 模式，需要改用 GBK
-        if _CMD_ENCODING and _CMD_ENCODING.lower() in ("utf-8", "utf8"):
-            _CMD_ENCODING = "gbk"
+        cp = ctypes.windll.kernel32.GetConsoleOutputCP()
+        _CMD_ENCODING = "utf-8" if cp == 65001 else (f"cp{cp}" if cp else "gbk")
     except Exception:
-        _CMD_ENCODING = "gbk"
+        # 回退到 locale，并把"纯 utf-8"当作 GBK（兼容 Python 3.13 UTF-8 模式）
+        try:
+            enc = locale.getpreferredencoding(False)
+            _CMD_ENCODING = enc if enc and enc.lower() not in ("utf-8", "utf8") else "gbk"
+        except Exception:
+            _CMD_ENCODING = "gbk"
 
 
 def _run_cmd(cmd: list, timeout: float = 10) -> str:
@@ -407,17 +413,32 @@ def get_mac_for_ip(ip: str, arp_cache: Optional[Dict[str, str]] = None) -> str:
     return ""
 
 
+# 进程级共享 reverse-DNS 线程池：避免每次解析都创建/销毁 ThreadPoolExecutor(max_workers=1)。
+# 惰性初始化 + 双检锁；max_workers 限制同时解析数，超时任务在后台线程自行结束。
+_resolve_executor = None
+_resolve_executor_lock = threading.Lock()
+
+
+def _get_resolve_executor():
+    global _resolve_executor
+    if _resolve_executor is None:
+        with _resolve_executor_lock:
+            if _resolve_executor is None:
+                _resolve_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=8, thread_name_prefix="resolve-host"
+                )
+    return _resolve_executor
+
+
 def resolve_hostname(ip: str, timeout: float = 1.0) -> str:
-    """反向 DNS 解析主机名"""
+    """反向 DNS 解析主机名（复用进程级线程池）"""
     try:
-        # 使用线程池设置超时
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(socket.gethostbyaddr, ip)
-            try:
-                hostname, _, _ = future.result(timeout=timeout)
-                return hostname
-            except concurrent.futures.TimeoutExpired:
-                return ""
+        future = _get_resolve_executor().submit(socket.gethostbyaddr, ip)
+        try:
+            hostname, _, _ = future.result(timeout=timeout)
+            return hostname
+        except concurrent.futures.TimeoutExpired:
+            return ""
     except (socket.herror, socket.gaierror, Exception):
         return ""
 

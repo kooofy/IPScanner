@@ -2028,7 +2028,10 @@ class MainWindow(QMainWindow):
         return self._globe_icon()
 
     def _globe_icon(self) -> QIcon:
-        from PyQt5.QtGui import QPixmap, QPainter, QPen, QBrush, QColor
+        # 首次构造后缓存，避免每个 HTTP/HTTPS 服务行都重绘 QPixmap（顶层已导入相关类）
+        cache = getattr(self, "_globe_icon_cache", None)
+        if cache is not None:
+            return cache
         pm = QPixmap(20, 20)
         pm.fill(Qt.transparent)
         painter = QPainter(pm)
@@ -2051,7 +2054,9 @@ class MainWindow(QMainWindow):
         painter.drawArc(4, 5, 12, 10, 180 * 16, 180 * 16)
 
         painter.end()
-        return QIcon(pm)
+        icon = QIcon(pm)
+        self._globe_icon_cache = icon
+        return icon
 
     def _service_desc(self, proto: str, ip: str) -> str:
         proto_upper = proto.upper()
@@ -2401,6 +2406,12 @@ class MainWindow(QMainWindow):
                 "mac": (r.mac or "").upper(),
                 "hostname": r.hostname or "",
                 "vendor": r.vendor or "",
+                "device_class": r.device_class or "",
+                "os_guess": r.os_guess or "",
+                "open_ports": ",".join(str(p) for p in (r.open_ports or [])),
+                "location": r.location or "",
+                "user": r.user or "",
+                "remark": r.remark or "",
             })
         return {"time": time.time(), "devices": devices}
 
@@ -2955,7 +2966,10 @@ def _compare_snapshots(base: dict, target: dict) -> list:
     diffs = []
 
     def _fmt(d):
-        return f"{d.get('status', '?')} / {d.get('hostname') or '—'} / {d.get('mac') or '—'}"
+        parts = [d.get("status", "?"), d.get("hostname") or "—", d.get("mac") or "—"]
+        if d.get("device_class"):
+            parts.append(d.get("device_class"))
+        return " / ".join(str(p) for p in parts)
 
     for ip, td in target_map.items():
         if ip not in base_map:
@@ -2975,6 +2989,17 @@ def _compare_snapshots(base: dict, target: dict) -> list:
             if (bd.get("hostname") or "") != (td.get("hostname") or ""):
                 diffs.append({"ip": ip, "change": "主机名变更",
                               "old": bd.get("hostname") or "—", "new": td.get("hostname") or "—"})
+            # 设备识别类字段变更（新增字段，旧快照缺省为空，不影响兼容）
+            for field, label in (
+                ("device_class", "设备类型变更"),
+                ("open_ports", "开放端口变更"),
+                ("location", "位置变更"),
+                ("user", "使用者变更"),
+            ):
+                bv, tv = bd.get(field) or "", td.get(field) or ""
+                if bv != tv:
+                    diffs.append({"ip": ip, "change": label,
+                                  "old": bv or "—", "new": tv or "—"})
     return diffs
 
 

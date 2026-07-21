@@ -24,7 +24,8 @@ from excel_handler import (
 
 DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mac_library.db")
 
-_SCHEMA = """
+# 基础表结构 + 非唯一索引；部分唯一索引在 _init_db 里于去重后创建
+_SCHEMA_BASE = """
 CREATE TABLE IF NOT EXISTS devices (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ip          TEXT DEFAULT '',
@@ -58,7 +59,24 @@ class MacLibrary:
 
     def _init_db(self):
         conn = self._connect()
-        conn.executescript(_SCHEMA)
+        # 1) 建表与基础索引
+        conn.executescript(_SCHEMA_BASE)
+        # 2) 对已有非空 MAC 去重（保留最大 id 即最后写入一条），否则部分唯一索引会创建失败
+        try:
+            conn.execute(
+                "DELETE FROM devices WHERE mac <> '' "
+                "AND id NOT IN (SELECT MAX(id) FROM devices WHERE mac <> '' GROUP BY mac)"
+            )
+        except Exception:
+            pass
+        # 3) 部分唯一索引：仅对非空 MAC 约束唯一（空 MAC 允许多条，用于无 MAC 的占位设备）
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_dev_mac_uniq "
+                "ON devices(mac) WHERE mac <> ''"
+            )
+        except Exception:
+            pass
         conn.commit()
         conn.close()
 
@@ -72,6 +90,19 @@ class MacLibrary:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         mac = self._norm_mac(mac)
         conn = self._connect()
+        # 非空 MAC 已存在 → 整行更新（部分唯一索引保护，避免 IntegrityError）
+        if mac:
+            cur = conn.execute("SELECT id FROM devices WHERE mac=?", (mac,)).fetchone()
+            if cur:
+                conn.execute(
+                    "UPDATE devices SET ip=?, device_type=?, location=?, user=?, "
+                    "remark=?, vendor=?, source_file=?, updated_at=? WHERE id=?",
+                    (ip, device_type, location, user, remark, vendor, source_file, now, cur[0]),
+                )
+                conn.commit()
+                did = cur[0]
+                conn.close()
+                return did
         cur = conn.execute(
             "INSERT INTO devices "
             "(ip, mac, device_type, location, user, remark, vendor, source_file, created_at, updated_at) "
