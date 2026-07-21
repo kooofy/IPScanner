@@ -723,8 +723,13 @@ def scan_shares(ip: str, timeout: float = 1.5) -> List[str]:
         return []
 
 
-def _read_http_banner(ip: str, port: int, timeout: float = 1.0) -> str:
-    """对 HTTP 端口发送请求，尝试提取 Server 头或 <title>；失败返回空串。"""
+def _read_http(ip: str, port: int, timeout: float = 1.0) -> Tuple[str, str, str]:
+    """对 HTTP 端口发送单次 GET /，一次性提取 (banner, brand, model)。
+
+    合并原 _read_http_banner 与 _read_http_brand 两次独立 TCP 连接，
+    对只开 80/443 的打印机 / 路由器等可省一半往返；
+    banner 取 Server 头（或 <title>），brand/model 取页面正文推断。
+    """
     try:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -732,35 +737,35 @@ def _read_http_banner(ip: str, port: int, timeout: float = 1.0) -> str:
                 f"GET / HTTP/1.0\r\n"
                 f"Host: {ip}\r\n"
                 f"User-Agent: IPScanner/1.0\r\n"
-                f"Accept: */*\r\n"
+                f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
                 f"Connection: close\r\n\r\n"
             )
             sock.sendall(request.encode("utf-8"))
             data = b""
-            while len(data) < 8192:
+            while len(data) < 32768:
                 try:
                     chunk = sock.recv(4096)
                     if not chunk:
                         break
                     data += chunk
-                    if b"\r\n\r\n" in data:
+                    if b"</html>" in data.lower():
                         break
                 except socket.timeout:
                     break
             text = data.decode("utf-8", errors="replace")
-            # 1. Server 头
+            # banner: Server 头优先，其次 <title>
+            banner = ""
             m = re.search(r"Server:\s*(.+?)[\r\n]", text, re.IGNORECASE)
             if m:
-                return m.group(1).strip()
-            # 2. HTML title
-            m = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
-            if m:
-                title = m.group(1).strip()
-                title = re.sub(r"[\s\r\n]+", " ", title)
-                return title
-            return ""
+                banner = m.group(1).strip()
+            else:
+                m = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+                if m:
+                    banner = re.sub(r"[\s\r\n]+", " ", m.group(1).strip())
+            brand, model = _extract_http_brand(text)
+            return banner, brand, model
     except Exception:
-        return ""
+        return "", "", ""
 
 
 # 常见设备品牌关键字（用于从 HTTP 页面/标题中识别设备类型）
@@ -818,39 +823,6 @@ def _extract_http_brand(text: str) -> Tuple[str, str]:
         brand = "打印机"
 
     return brand, model
-
-
-def _read_http_brand(ip: str, port: int = 80, timeout: float = 1.0) -> Tuple[str, str]:
-    """
-    对 HTTP 端口发送 GET /，读取页面内容，尝试识别设备品牌与型号。
-    返回 (brand, model)，无法识别返回 ("", "")。
-    """
-    try:
-        with socket.create_connection((ip, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            request = (
-                f"GET / HTTP/1.0\r\n"
-                f"Host: {ip}\r\n"
-                f"User-Agent: IPScanner/1.0\r\n"
-                f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
-                f"Connection: close\r\n\r\n"
-            )
-            sock.sendall(request.encode("utf-8"))
-            data = b""
-            while len(data) < 32768:
-                try:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                    if b"</html>" in data.lower():
-                        break
-                except socket.timeout:
-                    break
-            text = data.decode("utf-8", errors="replace")
-            return _extract_http_brand(text)
-    except Exception:
-        return "", ""
 
 
 def _read_https_banner(ip: str, port: int, timeout: float = 1.2) -> str:
@@ -1241,11 +1213,14 @@ def _build_dns_query(name: str, qtype: int, req_id: int, unicast: bool = True) -
     return header + qname + struct.pack("!HH", qtype, qclass)
 
 
-def _parse_dns_name(data: bytes, pos: int):
-    """解析域名（支持压缩指针 0xC0），返回 (name, 新位置)。"""
+def _parse_dns_name(data: bytes, pos: int, depth: int = 0):
+    """解析域名（支持压缩指针 0xC0），返回 (name, 新位置)。
+
+    限制压缩指针跳转深度（默认 10 层），防止畸形 / 循环压缩指针
+    （如 A -> B -> A）导致无限递归与栈溢出。
+    """
     labels = []
     jumped = False
-    base = pos
     while True:
         if pos >= len(data):
             break
@@ -1254,10 +1229,12 @@ def _parse_dns_name(data: bytes, pos: int):
             pos += 1
             break
         if length & 0xC0 == 0xC0:   # 压缩指针
+            if depth >= 10:         # 超过最大嵌套层数，视为畸形报文，安全终止
+                break
             ptr = ((length & 0x3F) << 8) | data[pos + 1]
             if not jumped:
                 pos += 2
-            name, _ = _parse_dns_name(data, ptr)
+            name, _ = _parse_dns_name(data, ptr, depth + 1)
             labels.append(name)
             break
         label = data[pos + 1:pos + 1 + length].decode("utf-8", "replace")
@@ -1926,11 +1903,11 @@ class NetworkScanner:
                         svc_list.append(proto)
                         detail = {"proto": proto, "port": port}
                         if proto == "HTTP":
-                            http_banner = _read_http_banner(ip, port, 1.0)
+                            # 单次 GET 同时提取 banner(标题) 与设备品牌/型号
+                            # （对只开 80/443 的打印机很关键，省掉一次 TCP 往返）
+                            http_banner, http_brand, http_model = _read_http(ip, port, 1.2)
                             upnp_name = _read_upnp_device_name(ip, port, 0.8)
                             result.upnp_model = upnp_name
-                            # 额外从页面内容识别品牌/型号（对只有 80/443 的打印机很关键）
-                            http_brand, http_model = _read_http_brand(ip, port, 1.2)
                             result.http_brand = http_brand
                             result.http_model = http_model
                             if upnp_name:
