@@ -256,75 +256,66 @@ def simplify_vendor_name(vendor: str) -> str:
     return v if v else original
 
 
-def generate_python_code(oui_dict: dict, output_path: str, use_simple_names: bool = True):
+def generate_sqlite_db(oui_dict: dict, output_path: str, use_simple_names: bool = True):
     """
-    生成 Python 代码文件，包含 MAC_OUI_VENDORS 字典和 get_mac_vendor 函数
-    
+    ?? SQLite ?????????: oui(prefix TEXT PRIMARY KEY, vendor TEXT NOT NULL)
+
     Args:
-        oui_dict: OUI 字典
-        output_path: 输出文件路径
-        use_simple_names: 是否使用简化的厂商名称
+        oui_dict: OUI ??
+        output_path: ?? .db ????
+        use_simple_names: ???????????
     """
-    # 按 OUI 排序
-    sorted_ouis = sorted(oui_dict.keys())
-    
-    lines = []
-    lines.append('# -*- coding: utf-8 -*-')
-    lines.append('"""')
-    lines.append('MAC OUI 厂商数据库')
-    lines.append(f'数据来源: IEEE 官方 OUI 数据库 (共 {len(sorted_ouis)} 条记录)')
-    lines.append('"""')
-    lines.append('')
-    lines.append('')
-    lines.append('MAC_OUI_VENDORS = {')
-    
-    for oui in sorted_ouis:
-        vendor = oui_dict[oui]
-        if use_simple_names:
-            vendor = simplify_vendor_name(vendor)
-        # 转义引号
-        vendor_escaped = vendor.replace('"', '\\"')
-        lines.append(f'    "{oui}": "{vendor_escaped}",')
-    
-    lines.append('}')
-    lines.append('')
-    lines.append('')
-    lines.append('def get_mac_vendor(mac: str) -> str:')
-    lines.append('    """根据 MAC 地址获取厂商名称"""')
-    lines.append('    if not mac:')
-    lines.append('        return ""')
-    lines.append('    mac = mac.lower().replace("-", ":")')
-    lines.append('    if len(mac) < 8:')
-    lines.append('        return ""')
-    lines.append('    oui = mac[:8]')
-    lines.append('    return MAC_OUI_VENDORS.get(oui, "")')
-    lines.append('')
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
-    
-    print(f"已生成 {output_path}，共 {len(sorted_ouis)} 条记录")
+    import sqlite3
+
+    conn = sqlite3.connect(output_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("CREATE TABLE IF NOT EXISTS oui (prefix TEXT PRIMARY KEY, vendor TEXT NOT NULL)")
+    conn.execute("DELETE FROM oui")
+
+    count = 0
+    batch = []
+    for oui, vendor in sorted(oui_dict.items()):
+        name = simplify_vendor_name(vendor) if use_simple_names else vendor
+        batch.append((oui, name))
+        count += 1
+        if len(batch) >= 5000:
+            conn.executemany("INSERT OR REPLACE INTO oui VALUES (?,?)", batch)
+            batch.clear()
+
+    if batch:
+        conn.executemany("INSERT OR REPLACE INTO oui VALUES (?,?)", batch)
+
+    conn.commit()
+    conn.execute("ANALYZE")
+    conn.close()
+
+    size_kb = os.path.getsize(output_path) / 1024
+    print(f"??? {output_path}?? {count:,} ??? ({size_kb:.0f} KB)")
+
+
 
 
 def main():
     oui_txt_path = r"C:\Users\Koofy\Desktop\oui.txt"
-    output_path = r"d:\Tools\IPScanner\oui_database.py"
-    
-    print(f"正在解析 {oui_txt_path} ...")
+    output_path = r"d:\Tools\IPScanner\oui.db"
+
+    print(f"???? {oui_txt_path} ...")
     oui_dict = parse_ieee_oui(oui_txt_path)
-    print(f"解析完成，共 {len(oui_dict)} 条 OUI 记录")
-    
-    # 打印前10条测试
-    print("\n前10条记录:")
+    print(f"?????? {len(oui_dict)} ? OUI ??")
+
+    # ???10???
+    print("\n?10???:")
     for i, (oui, vendor) in enumerate(sorted(oui_dict.items())[:10]):
         simple = simplify_vendor_name(vendor)
-        print(f"  {oui} -> {vendor} (简化: {simple})")
-    
-    # 生成 Python 代码文件
-    print(f"\n正在生成数据库文件...")
-    generate_python_code(oui_dict, output_path, use_simple_names=True)
-    
-    print("\n完成！")
+        print(f"  {oui} -> {vendor} (??: {simple})")
+
+    # ?? SQLite ?????
+    print(f"\n?????????...")
+    generate_sqlite_db(oui_dict, output_path, use_simple_names=True)
+
+    print("\n??!")
+
 
 
 if __name__ == '__main__':

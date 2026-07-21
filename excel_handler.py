@@ -5,12 +5,15 @@ Excel 导入/导出处理模块
 """
 
 import os
+import json
 import openpyxl
 import xlrd
+from datetime import datetime
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from typing import Dict, List, Optional, Tuple
 import re
+import csv
 
 
 # 列名别名映射 (小写精确匹配)。一个字段可对应多列 (多 MAC / 多位置列)
@@ -87,139 +90,6 @@ def _read_rows(file_path: str) -> List[tuple]:
         return rows
 
 
-class ExcelHandler:
-    """Excel 文件处理"""
-
-    def __init__(self):
-        self.data_by_ip: Dict[str, dict] = {}
-        self.data_by_mac: Dict[str, dict] = {}
-        self.file_path: str = ""
-        self.headers: List[str] = []
-        self.column_mapping: Dict[str, List[int]] = {}
-        self.row_count: int = 0
-        self.source_files: List[str] = []
-
-    def load(self, file_path: str, append: bool = False) -> Tuple[bool, str]:
-        """
-        加载 Excel 文件。
-        append=True 时不清空已有数据 (用于多文件合并导入)。
-        Returns: (是否成功, 消息)
-        """
-        self.file_path = file_path
-
-        # 先读取，读取失败不影响已有数据
-        try:
-            rows = _read_rows(file_path)
-        except Exception as e:
-            return False, f"无法打开文件: {e}"
-
-        if not rows:
-            return False, "文件为空"
-
-        if not append:
-            self.data_by_ip.clear()
-            self.data_by_mac.clear()
-            self.row_count = 0
-            self.source_files = []
-
-        # 定位表头行：前 15 行内找第一个含已识别字段别名的行 (兼容首行是大标题的情况)
-        header_row_idx = 0
-        for idx in range(min(15, len(rows))):
-            hdr = [str(h).strip().lower() if h is not None else "" for h in rows[idx]]
-            if any(any(h in aliases for h in hdr) for aliases in COLUMN_ALIASES.values()):
-                header_row_idx = idx
-                break
-
-        raw_headers = [str(h).strip() if h is not None else "" for h in rows[header_row_idx]]
-        self.headers = raw_headers
-        self.column_mapping = detect_columns(raw_headers)
-
-        if "ip" not in self.column_mapping and "mac" not in self.column_mapping:
-            return False, "未找到 IP/MAC 列，无法在扫描时自动匹配设备（请在清单中补充 MAC 或 IP 列后重试）"
-
-        ip_cols = self.column_mapping.get("ip", [])
-        mac_cols = self.column_mapping.get("mac", [])
-        ip_col = ip_cols[0] if ip_cols else None
-        added = 0
-
-        for row in rows[header_row_idx + 1:]:
-            if not row or all(c is None or str(c).strip() == "" for c in row):
-                continue
-
-            entry = {}
-            for field, cols in self.column_mapping.items():
-                vals = []
-                for c in cols:
-                    if c < len(row):
-                        v = _cell_to_str(row[c])
-                        if v:
-                            vals.append(v)
-                if vals:
-                    entry[field] = " ".join(vals)
-
-            # 取一个 MAC 原文用于显示 (不影响匹配，匹配走 data_by_mac)
-            if mac_cols:
-                for c in mac_cols:
-                    if c < len(row):
-                        m = _cell_to_str(row[c])
-                        if m:
-                            entry["mac"] = m
-                            break
-
-            # IP 索引
-            if ip_col is not None and ip_col < len(row):
-                ip_val = _cell_to_str(row[ip_col]).strip()
-                if ip_val:
-                    self.data_by_ip[ip_val] = entry
-
-            # MAC 索引 (所有 MAC 列都建索引，一个设备多网卡也能匹配)
-            matched_mac = False
-            for c in mac_cols:
-                if c < len(row):
-                    m = normalize_mac(_cell_to_str(row[c]))
-                    if m:
-                        self.data_by_mac[m] = entry
-                        matched_mac = True
-
-            # 既没有 IP 也没有 MAC 的行无意义，跳过
-            if not entry.get("ip") and not matched_mac:
-                continue
-
-            self.row_count += 1
-            added += 1
-
-        if added == 0:
-            return False, "MAC/IP 数据为空，该文件无法在扫描时自动匹配设备（请检查 MAC 列是否已填写）"
-
-        if file_path not in self.source_files:
-            self.source_files.append(file_path)
-
-        msg = f"已从 {os.path.basename(file_path)} 载入 {added} 条 (累计 {self.row_count} 条)"
-        detected = list(self.column_mapping.keys())
-        msg += f"\n识别字段: {', '.join(detected)}"
-        return True, msg
-
-    def match(self, ip: str, mac: str = "") -> Optional[dict]:
-        """
-        通过 IP 或 MAC 匹配设备信息。
-        优先 IP 精确匹配，其次 MAC 匹配。
-        """
-        # IP 精确匹配
-        if ip and ip in self.data_by_ip:
-            return self.data_by_ip[ip]
-
-        # MAC 匹配
-        if mac:
-            mac_norm = normalize_mac(mac)
-            if mac_norm and mac_norm in self.data_by_mac:
-                return self.data_by_mac[mac_norm]
-
-        return None
-
-    def is_loaded(self) -> bool:
-        return bool(self.data_by_ip or self.data_by_mac)
-
-
 def export_results(results: list, file_path: str) -> Tuple[bool, str]:
     """
     将扫描结果导出到 Excel。
@@ -233,8 +103,8 @@ def export_results(results: list, file_path: str) -> Tuple[bool, str]:
         # 表头
         headers = [
             "IP地址", "状态", "主机名", "MAC地址", "厂商",
-            "设备类型", "位置", "使用者",
-            "响应时间(ms)", "开放端口", "备注"
+            "设备类型", "设备型号", "位置", "使用者",
+            "响应时间(ms)", "开放端口", "共享文件夹", "发现方式", "端口探测方式", "操作系统", "备注"
         ]
 
         # 样式
@@ -283,8 +153,8 @@ def export_results(results: list, file_path: str) -> Tuple[bool, str]:
         # 自动列宽
         col_widths = {
             "IP地址": 16, "状态": 8, "主机名": 20, "MAC地址": 20, "厂商": 12,
-            "设备类型": 12, "位置": 20, "使用者": 12,
-            "响应时间(ms)": 14, "开放端口": 30, "备注": 20,
+            "设备类型": 12, "设备型号": 22, "位置": 20, "使用者": 12,
+            "响应时间(ms)": 14, "开放端口": 30, "共享文件夹": 30, "发现方式": 12, "端口探测方式": 14, "操作系统": 16, "备注": 20,
         }
         for col_idx, header in enumerate(headers, 1):
             ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(header, 15)
@@ -297,6 +167,103 @@ def export_results(results: list, file_path: str) -> Tuple[bool, str]:
 
         wb.save(file_path)
         wb.close()
+        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+    except Exception as e:
+        return False, f"导出失败: {e}"
+
+
+def _result_to_row(result) -> dict:
+    """统一把 ScanResult / dict 转成导出行字典（含共享文件夹、发现方式）。"""
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
+    if isinstance(result, dict):
+        return result
+    return {}
+
+
+def export_csv(results: list, file_path: str) -> Tuple[bool, str]:
+    """
+    将扫描结果导出为 CSV（UTF-8-SIG，Excel 直接打开中文不乱码）。
+    """
+    try:
+        headers = [
+            "IP地址", "状态", "主机名", "MAC地址", "厂商",
+            "设备类型", "设备型号", "位置", "使用者",
+            "响应时间(ms)", "开放端口", "共享文件夹", "发现方式", "端口探测方式", "操作系统", "备注"
+        ]
+        with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            for result in results:
+                d = _result_to_row(result)
+                row = [d.get(h, "") for h in headers]
+                writer.writerow(row)
+        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+    except Exception as e:
+        return False, f"导出失败: {e}"
+
+
+def export_html(results: list, file_path: str) -> Tuple[bool, str]:
+    """
+    将扫描结果导出为带样式的 HTML 表格（在线/离线行着色）。
+    """
+    try:
+        headers = [
+            "IP地址", "状态", "主机名", "MAC地址", "厂商",
+            "设备类型", "设备型号", "位置", "使用者",
+            "响应时间(ms)", "开放端口", "共享文件夹", "发现方式", "端口探测方式", "操作系统", "备注"
+        ]
+        rows_html = []
+        for result in results:
+            d = _result_to_row(result)
+            is_online = d.get("状态") == "在线"
+            bg = "#e6f9ed" if is_online else "#fdecec"
+            color = "#16713a" if is_online else "#b3261e"
+            tds = []
+            for h in headers:
+                val = str(d.get(h, "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                if h == "状态":
+                    tds.append(f'<td style="color:{color};font-weight:600;text-align:center">{val}</td>')
+                else:
+                    tds.append(f"<td>{val}</td>")
+            rows_html.append(
+                f'<tr style="background:{bg}">{"".join(tds)}</tr>'
+            )
+        thead = "".join(f"<th>{h}</th>" for h in headers)
+        table = (
+            '<table border="1" cellspacing="0" cellpadding="6" '
+            'style="border-collapse:collapse;font-family:Microsoft YaHei,Segoe UI,Arial;font-size:13px">'
+            f"<thead><tr style='background:#2563EB;color:#fff'>{thead}</tr></thead>"
+            f"<tbody>{''.join(rows_html)}</tbody></table>"
+        )
+        online_count = sum(1 for r in results if _result_to_row(r).get("状态") == "在线")
+        html = (
+            "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
+            "<title>IPScanner 扫描结果</title></head><body>"
+            f"<h2>局域网扫描结果</h2>"
+            f"<p>共 {len(results)} 条记录，{online_count} 台在线，"
+            f"导出时间 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>"
+            f"{table}</body></html>"
+        )
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+    except Exception as e:
+        return False, f"导出失败: {e}"
+
+
+def export_json(results: list, file_path: str) -> Tuple[bool, str]:
+    """
+    将扫描结果导出为 JSON（UTF-8，保留完整字段，便于二次处理/接口对接）。
+    """
+    try:
+        rows = []
+        for result in results:
+            d = _result_to_row(result)
+            # 转成普通 dict（to_dict 返回的即 dict），去除空值可选保留
+            rows.append(d)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
         return True, f"已导出 {len(results)} 条记录到 {file_path}"
     except Exception as e:
         return False, f"导出失败: {e}"

@@ -18,3 +18,7 @@ Downloads_*
 Thumbs.db
 *.log
 .workbuddy/
+
+# 本地配置（用户偏好/窗口布局，不入库）
+ipscanner.ini
+scan_history.json
