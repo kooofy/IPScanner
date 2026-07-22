@@ -34,7 +34,7 @@ from PyQt5.QtGui import (
     QColor, QFont, QIcon, QPainter, QBrush, QPen, QPixmap, QPalette,
     QCursor, QFontMetrics, QDesktopServices
 )
-from scanner import NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class, merge_wmi
+from scanner import NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class, merge_wmi, netbios_query, merge_netbios
 from excel_handler import export_results, export_csv, export_html, export_json, create_template, normalize_mac
 from mac_library import MacLibrary
 import history_store
@@ -42,7 +42,7 @@ import audit_log
 
 from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog, AuditLogDialog, SwitchPortDialog, ChangeReportDialog
 from ui_icons import _build_dark_palette, get_pc_icons
-from ui_threads import MdnsThread, ScanThread, WmiThread
+from ui_threads import MdnsThread, ScanThread, WmiThread, NetbiosThread
 from ui_utils import _detect_gateway
 from conflict_detector import detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
 from change_detector import detect_changes, get_change_summary
@@ -630,6 +630,7 @@ class MainWindow(QMainWindow):
         self.wmi_creds = WmiCredentialStore()
         self.wmi_creds.load_from(self.settings)
         self.wmi_thread = None
+        self.netbios_thread = None
 
         # 扫描历史快照 (SQLite, 存于项目目录；含内部信息，已 gitignore)
         self.history_db = os.path.join(
@@ -1129,6 +1130,11 @@ class MainWindow(QMainWindow):
         act_wmi.setToolTip("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据")
         act_wmi.triggered.connect(lambda: self._run_wmi_identification())
         tool_menu.addAction(act_wmi)
+
+        act_netbios = QAction("NetBIOS 识别（轻量）", self)
+        act_netbios.setToolTip("零凭据、不需管理员：获取计算机名/工作组/当前用户/MAC（同网段 UDP/137）")
+        act_netbios.triggered.connect(lambda: self._run_netbios_identification())
+        tool_menu.addAction(act_netbios)
 
         act_switch_map = QAction("交换机端口映射...", self)
         act_switch_map.setToolTip("通过 SNMP 获取交换机 MAC 转发表，映射 MAC → 物理端口")
@@ -2057,6 +2063,75 @@ class MainWindow(QMainWindow):
         """把 WMI 查询结果合并进 ScanResult，并用权威信息补全设备指纹。"""
         merge_wmi(result, d)
 
+    # --- NetBIOS 轻量识别（零凭据、不需管理员，作为 WMI 的轻量补充）---
+
+    def _run_netbios_identification(self, targets=None):
+        """对目标设备执行 NetBIOS 轻量识别（UDP/137 NBSTAT，零凭据、不需管理员）。
+
+        targets: IP 列表；为 None 时对全部在线、疑似 Windows 的设备批量识别。
+        无需凭据，直接启动后台线程逐台查询。
+        """
+        online_ips = {r.ip for r in self.all_results if r.status == "online"}
+        if targets is None:
+            targets = [
+                r.ip for r in self.all_results
+                if r.status == "online" and (
+                    r.os_guess == "Windows"
+                    or 135 in r.open_ports
+                    or 445 in r.open_ports
+                )
+            ]
+            if not targets:
+                QMessageBox.information(
+                    self, "NetBIOS 识别",
+                    "没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n"
+                    "可先扫描发现设备，再对选中设备执行 NetBIOS 识别。"
+                )
+                return
+        else:
+            targets = [t for t in targets if t in online_ips]
+            if not targets:
+                QMessageBox.information(self, "NetBIOS 识别", "所选设备不在线，无法识别。")
+                return
+
+        if self.netbios_thread and self.netbios_thread.isRunning():
+            self.status_bar.showMessage("NetBIOS 识别进行中，请稍候...")
+            return
+        self.status_bar.showMessage(f"NetBIOS 识别启动：共 {len(targets)} 台设备...")
+        self.netbios_thread = NetbiosThread(targets, timeout=1.5)
+        self.netbios_thread.progress_signal.connect(
+            lambda i, t: self.status_bar.showMessage(f"NetBIOS 识别 [{i}/{t}] ...")
+        )
+        self.netbios_thread.result_signal.connect(self._on_netbios_result)
+        self.netbios_thread.finished_signal.connect(self._on_netbios_finished)
+        self.netbios_thread.start()
+
+    def _on_netbios_result(self, ip: str, d: dict):
+        """单台设备 NetBIOS 结果回传：合并信息并刷新表格行。"""
+        result = next((r for r in self.all_results if r.ip == ip), None)
+        if result is None:
+            return
+        self._apply_netbios(result, d)
+        self._upsert_table_row(result)
+
+    def _on_netbios_finished(self, summary: dict):
+        ok = summary.get("ok", 0)
+        fail = summary.get("fail", 0)
+        total = summary.get("total", 0)
+        msg = f"NetBIOS 识别完成：{total} 台，成功 {ok} 台"
+        if fail:
+            msg += f"，失败 {fail} 台（防火墙/非 Windows/未开放 137 等）"
+        self._audit(
+            audit_log.CAT_DEVICE, "NetBIOS 识别",
+            f"共 {total} 台 · 成功 {ok} · 失败 {fail}",
+        )
+        self.status_bar.showMessage(msg)
+        self._update_stats()
+
+    def _apply_netbios(self, result: ScanResult, d: dict):
+        """把 NetBIOS 查询结果合并进 ScanResult，并用权威信息补全设备指纹。"""
+        merge_netbios(result, d)
+
     # --- 表格操作 ---
 
     def _upsert_table_row(self, result: ScanResult):
@@ -2090,7 +2165,8 @@ class MainWindow(QMainWindow):
         if not details and result.services:
             details = [{"proto": p, "port": PROTOCOL_PORTS.get(p.upper(), 0), "banner": ""}
                        for p in result.services]
-        if not details and not getattr(result, "wmi_identified", False):
+        if (not details and not getattr(result, "wmi_identified", False)
+                and not getattr(result, "netbios_identified", False)):
             item.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
             return
         # 即使没有服务子项，也要展示 WMI 识别结果，故此处统一标记为可展开
@@ -2165,6 +2241,30 @@ class MainWindow(QMainWindow):
             wmi_child.setTextAlignment(0, Qt.AlignLeft | Qt.AlignVCenter)
             idx = item.childCount()
             item.addChild(wmi_child)
+            self.table.setFirstColumnSpanned(idx, parent_index, True)
+
+        # NetBIOS 轻量识别结果（若有）：作为一条子项展示计算机名/工作组/用户/MAC
+        if getattr(result, "netbios_identified", False):
+            nb_child = QTreeWidgetItem()
+            nb_child.setData(0, Qt.UserRole, "netbios")
+            nb_child.setData(0, Qt.UserRole + 2, result.ip)
+            parts = []
+            if result.netbios_name:
+                parts.append(result.netbios_name)
+            if result.netbios_workgroup:
+                parts.append(f"工作组:{result.netbios_workgroup}")
+            if result.netbios_user:
+                parts.append(f"用户:{result.netbios_user}")
+            if result.netbios_mac:
+                parts.append(f"MAC:{result.netbios_mac}")
+            nb_text = "NetBIOS, " + " · ".join(parts) if parts else "NetBIOS, 已识别"
+            nb_child.setIcon(0, self.style().standardIcon(QStyle.SP_ComputerIcon))
+            nb_child.setText(0, nb_text)
+            nb_child.setForeground(0, self._link_color())
+            nb_child.setToolTip(0, nb_text)
+            nb_child.setTextAlignment(0, Qt.AlignLeft | Qt.AlignVCenter)
+            idx = item.childCount()
+            item.addChild(nb_child)
             self.table.setFirstColumnSpanned(idx, parent_index, True)
 
         # IP 地址列 (col 0) 按内容自适应宽度，避免 IP 被截断
@@ -2270,6 +2370,16 @@ class MainWindow(QMainWindow):
                 tip += f" · SN: {result.wmi_serial}"
         elif getattr(result, "wmi_error", ""):
             tip += f" · WMI: 失败（{result.wmi_error}）"
+        if getattr(result, "netbios_identified", False):
+            tip += f" · NetBIOS: {result.netbios_name}".rstrip()
+            if result.netbios_workgroup:
+                tip += f" / {result.netbios_workgroup}"
+            if result.netbios_user:
+                tip += f" · 登录: {result.netbios_user}"
+            if result.netbios_mac:
+                tip += f" · MAC: {result.netbios_mac}"
+        elif getattr(result, "netbios_error", ""):
+            tip += f" · NetBIOS: 失败（{result.netbios_error}）"
         item.setToolTip(0, tip)
 
         # 状态列 (col 1)：预渲染电脑图标 (在线绿 / 离线灰) + 文字
@@ -2599,6 +2709,11 @@ class MainWindow(QMainWindow):
                 "wmi_os": r.wmi_os or "",
                 "wmi_user": r.wmi_user or "",
                 "wmi_domain": r.wmi_domain or "",
+                "netbios_identified": r.netbios_identified,
+                "netbios_name": r.netbios_name or "",
+                "netbios_workgroup": r.netbios_workgroup or "",
+                "netbios_user": r.netbios_user or "",
+                "netbios_mac": r.netbios_mac or "",
             })
         return {"time": time.time(), "devices": devices}
 
@@ -2684,6 +2799,10 @@ class MainWindow(QMainWindow):
         act_wmi_dev = QAction("WMI 识别 (管理员)...", self)
         act_wmi_dev.triggered.connect(lambda: self._run_wmi_identification([ip]))
         menu.addAction(act_wmi_dev)
+
+        act_netbios_dev = QAction("NetBIOS 识别（轻量）", self)
+        act_netbios_dev.triggered.connect(lambda: self._run_netbios_identification([ip]))
+        menu.addAction(act_netbios_dev)
 
         # 工具子菜单：快速启动内置网络工具
         tool_menu = menu.addMenu("工具")

@@ -75,7 +75,14 @@ class ScanResult:
     wmi_cpu: str = ""               # Win32_Processor.Name
     wmi_ram_gb: float = 0.0         # 物理内存（GB）
     wmi_last_boot: str = ""         # 最近启动时间（可读字符串）
-    wmi_error: str = ""             # 失败原因（成功时为空）
+    wmi_error: str = ""
+    # NetBIOS 轻量识别（UDP/137 NBSTAT，零凭据，不需管理员；作为 WMI 轻量补充）
+    netbios_identified: bool = False    # 是否成功取得 NetBIOS 信息
+    netbios_name: str = ""              # 计算机名（NetBIOS 唯一 <00> 名）
+    netbios_workgroup: str = ""         # 工作组 / 域（NetBIOS <00> 组名）
+    netbios_user: str = ""              # 当前登录用户（NetBIOS <03> 名）
+    netbios_mac: str = ""               # MAC 地址（NBSTAT 统计块，ARP 缺失时也能补到）
+    netbios_error: str = ""             # 失败原因（成功时为空）             # 失败原因（成功时为空）
 
     def to_dict(self) -> dict:
         if self.discovery_method:
@@ -113,5 +120,9 @@ class ScanResult:
                         if (self.wmi_os or self.wmi_os_version) else ""),
             "WMI域/用户": (f"{self.wmi_domain} / {self.wmi_user}".strip(" /")
                            if (self.wmi_domain or self.wmi_user) else ""),
+            "NetBIOS名称": self.netbios_name,
+            "NetBIOS工作组": self.netbios_workgroup,
+            "NetBIOS用户": self.netbios_user,
+            "NetBIOS MAC": self.netbios_mac,
             "备注": self.remark,
         }

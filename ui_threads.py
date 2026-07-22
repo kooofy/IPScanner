@@ -114,6 +114,39 @@ class WmiThread(QThread):
         self.finished_signal.emit({"total": total, "ok": ok, "fail": fail})
 
 
+class NetbiosThread(QThread):
+    """对一批在线设备执行 NetBIOS 轻量识别（后台线程，避免界面卡顿）。
+
+    逐台 UDP/137 NBSTAT 查询，零凭据、不需管理员；结果逐台回传，由主线程刷新。
+    """
+
+    progress_signal = pyqtSignal(int, int)        # current, total
+    result_signal = pyqtSignal(str, object)       # ip, netbios dict
+    finished_signal = pyqtSignal(dict)            # 汇总 {total, ok, fail}
+
+    def __init__(self, targets, timeout: float = 1.5):
+        super().__init__()
+        self.targets = list(targets)
+        self.timeout = timeout
+
+    def run(self):
+        from scanner import netbios_query
+        total = len(self.targets)
+        ok = fail = 0
+        for i, ip in enumerate(self.targets, 1):
+            try:
+                d = netbios_query(ip, timeout=self.timeout)
+            except Exception as e:  # noqa: BLE001
+                d = {"netbios_error": f"NetBIOS 查询异常: {e}"}
+            self.result_signal.emit(ip, d)
+            if d.get("netbios_error"):
+                fail += 1
+            else:
+                ok += 1
+            self.progress_signal.emit(i, total)
+        self.finished_signal.emit({"total": total, "ok": ok, "fail": fail})
+
+
 class SwitchMapThread(QThread):
     """后台执行交换机 SNMP 端口映射，避免界面卡顿。"""
 
