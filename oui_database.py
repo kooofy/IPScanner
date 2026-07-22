@@ -11,9 +11,9 @@ import sqlite3
 import os
 import functools
 import threading
-from app_paths import data_dir
+from app_paths import resource_dir
 
-_DB_PATH = os.path.join(data_dir(), "oui.db")
+_DB_PATH = os.path.join(resource_dir(), "oui.db")
 _LOCK = threading.Lock()
 
 # 进程级单例连接：扫描期并发查大量 MAC，避免每次查询都新建/关闭 SQLite 连接。
