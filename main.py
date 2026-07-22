@@ -13,7 +13,7 @@ os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon, QPixmap
 
 from main_window import MainWindow, STYLE_SHEET
 
@@ -98,6 +98,15 @@ def main():
     app.setFont(QFont("Microsoft YaHei", 9))
 
     window = MainWindow()
+    
+    import os
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "app_icon.png")
+    if os.path.exists(icon_path):
+        pixmap = QPixmap(icon_path)
+        if not pixmap.isNull():
+            window.setWindowIcon(QIcon(pixmap))
+            app.setWindowIcon(QIcon(pixmap))
+    
     window.show()
     sys.exit(app.exec_())
 

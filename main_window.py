@@ -31,9 +31,10 @@ from PyQt5.QtCore import (
     QSettings, QByteArray
 )
 from PyQt5.QtGui import (
-    QColor, QFont, QIcon, QPainter, QBrush, QPen, QPixmap, QPalette,
+    QColor, QFont, QIcon, QPainter, QBrush, QPen, QPixmap, QImage, QPalette,
     QCursor, QFontMetrics, QDesktopServices
 )
+from PyQt5.QtGui import QKeySequence
 from scanner import (NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS,
                       PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class,
                       merge_wmi, netbios_query, merge_netbios, get_ports_for_level,
@@ -48,6 +49,80 @@ from ui_icons import _build_dark_palette, get_pc_icons
 from ui_threads import MdnsThread, ScanThread, WmiThread, NetbiosThread
 from ui_utils import _detect_gateway
 from conflict_detector import detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
+
+
+def _gray_icon(base_icon):
+    """将图标转为灰度，用于菜单左列（与黑色复选标记形成明显色差）。"""
+    if not isinstance(base_icon, QIcon):
+        return base_icon
+    src = base_icon.pixmap(16, 16)
+    img = src.toImage().convertToFormat(QImage.Format_ARGB32)
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.alpha() == 0:
+                continue
+            g = int(0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+            img.setPixelColor(x, y, QColor(g, g, g, c.alpha()))
+    return QIcon(QPixmap.fromImage(img))
+
+
+def _make_tool_icon(kind, color="#555555", size=18):
+    """绘制工具栏小图标（IP/C/展开/收起），支持指定线条颜色以适配主题。
+    以 18x18 为设计基准等比缩放，任意 size 都居中。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.scale(size / 18.0, size / 18.0)  # 18 基准 -> size，内容自动居中铺满
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.5)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    if kind == "ip":
+        p.drawRoundedRect(1, 1, 16, 16, 2, 2)
+        font = p.font()
+        font.setBold(True)
+        font.setPointSize(6)
+        p.setFont(font)
+        p.drawText(QRect(1, 1, 16, 16), Qt.AlignCenter, "IP")
+    elif kind == "c":
+        p.drawRoundedRect(1, 1, 16, 16, 2, 2)
+        font = p.font()
+        font.setBold(True)
+        font.setPointSize(7)
+        p.setFont(font)
+        p.drawText(QRect(1, 1, 16, 16), Qt.AlignCenter, "C")
+    elif kind == "expand":
+        p.drawRect(1, 1, 16, 16)
+        p.drawLine(4, 7, 9, 12)
+        p.drawLine(9, 12, 14, 7)
+    elif kind == "collapse":
+        p.drawRect(1, 1, 16, 16)
+        p.drawLine(4, 10, 9, 5)
+        p.drawLine(9, 5, 14, 10)
+    p.end()
+    return QIcon(pm)
+
+
+def _make_pause_icon(color="#555555", size=18):
+    """绘制暂停图标（两竖条），线条颜色随主题，与工具栏小工具一致。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.scale(size / 18.0, size / 18.0)
+    pen = QPen(QColor(color))
+    pen.setWidthF(2.5)
+    pen.setCapStyle(Qt.FlatCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawLine(7, 3, 7, 15)
+    p.drawLine(11, 3, 11, 15)
+    p.end()
+    return QIcon(pm)
+
+
 from change_detector import detect_changes, get_change_summary
 
 
@@ -89,20 +164,66 @@ QPushButton:pressed {
     background-color: #C0C0C0;
 }
 QPushButton#primaryBtn {
-    background-color: #0078D7;
-    color: white;
-    font-weight: bold;
-    border: 1px solid #005A9E;
+    background-color: #F5F5F5;
+    color: #666666;
+    font-size: 18px;
+    padding: 4px 14px;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
 }
 QPushButton#primaryBtn:hover {
-    background-color: #006CBE;
+    background-color: #EBEBEB;
 }
 QPushButton#primaryBtn:pressed {
-    background-color: #005A9E;
+    background-color: #DCDCDC;
 }
 QPushButton#primaryBtn:disabled {
-    background-color: #A0C4E8;
-    border-color: #A0C4E8;
+    background-color: #FAFAFA;
+    color: #DCDCDC;
+    border-color: #EBEBEB;
+}
+QPushButton#stopBtn {
+    background-color: #F5F5F5;
+    color: #666666;
+    font-weight: bold;
+    font-size: 18px;
+    letter-spacing: 2px;
+    padding: 4px 12px;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#stopBtn:hover {
+    background-color: #EBEBEB;
+}
+QPushButton#stopBtn:pressed {
+    background-color: #DCDCDC;
+}
+QPushButton#stopBtn:disabled {
+    background-color: #FAFAFA;
+    color: #DCDCDC;
+    border-color: #EBEBEB;
+}
+QPushButton#toolBtnGreen {
+    background-color: #E8F5E9;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#toolBtnGreen:hover {
+    background-color: #C8E6C9;
+}
+QPushButton#toolBtnGreen:pressed {
+    background-color: #A5D6A7;
+}
+QPushButton#toolBtnYellow {
+    background-color: #FFF9C4;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#toolBtnYellow:hover {
+    background-color: #FFF59D;
+}
+QPushButton#toolBtnYellow:pressed {
+    background-color: #FFF176;
 }
 QPushButton#dangerBtn {
     background-color: #E8E8E8;
@@ -168,6 +289,7 @@ QLabel {
 QTreeWidget {
     font-family: "Microsoft YaHei", "Segoe UI";
     font-size: 12px;
+    color: #000000;
     gridline-color: #E8E8E8;
     background-color: #FFFFFF;
     alternate-background-color: #F7F7F7;
@@ -242,21 +364,66 @@ QListWidget::item {
 QListWidget::item:hover {
     background-color: #E5F3FF;
 }
+QMenuBar {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    background-color: #F5F5F5;
+    border-bottom: 1px solid #D0D0D0;
+    padding: 2px 4px;
+    spacing: 2px;
+}
+QMenuBar::item {
+    padding: 5px 12px;
+    background-color: transparent;
+    border-radius: 3px;
+}
+QMenuBar::item:selected {
+    background-color: #D0E8FF;
+    border: 1px solid #B0D0F0;
+}
+QMenuBar::item:pressed {
+    background-color: #B0D8FF;
+    border: 1px solid #90C0F0;
+}
 QMenu {
     font-family: "Microsoft YaHei", "Segoe UI";
-    font-size: 12px;
-    border: 1px solid #CCCCCC;
-    border-radius: 1px;
+    font-size: 13px;
+    border: 1px solid #D0D0D0;
     background-color: #FFFFFF;
-    padding: 2px;
+    padding: 4px 0;
+    border-radius: 4px;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #D0D0D0;
+    margin: 4px 0;
 }
 QMenu::item {
-    padding: 5px 20px;
-    border-radius: 1px;
+    padding: 6px 24px 6px 10px;
+    background-color: transparent;
+    min-width: 200px;
+    max-width: 320px;
+}
+QMenu::icon {
+    margin-right: 8px;
 }
 QMenu::item:selected {
-    background-color: #CCE8FF;
+    background-color: #E8F4FD;
     color: #000000;
+}
+QMenu::item:disabled {
+    color: #A0A0A0;
+    background-color: transparent;
+}
+QMenu::indicator {
+    width: 13px;
+    height: 13px;
+    margin-left: 2px;
+}
+QMenu::right-arrow {
+    width: 12px;
+    height: 12px;
+    padding-right: 4px;
 }
 QScrollBar:vertical {
     border: none;
@@ -340,21 +507,55 @@ QPushButton:pressed {
     background-color: #2D2D30;
 }
 QPushButton#primaryBtn {
-    background-color: #0E639C;
-    color: #FFFFFF;
-    font-weight: bold;
-    border: 1px solid #0A4F7A;
+    background-color: #3C3C3C;
+    color: #E0E0E0;
+    font-size: 18px;
+    padding: 4px 14px;
+    border: 1px solid #555555;
+    border-radius: 2px;
 }
 QPushButton#primaryBtn:hover {
-    background-color: #1177BB;
+    background-color: #4A4A4A;
 }
 QPushButton#primaryBtn:pressed {
-    background-color: #0A4F7A;
+    background-color: #2A2A2A;
 }
 QPushButton#primaryBtn:disabled {
-    background-color: #37373D;
-    border-color: #37373D;
-    color: #777777;
+    background-color: #2D2D30;
+    color: #555555;
+    border-color: #3F3F46;
+}
+QPushButton#stopBtn {
+    background-color: #3C3C3C;
+    color: #E0E0E0;
+    font-weight: bold;
+    font-size: 18px;
+    letter-spacing: 2px;
+    padding: 4px 12px;
+    border: 1px solid #555555;
+    border-radius: 2px;
+}
+QPushButton#stopBtn:hover {
+    background-color: #4A4A4A;
+}
+QPushButton#stopBtn:pressed {
+    background-color: #2A2A2A;
+}
+QPushButton#stopBtn:disabled {
+    background-color: #2D2D30;
+    color: #555555;
+    border-color: #3F3F46;
+}
+QPushButton#toolBtnGreen, QPushButton#toolBtnYellow {
+    background-color: #3C3C3C;
+    border: 1px solid #555555;
+    border-radius: 2px;
+}
+QPushButton#toolBtnGreen:hover, QPushButton#toolBtnYellow:hover {
+    background-color: #4A4A4A;
+}
+QPushButton#toolBtnGreen:pressed, QPushButton#toolBtnYellow:pressed {
+    background-color: #2A2A2A;
 }
 QPushButton#dangerBtn {
     background-color: #3E3E42;
@@ -366,7 +567,7 @@ QPushButton#dangerBtn:hover {
 }
 QPushButton#dangerBtn:disabled {
     color: #6B5B5B;
-    border-color: #5B4B4B;
+    border-color: #5B4B5B;
 }
 QPushButton#successBtn {
     background-color: #2A3A36;
@@ -423,6 +624,7 @@ QLabel {
 QTreeWidget {
     font-family: "Microsoft YaHei", "Segoe UI";
     font-size: 12px;
+    color: #E0E0E0;
     gridline-color: #3F3F46;
     background-color: #1E1E1E;
     alternate-background-color: #252526;
@@ -498,23 +700,67 @@ QListWidget::item {
 QListWidget::item:hover {
     background-color: #2A2D2E;
 }
+QMenuBar {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    background-color: #252526;
+    border-bottom: 1px solid #3F3F46;
+    padding: 2px 4px;
+    spacing: 2px;
+}
+QMenuBar::item {
+    padding: 5px 12px;
+    background-color: transparent;
+    border-radius: 3px;
+}
+QMenuBar::item:selected {
+    background-color: #3D3D40;
+    border: 1px solid #4D4D50;
+}
+QMenuBar::item:pressed {
+    background-color: #094771;
+    border: 1px solid #094771;
+}
 QMenu {
     font-family: "Microsoft YaHei", "Segoe UI";
-    font-size: 12px;
-    border: 1px solid #3F3F46;
-    border-radius: 1px;
+    font-size: 13px;
+    border: 1px solid #454545;
     background-color: #2D2D30;
     color: #E0E0E0;
-    padding: 2px;
+    padding: 4px 0;
+    border-radius: 4px;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #454545;
+    margin: 4px 0;
 }
 QMenu::item {
-    padding: 5px 20px;
-    border-radius: 1px;
-    color: #E0E0E0;
+    padding: 6px 24px 6px 10px;
+    background-color: transparent;
+    min-width: 200px;
+    max-width: 320px;
+}
+QMenu::icon {
+    margin-right: 8px;
 }
 QMenu::item:selected {
     background-color: #094771;
     color: #FFFFFF;
+}
+QMenu::item:disabled {
+    color: #666666;
+    background-color: transparent;
+}
+QMenu::indicator {
+    width: 13px;
+    height: 13px;
+    margin-left: 2px;
+}
+QMenu::right-arrow {
+    width: 12px;
+    height: 12px;
+    padding-right: 4px;
 }
 QScrollBar:vertical {
     border: none;
@@ -686,109 +932,52 @@ class MainWindow(QMainWindow):
         self.scan_btn.setIconSize(QSize(_BIG_ICON, _BIG_ICON))
         self.scan_btn.setObjectName("primaryBtn")
         self.scan_btn.setFixedSize(100, _BIG_BTN_H)  # 固定宽高，避免被布局拉宽
-        self.scan_btn.setStyleSheet(
-            "QPushButton#primaryBtn { background-color: white; color: #333333; font-size: 18px; font-weight: normal; spacing: 20px; padding: 4px 14px; border: 1px solid #CCCCCC; border-radius: 2px; min-height: 36px; max-height: 36px; }"
-            "QPushButton#primaryBtn:hover { background-color: #F5F5F5; }"
-            "QPushButton#primaryBtn:pressed { background-color: #EBEBEB; }"
-            "QPushButton#primaryBtn:disabled { background-color: #FAFAFA; color: #CCCCCC; border-color: #EBEBEB; }"
-        )
 
         # 暂停/停止按钮 - 与扫描按钮同高的大按钮
-        self.stop_btn = QPushButton("II")
+        self.stop_btn = QPushButton()
         self.stop_btn.setObjectName("stopBtn")
         self.stop_btn.setFixedSize(_BIG_BTN_H, _BIG_BTN_H)  # 正方形暂停按钮
+        self.stop_btn.setIcon(_make_pause_icon())
+        self.stop_btn.setIconSize(QSize(_BIG_BTN_H - 6, _BIG_BTN_H - 6))
         self.stop_btn.setEnabled(False)
         self.stop_btn.setToolTip("停止扫描")
-        self.stop_btn.setStyleSheet(
-            "QPushButton#stopBtn { background-color: #F5F5F5; color: #666666; font-weight: bold; font-size: 18px; letter-spacing: 2px; padding: 4px 12px; border: 1px solid #CCCCCC; border-radius: 2px; min-height: 36px; max-height: 36px; }"
-            "QPushButton#stopBtn:hover { background-color: #EBEBEB; }"
-            "QPushButton#stopBtn:pressed { background-color: #DCDCDC; }"
-            "QPushButton#stopBtn:disabled { background-color: #FAFAFA; color: #DCDCDC; border-color: #EBEBEB; }"
-        )
 
         tb1.addWidget(self.scan_btn)
         tb1.addWidget(self.stop_btn)
 
-        # 四个快捷工具按钮（对齐 AIP 右侧工具栏）
-        _SMALL_BTN = 30
-        _ICON_SZ = 18
+        # 四个快捷工具按钮（对齐 AIP 右侧工具栏），高度与扫描/暂停等大
+        _SMALL_BTN = _BIG_BTN_H  # 36，与扫描/暂停按钮等高
+        _ICON_SZ = 22            # 按 36/30 比例放大图标（18 -> 22）
 
-        def _make_tool_icon(kind):
-            pm = QPixmap(_ICON_SZ, _ICON_SZ)
-            pm.fill(Qt.transparent)
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.Antialiasing, True)
-            pen = QPen(QColor("#555555"))
-            pen.setWidthF(1.5)
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            if kind == "ip":
-                p.drawRoundedRect(1, 1, 16, 16, 2, 2)
-                font = p.font()
-                font.setBold(True)
-                font.setPointSize(6)
-                p.setFont(font)
-                p.drawText(QRect(1, 1, 16, 16), Qt.AlignCenter, "IP")
-            elif kind == "c":
-                p.drawRoundedRect(1, 1, 16, 16, 2, 2)
-                font = p.font()
-                font.setBold(True)
-                font.setPointSize(7)
-                p.setFont(font)
-                p.drawText(QRect(1, 1, 16, 16), Qt.AlignCenter, "C")
-            elif kind == "expand":
-                p.drawRect(1, 1, 16, 16)
-                p.drawLine(4, 7, 9, 12)
-                p.drawLine(9, 12, 14, 7)
-            elif kind == "collapse":
-                p.drawRect(1, 1, 16, 16)
-                p.drawLine(4, 10, 9, 5)
-                p.drawLine(9, 5, 14, 10)
-            p.end()
-            return QIcon(pm)
-
-        _green_style = (
-            "QPushButton#toolBtnGreen { background-color: #E8F5E9; border: 1px solid #CCCCCC; border-radius: 2px; }"
-            "QPushButton#toolBtnGreen:hover { background-color: #C8E6C9; }"
-            "QPushButton#toolBtnGreen:pressed { background-color: #A5D6A7; }"
-        )
-        _yellow_style = (
-            "QPushButton#toolBtnYellow { background-color: #FFF9C4; border: 1px solid #CCCCCC; border-radius: 2px; }"
-            "QPushButton#toolBtnYellow:hover { background-color: #FFF59D; }"
-            "QPushButton#toolBtnYellow:pressed { background-color: #FFF176; }"
-        )
+        _icon_color = "#FFFFFF" if self.dark_mode else "#555555"
 
         self.local_subnet_btn = QPushButton()
         self.local_subnet_btn.setObjectName("toolBtnGreen")
         self.local_subnet_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
-        self.local_subnet_btn.setIcon(_make_tool_icon("ip"))
+        self.local_subnet_btn.setIcon(_make_tool_icon("ip", _icon_color, _ICON_SZ))
         self.local_subnet_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.local_subnet_btn.setToolTip("扫描本机所在子网")
-        self.local_subnet_btn.setStyleSheet(_green_style)
 
         self.c_subnet_btn = QPushButton()
         self.c_subnet_btn.setObjectName("toolBtnGreen")
         self.c_subnet_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
-        self.c_subnet_btn.setIcon(_make_tool_icon("c"))
+        self.c_subnet_btn.setIcon(_make_tool_icon("c", _icon_color, _ICON_SZ))
         self.c_subnet_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.c_subnet_btn.setToolTip("扫描 C 类子网")
-        self.c_subnet_btn.setStyleSheet(_green_style)
 
         self.expand_btn = QPushButton()
         self.expand_btn.setObjectName("toolBtnYellow")
         self.expand_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
-        self.expand_btn.setIcon(_make_tool_icon("expand"))
+        self.expand_btn.setIcon(_make_tool_icon("expand", _icon_color, _ICON_SZ))
         self.expand_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.expand_btn.setToolTip("全选并展开所有项")
-        self.expand_btn.setStyleSheet(_yellow_style)
 
         self.collapse_btn = QPushButton()
         self.collapse_btn.setObjectName("toolBtnYellow")
         self.collapse_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
-        self.collapse_btn.setIcon(_make_tool_icon("collapse"))
+        self.collapse_btn.setIcon(_make_tool_icon("collapse", _icon_color, _ICON_SZ))
         self.collapse_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.collapse_btn.setToolTip("收起所有项")
-        self.collapse_btn.setStyleSheet(_yellow_style)
 
         tb1.addWidget(self.local_subnet_btn)
         tb1.addSpacing(2)
@@ -941,23 +1130,13 @@ class MainWindow(QMainWindow):
         # 文件菜单
         file_menu = menubar.addMenu("文件(&F)")
 
-        act_import = QAction("导入 Excel 到地址库", self)
-        act_import.triggered.connect(self._import_excel)
-        file_menu.addAction(act_import)
-
-        act_template = QAction("生成 Excel 模板", self)
-        act_template.triggered.connect(self._generate_template)
-        file_menu.addAction(act_template)
-
-        file_menu.addSeparator()
-
         self.act_export = QAction("导出扫描结果", self)
+        self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self._export_results)
         file_menu.addAction(self.act_export)
 
-        file_menu.addSeparator()
-
         act_exit = QAction("退出", self)
+        act_exit.setShortcut(QKeySequence("Alt+F4"))
         act_exit.triggered.connect(self.close)
         file_menu.addAction(act_exit)
 
@@ -965,14 +1144,17 @@ class MainWindow(QMainWindow):
         lib_menu = menubar.addMenu("地址库(&L)")
 
         act_lib_manage = QAction("管理地址库...", self)
+        act_lib_manage.setShortcut(QKeySequence("Ctrl+Shift+M"))
         act_lib_manage.triggered.connect(self._open_library_manager)
         lib_menu.addAction(act_lib_manage)
 
-        act_lib_import = QAction("导入 Excel 到地址库", self)
+        act_lib_import = QAction("导入地址库", self)
+        act_lib_import.setShortcut(QKeySequence("Ctrl+I"))
         act_lib_import.triggered.connect(self._import_excel)
         lib_menu.addAction(act_lib_import)
 
-        act_lib_export = QAction("导出地址库为 Excel", self)
+        act_lib_export = QAction("导出地址库", self)
+        act_lib_export.setShortcut(QKeySequence("Ctrl+Shift+I"))
         act_lib_export.triggered.connect(self._export_library)
         lib_menu.addAction(act_lib_export)
 
@@ -980,57 +1162,51 @@ class MainWindow(QMainWindow):
         scan_menu = menubar.addMenu("扫描(&S)")
 
         act_scan = QAction("开始扫描", self)
+        act_scan.setShortcut(QKeySequence("F5"))
         act_scan.triggered.connect(self._start_scan)
         scan_menu.addAction(act_scan)
 
         act_stop = QAction("停止扫描", self)
+        act_stop.setShortcut(QKeySequence("Esc"))
         act_stop.triggered.connect(self._stop_scan)
         scan_menu.addAction(act_stop)
 
         scan_menu.addSeparator()
 
-        act_scan_local = QAction("扫描本机所在子网", self)
-        act_scan_local.triggered.connect(self._scan_local_subnet)
-        scan_menu.addAction(act_scan_local)
+        act_add_range = QAction("添加网段", self)
+        act_add_range.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        act_add_range.triggered.connect(self._add_ip_range)
+        scan_menu.addAction(act_add_range)
 
-        act_scan_c = QAction("扫描 C 类子网", self)
-        act_scan_c.triggered.connect(self._scan_c_class_subnet)
-        scan_menu.addAction(act_scan_c)
-
-        scan_menu.addSeparator()
+        act_clear_ranges = QAction("清空网段", self)
+        act_clear_ranges.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        act_clear_ranges.triggered.connect(self._clear_ranges)
+        scan_menu.addAction(act_clear_ranges)
 
         self.act_clear = QAction("清空结果", self)
+        self.act_clear.setShortcut(QKeySequence("Ctrl+Shift+K"))
         self.act_clear.triggered.connect(self._clear_results)
         scan_menu.addAction(self.act_clear)
 
-        act_history = QAction("历史对比...", self)
-        act_history.triggered.connect(self._open_history_compare)
-        scan_menu.addAction(act_history)
+        scan_menu.addSeparator()
 
-        act_history_query = QAction("历史检索...", self)
-        act_history_query.setToolTip("跨快照按类型/网段/首见时间/IP 检索历史设备")
-        act_history_query.triggered.connect(self._open_history_query)
-        scan_menu.addAction(act_history_query)
+        # 发现子菜单：子网扫描 + 独立 mDNS 发现
+        discover_sub = scan_menu.addMenu("发现")
+        act_scan_local = QAction("扫描本机所在子网", self)
+        act_scan_local.setShortcut(QKeySequence("Ctrl+1"))
+        act_scan_local.triggered.connect(self._scan_local_subnet)
+        discover_sub.addAction(act_scan_local)
 
-        self.act_conflict = QAction("冲突检测", self)
-        self.act_conflict.setToolTip("检测 IP/MAC 冲突、未知设备等异常")
-        self.act_conflict.triggered.connect(self._run_conflict_detection)
-        scan_menu.addAction(self.act_conflict)
+        act_scan_c = QAction("扫描 C 类子网", self)
+        act_scan_c.setShortcut(QKeySequence("Ctrl+2"))
+        act_scan_c.triggered.connect(self._scan_c_class_subnet)
+        discover_sub.addAction(act_scan_c)
 
-        self.act_change = QAction("变更检测", self)
-        self.act_change.setToolTip("对比上次扫描快照，发现新增/消失/替换/改址等设备变动")
-        self.act_change.triggered.connect(lambda: self._run_change_detection(silent=False))
-        scan_menu.addAction(self.act_change)
-
-        act_subnet_util = QAction("子网利用率...", self)
-        act_subnet_util.setToolTip("按 /24 子网聚合，查看各网段在线占比与设备分布")
-        act_subnet_util.triggered.connect(self._show_subnet_utilization)
-        scan_menu.addAction(act_subnet_util)
-
-        act_audit_log = QAction("审计日志...", self)
-        act_audit_log.setToolTip("查看扫描活动记录（开始/停止/完成、冲突检测等）")
-        act_audit_log.triggered.connect(self._show_audit_log)
-        scan_menu.addAction(act_audit_log)
+        act_mdns = QAction("网络 mDNS 发现", self)
+        act_mdns.setShortcut(QKeySequence("Ctrl+3"))
+        act_mdns.setToolTip("对当前本地链路做 mDNS/DNS-SD 组播发现，发现打印机/NAS/Apple 设备等")
+        act_mdns.triggered.connect(self._run_mdns_discovery)
+        discover_sub.addAction(act_mdns)
 
         scan_menu.addSeparator()
 
@@ -1039,12 +1215,6 @@ class MainWindow(QMainWindow):
 
         # mDNS 设备发现：扫描时默认开启，可关闭
         scan_menu.addAction(self.mdns_check)
-
-        # 独立 mDNS 发现：不扫描也能量全网 mDNS 设备（合并进结果树）
-        act_mdns = QAction("网络 mDNS 发现", self)
-        act_mdns.setToolTip("对当前本地链路做 mDNS/DNS-SD 组播发现，发现打印机/NAS/Apple 设备等")
-        act_mdns.triggered.connect(self._run_mdns_discovery)
-        scan_menu.addAction(act_mdns)
 
         # 端口探测方式：全连接 / SYN 半开 / UDP（单选项）
         self.tcp_mode_group = QActionGroup(self)
@@ -1077,22 +1247,11 @@ class MainWindow(QMainWindow):
             )
             level_sub.addAction(_a)
 
-        act_settings = QAction("扫描设置...", self)
-        act_settings.triggered.connect(self._open_scan_settings)
-        scan_menu.addAction(act_settings)
-
-        scan_menu.addSeparator()
-
-        act_add_range = QAction("添加网段", self)
-        act_add_range.triggered.connect(self._add_ip_range)
-        scan_menu.addAction(act_add_range)
-
-        act_clear_ranges = QAction("清空网段", self)
-        act_clear_ranges.triggered.connect(self._clear_ranges)
-        scan_menu.addAction(act_clear_ranges)
-
-        # 资源菜单 (应用层协议勾选)
-        res_menu = menubar.addMenu("资源(&R)")
+        settings_sub = scan_menu.addMenu("扫描设置")
+        act_open_settings = QAction("打开扫描设置对话框...", self)
+        act_open_settings.triggered.connect(self._open_scan_settings)
+        settings_sub.addAction(act_open_settings)
+        settings_sub.addSeparator()
         for _proto in sorted(PROTOCOL_PORTS.keys()):
             _act = QAction(_proto, self, checkable=True)
             _act.setToolTip(f"扫描 {_proto} 服务")
@@ -1100,27 +1259,73 @@ class MainWindow(QMainWindow):
             _act.toggled.connect(
                 lambda _checked, _p=_proto: self._toggle_protocol(_p, _checked)
             )
-            res_menu.addAction(_act)
+            settings_sub.addAction(_act)
+
+        # 分析菜单（顶级菜单，从扫描子菜单提升）
+        analysis_menu = menubar.addMenu("分析(&A)")
+
+        act_history = QAction("历史对比...", self)
+        act_history.setShortcut(QKeySequence("Ctrl+H"))
+        act_history.triggered.connect(self._open_history_compare)
+        analysis_menu.addAction(act_history)
+
+        act_history_query = QAction("历史检索...", self)
+        act_history_query.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        act_history_query.setToolTip("跨快照按类型/网段/首见时间/IP 检索历史设备")
+        act_history_query.triggered.connect(self._open_history_query)
+        analysis_menu.addAction(act_history_query)
+
+        analysis_menu.addSeparator()
+
+        self.act_conflict = QAction("冲突检测", self)
+        self.act_conflict.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        self.act_conflict.setToolTip("检测 IP/MAC 冲突、未知设备等异常")
+        self.act_conflict.triggered.connect(self._run_conflict_detection)
+        analysis_menu.addAction(self.act_conflict)
+
+        self.act_change = QAction("变更检测", self)
+        self.act_change.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        self.act_change.setToolTip("对比上次扫描快照，发现新增/消失/替换/改址等设备变动")
+        self.act_change.triggered.connect(lambda: self._run_change_detection(silent=False))
+        analysis_menu.addAction(self.act_change)
+
+        analysis_menu.addSeparator()
+
+        act_subnet_util = QAction("子网利用率...", self)
+        act_subnet_util.setShortcut(QKeySequence("Ctrl+U"))
+        act_subnet_util.setToolTip("按 /24 子网聚合，查看各网段在线占比与设备分布")
+        act_subnet_util.triggered.connect(self._show_subnet_utilization)
+        analysis_menu.addAction(act_subnet_util)
+
+        act_audit_log = QAction("审计日志...", self)
+        act_audit_log.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        act_audit_log.setToolTip("查看扫描活动记录（开始/停止/完成、冲突检测等）")
+        act_audit_log.triggered.connect(self._show_audit_log)
+        analysis_menu.addAction(act_audit_log)
 
         # 工具菜单 (内置 Ping/Tracert/Telnet/SSH 等网络工具, P2)
         tool_menu = menubar.addMenu("工具(&T)")
 
         act_ping = QAction("Ping (持续)", self)
+        act_ping.setShortcut(QKeySequence("Ctrl+P"))
         act_ping.setToolTip("对目标执行持续 Ping (ping -t)")
         act_ping.triggered.connect(lambda: self._launch_network_tool("ping"))
         tool_menu.addAction(act_ping)
 
         act_tracert = QAction("Tracert (路由追踪)", self)
+        act_tracert.setShortcut(QKeySequence("Ctrl+R"))
         act_tracert.setToolTip("对目标执行路由追踪 (tracert)")
         act_tracert.triggered.connect(lambda: self._launch_network_tool("tracert"))
         tool_menu.addAction(act_tracert)
 
         act_telnet = QAction("Telnet", self)
+        act_telnet.setShortcut(QKeySequence("Ctrl+N"))
         act_telnet.setToolTip("对目标启动 Telnet 会话")
         act_telnet.triggered.connect(lambda: self._launch_network_tool("telnet"))
         tool_menu.addAction(act_telnet)
 
         act_ssh = QAction("SSH", self)
+        act_ssh.setShortcut(QKeySequence("Ctrl+Shift+S"))
         act_ssh.setToolTip("对目标启动 SSH 会话 (需 OpenSSH 客户端)")
         act_ssh.triggered.connect(lambda: self._launch_network_tool("ssh"))
         tool_menu.addAction(act_ssh)
@@ -1128,11 +1333,13 @@ class MainWindow(QMainWindow):
         tool_menu.addSeparator()
 
         act_rdp = QAction("远程桌面 (RDP)", self)
+        act_rdp.setShortcut(QKeySequence("Ctrl+M"))
         act_rdp.setToolTip("用系统 mstsc 远程桌面连接目标")
         act_rdp.triggered.connect(lambda: self._launch_network_tool("rdp"))
         tool_menu.addAction(act_rdp)
 
         act_cmd = QAction("打开命令提示符", self)
+        act_cmd.setShortcut(QKeySequence("Ctrl+J"))
         act_cmd.setToolTip("打开以目标命名的命令提示符窗口")
         act_cmd.triggered.connect(lambda: self._launch_network_tool("cmd"))
         tool_menu.addAction(act_cmd)
@@ -1151,6 +1358,7 @@ class MainWindow(QMainWindow):
 
         tool_menu.addSeparator()
         act_wmi = QAction("WMI 设备识别 (需管理员)...", self)
+        act_wmi.setShortcut(QKeySequence("Ctrl+Shift+W"))
         act_wmi.setToolTip("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据")
         act_wmi.triggered.connect(lambda: self._run_wmi_identification())
         tool_menu.addAction(act_wmi)
@@ -1165,9 +1373,10 @@ class MainWindow(QMainWindow):
         act_switch_map.triggered.connect(self._show_switch_port_mapping)
         tool_menu.addAction(act_switch_map)
 
-        # 视图菜单
-        view_menu = menubar.addMenu("视图(&V)")
+        # 视图菜单（仿 Advanced IP Scanner「查看」菜单：左列复选/图标，右列文字）
+        view_menu = menubar.addMenu("查看(&V)")
         self.act_dark = QAction("深色模式", self)
+        self.act_dark.setShortcut(QKeySequence("Ctrl+D"))
         self.act_dark.setCheckable(True)
         self.act_dark.setChecked(self.dark_mode)
         self.act_dark.triggered.connect(self._toggle_dark_mode)
@@ -1193,16 +1402,22 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
 
         act_expand = QAction("展开全部", self)
+        act_expand.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_ArrowDown)))
+        act_expand.setShortcut(QKeySequence("Ctrl++"))
         act_expand.triggered.connect(self._expand_all_items)
         view_menu.addAction(act_expand)
 
         act_collapse = QAction("收起全部", self)
+        act_collapse.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_ArrowUp)))
+        act_collapse.setShortcut(QKeySequence("Ctrl+-"))
         act_collapse.triggered.connect(self._collapse_all_items)
         view_menu.addAction(act_collapse)
 
         view_menu.addSeparator()
 
         act_topology = QAction("拓扑视图...", self)
+        act_topology.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_DriveNetIcon)))
+        act_topology.setShortcut(QKeySequence("Ctrl+T"))
         act_topology.triggered.connect(self._open_topology)
         view_menu.addAction(act_topology)
 
@@ -1224,6 +1439,7 @@ class MainWindow(QMainWindow):
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
         act_about = QAction("关于", self)
+        act_about.setShortcut(QKeySequence("F1"))
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
 
@@ -1258,6 +1474,21 @@ class MainWindow(QMainWindow):
             self.excel_label.setStyleSheet(f"color: {_muted}; font-size: 11px;")
         if hasattr(self, "sep"):
             self.sep.setStyleSheet(f"color: {_sep};")
+        # 工具栏小图标随主题重绘线条颜色
+        _icon_color = "#FFFFFF" if dark else "#555555"
+        if hasattr(self, "local_subnet_btn"):
+            _sz = self.local_subnet_btn.iconSize().width()
+            self.local_subnet_btn.setIcon(_make_tool_icon("ip", _icon_color, _sz))
+            self.c_subnet_btn.setIcon(_make_tool_icon("c", _icon_color, _sz))
+            self.expand_btn.setIcon(_make_tool_icon("expand", _icon_color, _sz))
+            self.collapse_btn.setIcon(_make_tool_icon("collapse", _icon_color, _sz))
+            self.stop_btn.setIcon(_make_pause_icon(_icon_color, self.stop_btn.iconSize().width()))
+        # 已存在表格项的 IP 列前景色随主题刷新（冲突标记保持原色）
+        if hasattr(self, "_ip_item_map"):
+            _fg = self._default_fg_color()
+            for ip, item in self._ip_item_map.items():
+                if ip not in getattr(self, "_conflict_ips", {}):
+                    item.setForeground(0, _fg)
 
     def _toggle_dark_mode(self, checked: bool):
         self.dark_mode = checked
@@ -1932,7 +2163,7 @@ class MainWindow(QMainWindow):
     def _default_fg_color(self):
         """返回当前主题的默认前景色。"""
         if self.dark_mode:
-            return QColor(224, 224, 224)
+            return QColor(255, 255, 255)
         return QColor(0, 0, 0)
 
     def _show_subnet_utilization(self):
@@ -2390,6 +2621,7 @@ class MainWindow(QMainWindow):
         item.setText(0, result.ip)
         item.setData(0, Qt.UserRole, _ip_to_int(result.ip))  # IP 数值排序键
         item.setFont(0, _FONT_CONSOLAS_10)
+        item.setForeground(0, self._default_fg_color())
 
         # 工具提示：标注发现方式（ARP 探测发现的静默主机）
         tip = result.ip
