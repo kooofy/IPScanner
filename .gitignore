@@ -37,4 +37,5 @@ audit_log.db-wal
 # PyInstaller 构建产物
 build/
 dist/
+dist_new/
 *.spec
