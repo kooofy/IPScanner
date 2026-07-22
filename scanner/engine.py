@@ -13,6 +13,7 @@ import os
 import locale
 import random
 import ctypes
+import statistics
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 try:
@@ -35,6 +36,26 @@ from .snmp import snmp_get_system
 from .models import ScanResult
 
 
+# ── RTT 自适应超时（仅 TCP connect 模式） ──
+_RTT_WIN = 20          # 滚动窗口样本数
+_RTT_FACTOR = 2.0      # 超时 = 中位数 RTT × 因子（留探测余量）
+_RTT_MIN = 0.15        # 最短超时(秒)，避免局域网过激
+_RTT_MAX = 1.5         # 最长超时(秒)，高延迟网也不至于太慢
+
+
+def adaptive_timeout_from_samples(samples, factor=_RTT_FACTOR,
+                                  min_to=_RTT_MIN, max_to=_RTT_MAX):
+    """根据开放端口 connect 耗时样本，返回夹紧后的 connect 超时(秒)。
+
+    样本为空返回默认 0.5；否则取中位数 × 因子并夹紧到 [min_to, max_to]。
+    局域网(RTT 个位数 ms)会收敛到 min_to，显著快于固定 0.5s。
+    """
+    if not samples:
+        return 0.5
+    med = statistics.median(samples)
+    return max(min_to, min(max_to, med * factor))
+
+
 class NetworkScanner:
     """网络扫描器主类"""
 
@@ -49,7 +70,7 @@ class NetworkScanner:
     def scan(self, ip_ranges: List[str], timeout_ms: int = 1000,
              max_threads: int = 100, scan_ports_flag: bool = False,
              protocols: List[str] = None, tcp_scan_mode: str = "connect",
-             mdns_discovery: bool = True,
+             mdns_discovery: bool = True, ports: List[int] = None,
              progress_callback=None, result_callback=None) -> List[ScanResult]:
         """
         扫描多个 IP 范围。
@@ -119,11 +140,29 @@ class NetworkScanner:
             max_workers=max(10, min(50, len(all_ips)))
         )
 
+        # RTT 自适应超时（仅 TCP connect 模式）状态机
+        _rtt_window = []
+        _port_timeout = 0.5
+        self.last_adaptive_timeout = 0.5
+
+        def _on_rtt(rtt):
+            if rtt <= 0:
+                return
+            _rtt_window.append(rtt)
+            if len(_rtt_window) > _RTT_WIN:
+                _rtt_window.pop(0)
+            nonlocal _port_timeout
+            _port_timeout = adaptive_timeout_from_samples(_rtt_window)
+
         def enrich_device(ip: str):
             """富化单个在线设备：MAC / 厂商 / 主机名 / 端口 / 服务。"""
             if self._stop_flag:
                 return
             result = results[ip]
+
+            # RTT 自适应超时（仅 TCP connect 模式）：用已探设备的开放端口 connect
+            # 耗时估计网络延迟，滚动窗口中位数动态夹紧 connect 超时，局域网可显著提速。
+            _pto = _port_timeout if effective_tcp_mode == "connect" else 0.5
 
             # MAC 地址：优先保留已获取的 MAC（如 ARP 主动探测所得），
             # 否则 per-IP 查询 ARP 缓存（对刚 ping 通的在线主机可靠）
@@ -139,7 +178,8 @@ class NetworkScanner:
             if scan_ports_flag:
                 result.scan_method = effective_tcp_mode
                 result.open_ports = scan_ports(
-                    ip, timeout=0.5, mode=effective_tcp_mode
+                    ip, ports=ports, timeout=_pto, mode=effective_tcp_mode,
+                    rtt_callback=_on_rtt if effective_tcp_mode == "connect" else None,
                 )
 
             # OS / 版本探测：基于 TTL 推测族 + banner 提取版本
@@ -174,7 +214,10 @@ class NetworkScanner:
             svc_details = []
             if proto_port_map:
                 proto_ports = list(proto_port_map.values())
-                detected_proto_ports = scan_ports(ip, ports=proto_ports, timeout=0.5)
+                detected_proto_ports = scan_ports(
+                    ip, ports=proto_ports, timeout=_pto,
+                    rtt_callback=_on_rtt if effective_tcp_mode == "connect" else None,
+                )
                 for proto, port in proto_port_map.items():
                     if port in detected_proto_ports:
                         svc_list.append(proto)
@@ -398,6 +441,9 @@ class NetworkScanner:
                 "SYN/UDP 探测在发送阶段被系统拒绝"
                 "（Windows 需 Npcap 或以管理员运行），本次端口扫描已回退到 TCP 全连接。"
             )
+
+        # 记录 RTT 自适应最终收敛的 connect 超时，供上层日志展示
+        self.last_adaptive_timeout = _port_timeout
 
         self.is_scanning = False
         return list(results.values())

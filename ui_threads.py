@@ -12,7 +12,7 @@ class ScanThread(QThread):
     log_signal = pyqtSignal(str)            # log message
 
     def __init__(self, ip_ranges, timeout_ms=1000, max_threads=100, scan_ports=False,
-                 protocols=None, tcp_scan_mode="connect", mdns_discovery=True):
+                 protocols=None, tcp_scan_mode="connect", mdns_discovery=True, ports=None):
         super().__init__()
         self.ip_ranges = ip_ranges
         self.timeout_ms = timeout_ms
@@ -21,6 +21,7 @@ class ScanThread(QThread):
         self.protocols = protocols or []
         self.tcp_scan_mode = tcp_scan_mode
         self.mdns_discovery = mdns_discovery
+        self.ports = ports
         self.scanner = NetworkScanner()
 
     def run(self):
@@ -39,12 +40,16 @@ class ScanThread(QThread):
             protocols=self.protocols,
             tcp_scan_mode=self.tcp_scan_mode,
             mdns_discovery=self.mdns_discovery,
+            ports=self.ports,
             progress_callback=on_progress,
             result_callback=on_result,
         )
 
         online = sum(1 for r in results if r.status == "online")
         self.log_signal.emit(f"扫描完成: 共 {len(results)} 个IP, {online} 个在线")
+        _at = getattr(self.scanner, "last_adaptive_timeout", None)
+        if _at and abs(_at - 0.5) > 1e-6:
+            self.log_signal.emit(f"RTT 自适应端口超时已收敛至 {_at:.2f}s")
         self.finished_signal.emit(results)
 
     def stop(self):

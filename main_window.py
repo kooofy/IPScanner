@@ -34,13 +34,16 @@ from PyQt5.QtGui import (
     QColor, QFont, QIcon, QPainter, QBrush, QPen, QPixmap, QPalette,
     QCursor, QFontMetrics, QDesktopServices
 )
-from scanner import NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class, merge_wmi, netbios_query, merge_netbios
+from scanner import (NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS,
+                      PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class,
+                      merge_wmi, netbios_query, merge_netbios, get_ports_for_level,
+                      format_ports_display, SCAN_LEVEL_LABELS)
 from excel_handler import export_results, export_csv, export_html, export_json, create_template, normalize_mac
 from mac_library import MacLibrary
 import history_store
 import audit_log
 
-from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog, AuditLogDialog, SwitchPortDialog, ChangeReportDialog
+from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, HistoryQueryDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog, AuditLogDialog, SwitchPortDialog, ChangeReportDialog
 from ui_icons import _build_dark_palette, get_pc_icons
 from ui_threads import MdnsThread, ScanThread, WmiThread, NetbiosThread
 from ui_utils import _detect_gateway
@@ -609,6 +612,7 @@ class MainWindow(QMainWindow):
         self.library = MacLibrary()  # 持久 MAC 地址库 (SQLite)
         self.selected_protocols = list(PROTOCOL_PORTS.keys())  # HTTP, HTTPS, FTP, RDP 默认开启
         self.tcp_scan_mode = "connect"  # 端口探测方式: connect / syn / udp
+        self.scan_level = "quick"  # 扫描级别: quick / standard / all（默认快速，向后兼容）
         self.mdns_discovery = True      # 扫描末尾做 mDNS 组播发现
         self.mdns_thread = None
         self.scan_thread = None
@@ -1003,6 +1007,11 @@ class MainWindow(QMainWindow):
         act_history.triggered.connect(self._open_history_compare)
         scan_menu.addAction(act_history)
 
+        act_history_query = QAction("历史检索...", self)
+        act_history_query.setToolTip("跨快照按类型/网段/首见时间/IP 检索历史设备")
+        act_history_query.triggered.connect(self._open_history_query)
+        scan_menu.addAction(act_history_query)
+
         self.act_conflict = QAction("冲突检测", self)
         self.act_conflict.setToolTip("检测 IP/MAC 冲突、未知设备等异常")
         self.act_conflict.triggered.connect(self._run_conflict_detection)
@@ -1052,6 +1061,21 @@ class MainWindow(QMainWindow):
                 lambda _checked, _mm=_m: self._set_tcp_mode(_mm)
             )
             mode_sub.addAction(_a)
+
+        # 扫描级别：快速 / 标准 / 全端口（单选项，决定端口探测范围）
+        self.scan_level_group = QActionGroup(self)
+        self.scan_level_group.setExclusive(True)
+        level_sub = scan_menu.addMenu("扫描级别")
+        level_sub.setToolTip("控制端口探测的端口范围（快速日常巡检 / 标准深度 / 全端口安全评估）")
+        for _lv in ("quick", "standard", "all"):
+            _a = QAction(SCAN_LEVEL_LABELS.get(_lv, _lv), self, checkable=True)
+            _a.setData(_lv)
+            _a.setActionGroup(self.scan_level_group)
+            _a.setChecked(getattr(self, "scan_level", "quick") == _lv)
+            _a.triggered.connect(
+                lambda _checked, _ll=_lv: self._set_scan_level(_ll)
+            )
+            level_sub.addAction(_a)
 
         act_settings = QAction("扫描设置...", self)
         act_settings.triggered.connect(self._open_scan_settings)
@@ -1265,6 +1289,10 @@ class MainWindow(QMainWindow):
         self.tcp_scan_mode = s.value("scan/tcp_mode", "connect", type=str)
         if self.tcp_scan_mode not in ("connect", "syn", "udp"):
             self.tcp_scan_mode = "connect"
+        self.scan_level = s.value("scan/level", "quick", type=str)
+        if self.scan_level not in ("quick", "standard", "all"):
+            self.scan_level = "quick"
+        self._sync_scan_level_menu()
         protos = s.value("scan/protocols", list(PROTOCOL_PORTS.keys()))
         if isinstance(protos, str):
             protos = [p.strip() for p in protos.split(",") if p.strip()]
@@ -1306,6 +1334,7 @@ class MainWindow(QMainWindow):
         s.setValue("scan/port_scan", self.port_scan_check.isChecked())
         s.setValue("scan/mdns", self.mdns_check.isChecked())
         s.setValue("scan/tcp_mode", self.tcp_scan_mode)
+        s.setValue("scan/level", self.scan_level)
         s.setValue("scan/protocols", self.selected_protocols)
         s.setValue("scan/ip_ranges", self.ip_range_items)
         s.setValue("window/geometry", self.saveGeometry())
@@ -1602,6 +1631,7 @@ class MainWindow(QMainWindow):
             protocols=self.selected_protocols,
             tcp_scan_mode=self.tcp_scan_mode,
             mdns_discovery=self.mdns_check.isChecked(),
+            ports=get_ports_for_level(self.scan_level) if self.port_scan_check.isChecked() else None,
         )
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()
@@ -1615,7 +1645,8 @@ class MainWindow(QMainWindow):
             audit_log.CAT_SCAN, "开始扫描",
             f"范围: {', '.join(self.ip_range_items)} ({total_ips} 个IP) | "
             f"超时 {self.timeout_spin.value()}ms · 线程 {self.threads_spin.value()} · "
-            f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}",
+            f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}"
+            f"{' · 级别 ' + SCAN_LEVEL_LABELS.get(self.scan_level, self.scan_level) if self.port_scan_check.isChecked() else ''}",
         )
         self.scan_thread.start()
 
@@ -1653,6 +1684,22 @@ class MainWindow(QMainWindow):
         """同步"端口探测方式"子菜单的勾选态到当前 tcp_scan_mode。"""
         for _a in self.tcp_mode_group.actions():
             _a.setChecked(_a.data() == self.tcp_scan_mode)
+
+    def _set_scan_level(self, level: str):
+        """切换扫描级别（快速/标准/全端口）并持久化，决定端口探测范围。"""
+        if level not in ("quick", "standard", "all"):
+            level = "quick"
+        self.scan_level = level
+        self._sync_scan_level_menu()
+        self._save_settings()
+        _label = SCAN_LEVEL_LABELS.get(level, level)
+        _n = len(get_ports_for_level(level))
+        self.status_bar.showMessage(f"扫描级别: {_label} · 端口数 {_n}")
+
+    def _sync_scan_level_menu(self):
+        """同步"扫描级别"子菜单的勾选态到当前 scan_level。"""
+        for _a in self.scan_level_group.actions():
+            _a.setChecked(_a.data() == self.scan_level)
 
     def _on_scan_progress(self, current, total, ip):
         pct = int(current / total * 100) if total > 0 else 0
@@ -2429,9 +2476,11 @@ class MainWindow(QMainWindow):
             item.setData(7, Qt.UserRole, float("inf"))  # 无响应排最后
             item.setTextAlignment(7, Qt.AlignCenter)
 
-        # 开放端口列：仅列出端口号。服务名称已由展开子项承担，避免冗余。
-        ports_text = ", ".join(str(p) for p in result.open_ports) if result.open_ports else "—"
-        item.setText(8, ports_text)
+        # 开放端口列：仅列出端口号（Top N 合并，避免漏扫目标开几百端口撑爆表格）。
+        # 完整端口列表由 tooltip 承载。
+        ports_disp, ports_full = format_ports_display(result.open_ports)
+        item.setText(8, ports_disp)
+        item.setToolTip(8, ports_full if ports_full != "—" else "无开放端口")
         item.setFont(8, _FONT_CONSOLAS_9)
 
         svc = result.services or []
@@ -2735,6 +2784,10 @@ class MainWindow(QMainWindow):
 
     def _open_history_compare(self):
         dlg = HistoryCompareDialog(self, db_path=self.history_db)
+        dlg.exec_()
+
+    def _open_history_query(self):
+        dlg = HistoryQueryDialog(self, db_path=self.history_db)
         dlg.exec_()
 
     def _open_topology(self):

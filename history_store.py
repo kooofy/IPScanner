@@ -10,6 +10,7 @@
 
 纯标准库 + sqlite3，无 PyQt 依赖，便于单元测试。
 """
+import ipaddress
 import os
 import sqlite3
 import time
@@ -196,3 +197,100 @@ def ensure_migrated(db_path=None, json_path=None):
     if not list_snapshots(db_path) and os.path.exists(json_path):
         return migrate_from_json(json_path, db_path)
     return 0
+
+
+# --- 历史条件查询 -----------------------------------------------------------
+
+# 聚合时从快照逐条取用的设备字段（无首见时间，需推导）
+_AGG_FIELDS = (
+    "status", "mac", "hostname", "vendor", "device_class", "os_guess",
+    "open_ports", "location", "user", "remark",
+)
+
+
+def _parse_network(network):
+    """把 '192.168.1.0/24' / '192.168.1' 等解析为 ip_network；非法返回 None。"""
+    if not network:
+        return None
+    try:
+        return ipaddress.ip_network(str(network), strict=False)
+    except (ValueError, TypeError):
+        return None
+
+
+def _ip_in_network(ip, net):
+    """判断 ip 是否落在 net（ip_network）内；net 为空或 ip 非法返回 False。"""
+    if net is None or not ip:
+        return False
+    try:
+        return ipaddress.ip_address(str(ip)) in net
+    except ValueError:
+        return False
+
+
+def query_history(device_class=None, network=None, first_seen_after=None,
+                  first_seen_before=None, ip_substr=None, db_path=None) -> list:
+    """跨快照聚合查询历史设备，支持按类型 / 网段 / 首见时间 / IP 关键字过滤。
+
+    返回每条记录包含：ip, status, mac, hostname, vendor, device_class,
+    os_guess, open_ports, location, user, remark, first_seen, last_seen。
+    按 last_seen 降序（最近活跃的排在前）。
+
+    说明：
+    - devices 表无首见时间列，first/last seen 通过按快照时间升序遍历推导；
+    - 同一 IP 在不同快照中的属性以「最近一次出现且非空」的值为准（展示当前状态）；
+    - device_class 过滤基于最新已知类型做子串匹配。
+    """
+    net = _parse_network(network)
+
+    agg = {}  # ip -> 聚合记录
+    for snap in list_snapshots(db_path):
+        snap_time = snap["time"]
+        full = get_snapshot(snap["id"], db_path)
+        if not full:
+            continue
+        for d in full["devices"]:
+            ip = (d.get("ip") or "").strip()
+            if not ip:
+                continue
+            cur = agg.get(ip)
+            if cur is None:
+                cur = {
+                    "ip": ip,
+                    "first_seen": snap_time,
+                    "last_seen": snap_time,
+                }
+                for f in _AGG_FIELDS:
+                    cur[f] = d.get(f, "") or ""
+                agg[ip] = cur
+            else:
+                if snap_time > cur["last_seen"]:
+                    cur["last_seen"] = snap_time
+                    # 最新快照覆盖属性（仅非空，避免清空历史好值）
+                    for f in _AGG_FIELDS:
+                        v = d.get(f, "") or ""
+                        if v:
+                            cur[f] = v
+                if snap_time < cur["first_seen"]:
+                    cur["first_seen"] = snap_time
+
+    # 过滤
+    dc = (device_class or "").strip().lower()
+    ipk = (ip_substr or "").strip().lower()
+    results = []
+    for cur in agg.values():
+        if dc and dc not in (cur.get("device_class", "") or "").lower():
+            continue
+        if ipk and ipk not in (cur.get("ip", "") or "").lower():
+            continue
+        if net is not None and not _ip_in_network(cur.get("ip", ""), net):
+            continue
+        fs = cur.get("first_seen")
+        if first_seen_after is not None and (fs is None or fs < first_seen_after):
+            continue
+        if first_seen_before is not None and (fs is None or fs > first_seen_before):
+            continue
+        results.append(cur)
+
+    results.sort(key=lambda r: r.get("last_seen", 0), reverse=True)
+    return results

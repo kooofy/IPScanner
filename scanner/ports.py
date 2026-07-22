@@ -83,7 +83,7 @@ def scan_shares(ip: str, timeout: float = 1.5) -> List[str]:
 
 
 def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
-               mode: str = "connect") -> List[int]:
+               mode: str = "connect", rtt_callback=None) -> List[int]:
     """
     扫描多个端口，返回开放端口列表。
 
@@ -91,6 +91,9 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
       "connect" 全连接 TCP 扫描（默认，无需管理员，最稳定）
       "syn"     TCP SYN 半开扫描（需管理员；Windows 还需 Npcap，否则自动回退 connect）
       "udp"     仅扫描 UDP 端口（需管理员；不可用时回退为空）
+
+    rtt_callback: 仅 connect 模式，每当某个端口探测成功(open)时回调其 connect 耗时(秒)。
+      用于上层做 RTT 自适应超时（估计网络延迟），不影响返回值。
     """
     if ports is None:
         ports = COMMON_PORTS
@@ -103,12 +106,19 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
     # connect
     open_ports = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(64, len(ports))) as executor:
-        futures = {executor.submit(scan_port, ip, p, timeout): p for p in ports}
+        def _probe(p):
+            t0 = time.monotonic()
+            ok = scan_port(ip, p, timeout)
+            return ok, (time.monotonic() - t0) if ok else 0.0
+        futures = {executor.submit(_probe, p): p for p in ports}
         for future in concurrent.futures.as_completed(futures):
             port = futures[future]
             try:
-                if future.result():
+                ok, elapsed = future.result()
+                if ok:
                     open_ports.append(port)
+                    if rtt_callback is not None and elapsed > 0:
+                        rtt_callback(elapsed)
             except Exception:
                 pass
     return sorted(open_ports)

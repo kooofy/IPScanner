@@ -53,6 +53,53 @@ COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445,
                 993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 8080, 8443]
 
 
+# ── 扫描级别：端口范围（对齐 nmap 的 -F / 默认 / -p- 精神） ──
+#   quick   : 当前高频服务端口（最常用 21 个），日常巡检
+#   standard: 1-1023 知名端口（≈ nmap top 1000 精神）
+#   all     : 1-65535 全端口（安全评估，最慢）
+SCAN_LEVELS = ("quick", "standard", "all")
+SCAN_LEVEL_LABELS = {
+    "quick": "快速 (21)",
+    "standard": "标准 (1023)",
+    "all": "全端口 (65535)",
+}
+
+
+def get_ports_for_level(level: str):
+    """按扫描级别返回端口列表（按需生成，不常驻大列表）。
+
+    quick（默认）/ 未识别级别 -> COMMON_PORTS（向后兼容当前行为）。
+    standard -> 1-1023 知名端口；all -> 1-65535 全端口。
+    """
+    if level == "standard":
+        return list(range(1, 1024))
+    if level == "all":
+        return list(range(1, 65536))
+    # quick 与未识别：当前高频服务端口
+    return COMMON_PORTS
+
+
+# ── 开放端口列显示：Top N 合并，避免漏扫目标开几百端口撑爆表格 ──
+PORT_DISPLAY_TOP_N = 20
+
+
+def format_ports_display(ports, top_n: int = PORT_DISPLAY_TOP_N):
+    """把开放端口列表格式化为 (显示文本, 完整文本)。
+
+    端口数 <= top_n：显示文本 == 完整文本（逗号拼接）。
+    超出：显示文本截断为前 top_n 个并追加 ", +N more"，完整文本仍为全部端口。
+    空列表：返回 ("—", "—")。
+    """
+    if not ports:
+        return "—", "—"
+    sorted_ports = sorted(ports)
+    full = ", ".join(str(p) for p in sorted_ports)
+    if len(sorted_ports) <= top_n:
+        return full, full
+    shown = ", ".join(str(p) for p in sorted_ports[:top_n])
+    return f"{shown}, +{len(sorted_ports) - top_n} more", full
+
+
 UDP_PORTS = [53, 67, 69, 123, 137, 138, 161, 500, 514, 1900, 5353]
 
 
