@@ -38,11 +38,13 @@ from scanner import NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS, PO
 from excel_handler import export_results, export_csv, export_html, export_json, create_template, normalize_mac
 from mac_library import MacLibrary
 import history_store
+import audit_log
 
-from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog
+from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog, AuditLogDialog, SwitchPortDialog
 from ui_icons import _build_dark_palette, get_pc_icons
 from ui_threads import MdnsThread, ScanThread, WmiThread
 from ui_utils import _detect_gateway
+from conflict_detector import detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
 
 
 STYLE_SHEET = """
@@ -613,6 +615,8 @@ class MainWindow(QMainWindow):
         self.ip_range_items: list = []
         self._ip_item_map: dict = {}
         self.dark_mode = False  # 深色模式开关
+        self._conflicts: list = []       # 最近一次冲突检测结果
+        self._conflict_ips: dict = {}    # {ip: [conflict_type, ...]} 用于树视图标记
 
         # 配置持久化 (QSettings, Ini 格式, 存于项目目录便于查看/重置)
         self.settings = QSettings(
@@ -996,6 +1000,21 @@ class MainWindow(QMainWindow):
         act_history.triggered.connect(self._open_history_compare)
         scan_menu.addAction(act_history)
 
+        self.act_conflict = QAction("冲突检测", self)
+        self.act_conflict.setToolTip("检测 IP/MAC 冲突、未知设备等异常")
+        self.act_conflict.triggered.connect(self._run_conflict_detection)
+        scan_menu.addAction(self.act_conflict)
+
+        act_subnet_util = QAction("子网利用率...", self)
+        act_subnet_util.setToolTip("按 /24 子网聚合，查看各网段在线占比与设备分布")
+        act_subnet_util.triggered.connect(self._show_subnet_utilization)
+        scan_menu.addAction(act_subnet_util)
+
+        act_audit_log = QAction("审计日志...", self)
+        act_audit_log.setToolTip("查看扫描活动记录（开始/停止/完成、冲突检测等）")
+        act_audit_log.triggered.connect(self._show_audit_log)
+        scan_menu.addAction(act_audit_log)
+
         scan_menu.addSeparator()
 
         # 端口扫描：原工具栏复选框，移入菜单
@@ -1103,6 +1122,11 @@ class MainWindow(QMainWindow):
         act_wmi.setToolTip("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据")
         act_wmi.triggered.connect(lambda: self._run_wmi_identification())
         tool_menu.addAction(act_wmi)
+
+        act_switch_map = QAction("交换机端口映射...", self)
+        act_switch_map.setToolTip("通过 SNMP 获取交换机 MAC 转发表，映射 MAC → 物理端口")
+        act_switch_map.triggered.connect(self._show_switch_port_mapping)
+        tool_menu.addAction(act_switch_map)
 
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
@@ -1310,11 +1334,26 @@ class MainWindow(QMainWindow):
         _btns.rejected.connect(dlg.reject)
         _layout.addRow(_btns)
         if dlg.exec_() == QDialog.Accepted:
+            _old_to = self.timeout_spin.value()
+            _old_th = self.threads_spin.value()
+            _old_mode = self.tcp_scan_mode
             self.timeout_spin.setValue(_to.value())
             self.threads_spin.setValue(_th.value())
             self.tcp_scan_mode = _mode_map[_mode.currentText()]
             self._sync_tcp_mode_menu()
             self._save_settings()
+            # 审计：记录设置变更
+            _changes = []
+            if _old_to != _to.value():
+                _changes.append(f"超时 {_old_to}→{_to.value()}ms")
+            if _old_th != _th.value():
+                _changes.append(f"线程 {_old_th}→{_th.value()}")
+            if _old_mode != self.tcp_scan_mode:
+                _changes.append(f"探测方式 {_old_mode}→{self.tcp_scan_mode}")
+            self._audit(
+                audit_log.CAT_SYSTEM, "修改扫描设置",
+                " · ".join(_changes) if _changes else "无变化",
+            )
 
     # --- IP 范围管理 ---
 
@@ -1379,24 +1418,33 @@ class MainWindow(QMainWindow):
         return None
 
     def _scan_local_subnet(self):
-        """扫描本机所在子网：填充范围 -> 添加 -> 开始扫描。"""
+        """扫描本机所在子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
         subnet = self._get_local_subnet()
         if subnet:
-            self.range_input.setText(subnet)
-            self._add_ip_range()
-            self._start_scan()
+            self._fill_subnet_range(subnet)
         else:
             QMessageBox.warning(self, "提示", "无法获取本机 IP，请手动输入扫描范围。")
 
     def _scan_c_class_subnet(self):
-        """扫描 C 类子网：填充范围 -> 添加 -> 开始扫描。"""
+        """扫描 C 类子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
         subnet = self._get_c_class_subnet()
         if subnet:
-            self.range_input.setText(subnet)
-            self._add_ip_range()
-            self._start_scan()
+            self._fill_subnet_range(subnet)
         else:
             QMessageBox.warning(self, "提示", "无法获取本机 IP，请手动输入扫描范围。")
+
+    def _fill_subnet_range(self, subnet: str):
+        """将网段填入范围输入框并静默加入待扫列表（不弹重复提示、不自动扫描）。
+
+        仿 Advanced IP Scanner：点击快捷按钮只是把 IP 范围放进输入框，
+        用户确认后再点"扫描"按钮才开始。
+        """
+        self.range_input.setText(subnet)
+        # 若尚未在列表中则静默添加；已存在则不重复添加、不弹窗
+        if subnet not in self.ip_range_items and parse_ip_range(subnet):
+            self.ip_range_items.append(subnet)
+            self._update_range_list()
+        self.range_input.setFocus()
 
     def _expand_all_items(self):
         """全选并展开所有结果项。"""
@@ -1417,6 +1465,7 @@ class MainWindow(QMainWindow):
 
         added, dup = 0, 0
         invalid = []
+        added_tokens = []
         for tok in tokens:
             if not parse_ip_range(tok):
                 invalid.append(tok)
@@ -1425,12 +1474,15 @@ class MainWindow(QMainWindow):
                 dup += 1
                 continue
             self.ip_range_items.append(tok)
+            added_tokens.append(tok)
             added += 1
 
         if added > 0:
             self._update_range_list()
             self.range_input.clear()
             self.range_input.setFocus()
+            # 审计：记录添加网段
+            self._audit(audit_log.CAT_RANGE, "添加网段", ", ".join(added_tokens))
 
         if added == 0:
             # 全部无效或全部重复，未新增任何网段
@@ -1455,6 +1507,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "\n".join(msg))
 
     def _clear_ranges(self):
+        if self.ip_range_items:
+            self._audit(audit_log.CAT_RANGE, "清空网段", f"移除 {len(self.ip_range_items)} 个网段")
         self.ip_range_items.clear()
         self._update_range_list()
 
@@ -1474,6 +1528,13 @@ class MainWindow(QMainWindow):
             matched = sum(1 for r in self.all_results if r.excel_matched)
             if self.library.is_loaded() and matched:
                 parts.append(f"{matched} 已匹配")
+            # 冲突计数
+            high = sum(1 for c in self._conflicts if c.severity == SEVERITY_HIGH)
+            warn = sum(1 for c in self._conflicts if c.severity == SEVERITY_WARNING)
+            if high:
+                parts.append(f"⚠ {high} 冲突")
+            elif warn:
+                parts.append(f"⚠ {warn} 警告")
         self.status_stats_label.setText("  |  ".join(parts))
 
     def _update_range_list(self):
@@ -1535,12 +1596,21 @@ class MainWindow(QMainWindow):
         self.scan_thread.result_ready.connect(self._on_scan_result, Qt.QueuedConnection)
         self.scan_thread.finished_signal.connect(self._on_scan_finished, Qt.QueuedConnection)
         self.scan_thread.log_signal.connect(lambda msg: self.status_bar.showMessage(msg), Qt.QueuedConnection)
+        # 审计：记录扫描开始
+        total_ips = sum(len(parse_ip_range(r)) for r in self.ip_range_items)
+        self._audit(
+            audit_log.CAT_SCAN, "开始扫描",
+            f"范围: {', '.join(self.ip_range_items)} ({total_ips} 个IP) | "
+            f"超时 {self.timeout_spin.value()}ms · 线程 {self.threads_spin.value()} · "
+            f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}",
+        )
         self.scan_thread.start()
 
     def _stop_scan(self):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop()
             self.status_bar.showMessage("正在停止扫描...")
+            self._audit(audit_log.CAT_SCAN, "停止扫描", "用户手动中止扫描")
             self.scan_thread.wait(3000)
 
     def _toggle_protocol(self, proto, checked):
@@ -1624,6 +1694,17 @@ class MainWindow(QMainWindow):
             self.act_clear.setEnabled(True)
             self.progress_bar.setVisible(False)
             self._update_stats()
+            # 审计：记录扫描完成
+            _total = len(results)
+            _online = sum(1 for r in results if r.status == "online")
+            _offline = sum(1 for r in results if r.status == "offline")
+            self._audit(
+                audit_log.CAT_SCAN, "扫描完成",
+                f"共 {_total} 个IP · 在线 {_online} · 离线 {_offline} · "
+                f"未知 {_total - _online - _offline}",
+            )
+            # 扫描完成后自动执行冲突检测（静默，仅更新标记和状态栏）
+            self._run_conflict_detection(silent=True)
             self.status_bar.showMessage("扫描完成")
         except Exception as e:
             sys.stderr.write(f"[ERR] _on_scan_finished 异常: {e}\n")
@@ -1635,6 +1716,131 @@ class MainWindow(QMainWindow):
             self.act_clear.setEnabled(True)
             self.progress_bar.setVisible(False)
             self.status_bar.showMessage(f"扫描异常: {e}")
+
+    def _run_conflict_detection(self, silent=False):
+        """执行 IP 冲突检测。
+
+        Args:
+            silent: True 时仅更新树视图标记和状态栏，不弹对话框（扫描后自动调用）；
+                    False 时弹出冲突报告对话框（菜单手动触发）。
+        """
+        if not self.all_results:
+            if not silent:
+                QMessageBox.information(self, "冲突检测", "暂无扫描结果，请先执行扫描。")
+            return
+
+        library = self.library if self.library.is_loaded() else None
+        self._conflicts = detect_conflicts(self.all_results, library)
+        self._conflict_ips = get_conflict_ips(self._conflicts)
+
+        # 刷新树视图中所有行的冲突标记
+        self._refresh_conflict_marks()
+
+        # 更新统计栏
+        self._update_stats()
+
+        # 审计：记录冲突检测结果
+        _high = sum(1 for c in self._conflicts if c.severity == SEVERITY_HIGH)
+        _warn = sum(1 for c in self._conflicts if c.severity == SEVERITY_WARNING)
+        _info = sum(1 for c in self._conflicts if c.severity == SEVERITY_INFO)
+        self._audit(
+            audit_log.CAT_CONFLICT, "冲突检测",
+            f"严重 {_high} · 警告 {_warn} · 提示 {_info}"
+            + ("（未发现冲突）" if not self._conflicts else ""),
+        )
+
+        if silent:
+            # 静默模式：仅在状态栏提示冲突数量
+            high = sum(1 for c in self._conflicts if c.severity == SEVERITY_HIGH)
+            warn = sum(1 for c in self._conflicts if c.severity == SEVERITY_WARNING)
+            if high or warn:
+                parts = []
+                if high:
+                    parts.append(f"{high} 严重")
+                if warn:
+                    parts.append(f"{warn} 警告")
+                self.status_bar.showMessage(f"冲突检测完成：{' · '.join(parts)}（菜单 → 扫描 → 冲突检测 查看详情）")
+            return
+
+        # 手动触发：弹出报告对话框
+        if not self._conflicts:
+            QMessageBox.information(self, "冲突检测", "未检测到任何冲突，网络状态良好。")
+            return
+        dlg = ConflictReportDialog(self._conflicts, parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _refresh_conflict_marks(self):
+        """根据 _conflict_ips 刷新树视图中所有行的冲突标记。"""
+        for ip, item in self._ip_item_map.items():
+            self._apply_conflict_mark(item, ip)
+
+    def _apply_conflict_mark(self, item, ip):
+        """为单个树项应用/清除冲突标记。"""
+        ctypes = self._conflict_ips.get(ip, [])
+        if ctypes:
+            # 有冲突：IP 列文字改为橙红色，状态列追加警告
+            has_high = any(
+                c.severity == SEVERITY_HIGH
+                for c in self._conflicts
+                if ip in c.ips
+            )
+            color = QColor(220, 38, 38) if has_high else QColor(217, 119, 6)
+            item.setForeground(0, color)
+            # 在 IP 列追加大括号标记
+            base_ip = ip
+            item.setText(0, f"⚠ {base_ip}")
+            # 工具提示追加冲突信息
+            tips = []
+            for c in self._conflicts:
+                if ip in c.ips:
+                    tips.append(f"[{c.severity_label}] {c.description}")
+            existing_tip = item.toolTip(0) or ip
+            # 去掉旧的冲突提示（如果有）
+            if " | 冲突:" in existing_tip:
+                existing_tip = existing_tip.split(" | 冲突:")[0]
+            item.setToolTip(0, f"{existing_tip} | 冲突: {'; '.join(tips)}")
+        else:
+            # 无冲突：恢复正常
+            item.setText(0, ip)
+            item.setForeground(0, self._default_fg_color())
+            existing_tip = item.toolTip(0) or ip
+            if " | 冲突:" in existing_tip:
+                existing_tip = existing_tip.split(" | 冲突:")[0]
+                item.setToolTip(0, existing_tip)
+
+    def _default_fg_color(self):
+        """返回当前主题的默认前景色。"""
+        if self.dark_mode:
+            return QColor(224, 224, 224)
+        return QColor(0, 0, 0)
+
+    def _show_subnet_utilization(self):
+        """弹出子网利用率对话框。"""
+        if not self.all_results:
+            QMessageBox.information(self, "子网利用率", "暂无扫描结果，请先执行扫描。")
+            return
+        dlg = SubnetUtilizationDialog(self.all_results, parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _show_audit_log(self):
+        """弹出审计日志查看器。"""
+        dlg = AuditLogDialog(parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _audit(self, category, action, detail=""):
+        """安全地记录一条审计日志：任何异常都不应中断主流程。"""
+        try:
+            audit_log.log_event(category, action, detail)
+        except Exception:
+            pass
+
+    def _show_switch_port_mapping(self):
+        """弹出交换机端口映射对话框。"""
+        self._audit(audit_log.CAT_DEVICE, "交换机端口映射", "打开端口映射工具")
+        dlg = SwitchPortDialog(
+            scan_results=self.all_results, parent=self, dark=self.dark_mode
+        )
+        dlg.exec_()
 
     def _run_mdns_discovery(self):
         """独立触发 mDNS/DNS-SD 组播发现（不依赖扫描），发现结果合并到树与 all_results。"""
@@ -1767,6 +1973,10 @@ class MainWindow(QMainWindow):
         msg = f"WMI 识别完成：{total} 台，成功 {ok} 台"
         if fail:
             msg += f"，失败 {fail} 台（权限/防火墙/非 Windows 等）"
+        self._audit(
+            audit_log.CAT_DEVICE, "WMI 识别",
+            f"共 {total} 台 · 成功 {ok} · 失败 {fail}",
+        )
         self.status_bar.showMessage(msg)
         self._update_stats()
 
@@ -2170,6 +2380,7 @@ class MainWindow(QMainWindow):
         elif tool == "rdp":
             try:
                 subprocess.Popen(["mstsc.exe", f"/v:{target}"])
+                self._audit(audit_log.CAT_DEVICE, "启动网络工具", f"RDP · 目标 {target}")
                 self.status_bar.showMessage(f"已启动 RDP: {target}")
             except Exception as e:
                 QMessageBox.warning(self, "启动失败", f"无法启动远程桌面: {e}")
@@ -2184,6 +2395,7 @@ class MainWindow(QMainWindow):
                 ["cmd.exe", "/k", cmd],
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
+            self._audit(audit_log.CAT_DEVICE, "启动网络工具", f"{tool.upper()} · 目标 {target}")
             self.status_bar.showMessage(f"已启动 {tool.upper()}: {target}")
         except Exception as e:
             QMessageBox.warning(self, "启动失败", f"无法启动 {tool}: {e}")
@@ -2225,6 +2437,10 @@ class MainWindow(QMainWindow):
                 encoding=_enc, errors="replace"
             )
             if proc.returncode == 0:
+                self._audit(
+                    audit_log.CAT_DEVICE, f"远程{_verb}",
+                    f"目标 {target} · 指令已发送",
+                )
                 QMessageBox.information(
                     self, "指令已发送",
                     f"已向 {target} 发送远程{_verb}指令。"
@@ -2232,6 +2448,10 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage(f"已发送远程{_verb}: {target}")
             else:
                 _err = (proc.stderr or proc.stdout or "").strip()
+                self._audit(
+                    audit_log.CAT_DEVICE, f"远程{_verb}失败",
+                    f"目标 {target} · 退出码 {proc.returncode}",
+                )
                 QMessageBox.warning(
                     self, "远程" + _verb + "失败",
                     f"向 {target} 发送{_verb}指令失败 (退出码 {proc.returncode})。\n"
@@ -2272,20 +2492,16 @@ class MainWindow(QMainWindow):
                 )
 
     def _update_stats(self):
-        total = len(self.all_results)
-        online = sum(1 for r in self.all_results if r.status == "online")
-        offline = sum(1 for r in self.all_results if r.status == "offline")
-        unknown = total - online - offline
-        matched = sum(1 for r in self.all_results if r.excel_matched)
-        parts = [f"{online} 开机状态", f"{offline} 关机状态", f"{unknown} 未知状态"]
-        if self.library.is_loaded() and matched:
-            parts.append(f"{matched} 已匹配")
         self._update_status_stats()
 
     def _clear_results(self):
+        if self.all_results:
+            self._audit(audit_log.CAT_RESULT, "清空结果", f"清除 {len(self.all_results)} 条扫描结果")
         self.table.clear()
         self._ip_item_map.clear()
         self.all_results.clear()
+        self._conflicts.clear()
+        self._conflict_ips.clear()
         self._update_stats()
         self.act_export.setEnabled(False)
         self.act_clear.setEnabled(False)
@@ -2499,6 +2715,10 @@ class MainWindow(QMainWindow):
             self._refresh_library_label()
             if self.all_results:
                 self._refresh_matches_from_library()
+            self._audit(
+                audit_log.CAT_LIBRARY, "新增设备",
+                f"IP {ip or '—'} · MAC {mac or '—'} · 地址库共 {self.library.count()} 条",
+            )
             self.status_bar.showMessage("已加入地址库")
 
     def _edit_library_entry(self, device_id: int):
@@ -2507,6 +2727,7 @@ class MainWindow(QMainWindow):
             self._refresh_library_label()
             if self.all_results:
                 self._refresh_matches_from_library()
+            self._audit(audit_log.CAT_LIBRARY, "编辑设备", f"设备 #{device_id}")
 
     def _delete_library_entry(self, device_id: int):
         dev = self.library.get_by_id(device_id)
@@ -2523,6 +2744,10 @@ class MainWindow(QMainWindow):
             self._refresh_library_label()
             if self.all_results:
                 self._refresh_matches_from_library()
+            self._audit(
+                audit_log.CAT_LIBRARY, "删除设备",
+                f"{label} · 地址库余 {self.library.count()} 条",
+            )
             self.status_bar.showMessage("已从地址库删除")
 
     # --- Excel ---
@@ -2546,6 +2771,14 @@ class MainWindow(QMainWindow):
                 errs.append(f"{os.path.basename(f)}: {msg}")
 
         self._refresh_library_label()
+
+        # 审计：记录地址库导入
+        if ok_files:
+            self._audit(
+                audit_log.CAT_LIBRARY, "导入地址库",
+                f"合并 {ok_files} 个文件 · 地址库共 {self.library.count()} 条"
+                + (f" · 失败 {len(errs)} 个" if errs else ""),
+            )
 
         # 若已有扫描结果，按新地址库重新匹配标注
         if self.all_results:
@@ -2593,6 +2826,10 @@ class MainWindow(QMainWindow):
             return
         success, msg = self.library.export_to_excel(file_path)
         if success:
+            self._audit(
+                audit_log.CAT_EXPORT, "导出地址库",
+                f"{self.library.count()} 条 · {os.path.basename(file_path)}",
+            )
             self.status_bar.showMessage(msg)
             QMessageBox.information(self, "导出成功", msg)
         else:
@@ -2607,6 +2844,10 @@ class MainWindow(QMainWindow):
             return
         success, msg = create_template(file_path)
         if success:
+            self._audit(
+                audit_log.CAT_EXPORT, "生成 Excel 模板",
+                os.path.basename(file_path),
+            )
             QMessageBox.information(self, "成功", msg)
         else:
             QMessageBox.warning(self, "失败", msg)
@@ -2640,14 +2881,22 @@ class MainWindow(QMainWindow):
 
         if path.lower().endswith(".csv"):
             success, msg = export_csv(self.all_results, path)
+            _fmt = "CSV"
         elif path.lower().endswith(".html"):
             success, msg = export_html(self.all_results, path)
+            _fmt = "HTML"
         elif path.lower().endswith(".json"):
             success, msg = export_json(self.all_results, path)
+            _fmt = "JSON"
         else:
             success, msg = export_results(self.all_results, path)
+            _fmt = "Excel"
 
         if success:
+            self._audit(
+                audit_log.CAT_EXPORT, "导出扫描结果",
+                f"{_fmt} · {len(self.all_results)} 条 · {os.path.basename(path)}",
+            )
             self.status_bar.showMessage(msg)
             QMessageBox.information(self, "导出成功", msg)
         else:

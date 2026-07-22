@@ -112,3 +112,30 @@ class WmiThread(QThread):
                 ok += 1
             self.progress_signal.emit(i, total)
         self.finished_signal.emit({"total": total, "ok": ok, "fail": fail})
+
+
+class SwitchMapThread(QThread):
+    """后台执行交换机 SNMP 端口映射，避免界面卡顿。"""
+
+    log_signal = pyqtSignal(str)          # 进度文本
+    finished_signal = pyqtSignal(object)  # SwitchInfo 对象
+
+    def __init__(self, switch_ip: str, community: str = "public", timeout: float = 1.5):
+        super().__init__()
+        self.switch_ip = switch_ip
+        self.community = community
+        self.timeout = timeout
+
+    def run(self):
+        from switch_mapper import map_switch_ports
+        try:
+            info = map_switch_ports(
+                self.switch_ip,
+                community=self.community,
+                timeout=self.timeout,
+                progress_cb=lambda msg: self.log_signal.emit(msg),
+            )
+        except Exception as e:
+            from switch_mapper import SwitchInfo
+            info = SwitchInfo(ip=self.switch_ip, error=f"映射异常: {e}")
+        self.finished_signal.emit(info)

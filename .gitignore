@@ -30,3 +30,6 @@ scan_history.json
 scan_history.db
 scan_history.db-shm
 scan_history.db-wal
+audit_log.db
+audit_log.db-shm
+audit_log.db-wal

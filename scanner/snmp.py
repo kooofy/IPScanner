@@ -213,6 +213,62 @@ def snmp_get_system(ip: str, communities=_SNMP_DEFAULT_COMMUNITIES,
     return None
 
 
+def _snmp_build_getnext(community: str, req_id: int, oids) -> bytes:
+    """构造 SNMPv2c GetNextRequest 报文 (PDU tag 0xA1)。"""
+    varbinds = b""
+    for oid in oids:
+        vb = _snmp_enc_oid(oid) + b"\x05\x00"   # value = NULL
+        varbinds += b"\x30" + _ber_len(len(vb)) + vb
+    vblist = b"\x30" + _ber_len(len(varbinds)) + varbinds
+    pdu = _snmp_enc_int(req_id) + _snmp_enc_int(0) + _snmp_enc_int(0) + vblist
+    pdu_typed = b"\xa1" + _ber_len(len(pdu)) + pdu        # [1] GetNextRequest-PDU
+    msg = _snmp_enc_int(1) + _snmp_enc_str(community) + pdu_typed
+    return b"\x30" + _ber_len(len(msg)) + msg
+
+
+def snmp_walk(ip: str, base_oid: str, community: str = "public",
+              timeout: float = 1.0, port: int = 161,
+              max_iterations: int = 2000) -> dict:
+    """SNMPv2c GETNEXT 遍历指定 OID 子树。
+
+    返回 {oid: (value_bytes, value_tag)} 字典，仅包含 base_oid 下的条目。
+    超时 / 出错 / 超出子树 / 达到迭代上限时停止。
+    """
+    results = {}
+    current_oid = base_oid
+    prefix = base_oid.rstrip(".") + "."
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        for _ in range(max_iterations):
+            req_id = random.randint(1, 0x7FFFFFFF)
+            packet = _snmp_build_getnext(community, req_id, [current_oid])
+            sock.sendto(packet, (ip, port))
+            try:
+                data, _ = sock.recvfrom(65535)
+            except socket.timeout:
+                break
+            resp = _snmp_parse_response(data)
+            if not resp:
+                break
+            oid, vbytes, vtag = resp[0]
+            # 超出子树或返回 endOfMibView (tag 0x82)
+            if not oid.startswith(prefix) or vtag == 0x82:
+                break
+            results[oid] = (vbytes, vtag)
+            current_oid = oid
+    except Exception:
+        pass
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return results
+
+
 def _snmp_model(descr: str) -> str:
     """从 SNMP sysDescr 提取设备型号关键词（失败返回空串）。"""
     if not descr:

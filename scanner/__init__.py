@@ -9,9 +9,11 @@ from .engine import NetworkScanner
 from .dns import mdns_discover
 from .wmi import wmi_query, merge_wmi, wmi_device_class
 from .cred_store import WmiCredentialStore
+from .snmp import snmp_get_system, snmp_walk
 
 __all__ = [
     'ScanResult', 'COMMON_PORTS', 'PORT_NAMES', 'PROTOCOL_PORTS',
     'parse_ip_range', 'NetworkScanner', 'mdns_discover',
     'wmi_query', 'merge_wmi', 'wmi_device_class', 'WmiCredentialStore',
+    'snmp_get_system', 'snmp_walk',
 ]
