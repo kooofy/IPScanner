@@ -1660,7 +1660,10 @@ class MainWindow(QMainWindow):
     def _get_local_subnet(self):
         """根据 ipconfig 获取本机真实子网（含前缀长度），失败回退到 /24。"""
         try:
-            out = subprocess.check_output(["ipconfig"], encoding="gbk", errors="ignore")
+            out = subprocess.check_output(
+                ["ipconfig"], encoding="gbk", errors="ignore",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         except Exception:
             out = ""
         ips = re.findall(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)", out)
@@ -2894,7 +2897,8 @@ class MainWindow(QMainWindow):
             _enc = locale.getpreferredencoding(False) or "gbk"
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=30,
-                encoding=_enc, errors="replace"
+                encoding=_enc, errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if proc.returncode == 0:
                 self._audit(

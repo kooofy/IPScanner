@@ -14,7 +14,8 @@ def _detect_gateway() -> str:
     gw_ip = None
     # Windows 路由表 (0.0.0.0/0 的下一跳)
     try:
-        out = sp.run(["route", "print", "-4"], capture_output=True, text=True, timeout=3).stdout
+        out = sp.run(["route", "print", "-4"], capture_output=True, text=True, timeout=3,
+                     creationflags=getattr(sp, "CREATE_NO_WINDOW", 0)).stdout
         for line in out.splitlines():
             cols = line.split()
             if len(cols) >= 3 and cols[0] == "0.0.0.0" and cols[1] == "0.0.0.0":

@@ -174,6 +174,7 @@ def wmi_query(ip: str, username: str, password: str, domain: str = "",
             ["powershell", "-NoProfile", "-NonInteractive",
              "-EncodedCommand", _SCRIPT_B64],
             env=env, capture_output=True, text=True, timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         return _error_dict(f"WMI 查询超时（{timeout:.0f}s），目标可能防火墙拦截或不可达")

@@ -13,6 +13,8 @@ import os
 import locale
 import random
 import ctypes
+# 隐藏子进程控制台窗口（Windows only；非 Windows 为 0 无副作用）
+_SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 try:
@@ -33,6 +35,7 @@ def _run_cmd(cmd: list, timeout: float = 10) -> str:
             cmd,
             capture_output=True,
             timeout=timeout,
+            creationflags=_SUBPROCESS_NO_WINDOW,
         )
         raw = result.stdout
         if _CMD_ENCODING:
