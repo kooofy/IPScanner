@@ -7,8 +7,11 @@ from .constants import COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS
 from .range import parse_ip_range
 from .engine import NetworkScanner
 from .dns import mdns_discover
+from .wmi import wmi_query, merge_wmi, wmi_device_class
+from .cred_store import WmiCredentialStore
 
 __all__ = [
     'ScanResult', 'COMMON_PORTS', 'PORT_NAMES', 'PROTOCOL_PORTS',
     'parse_ip_range', 'NetworkScanner', 'mdns_discover',
+    'wmi_query', 'merge_wmi', 'wmi_device_class', 'WmiCredentialStore',
 ]

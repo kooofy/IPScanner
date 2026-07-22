@@ -61,6 +61,21 @@ class ScanResult:
     upnp_model: str = ""              # UPnP 设备描述提取的型号名（供指纹推断复用）
     http_brand: str = ""              # HTTP/HTTPS 页面识别出的品牌（如 HP、Canon、Epson）
     http_model: str = ""              # HTTP/HTTPS 页面识别出的型号（如 LaserJet M104w）
+    # WMI/WinRM 远程识别（需 Windows 目标 + 管理员凭据；权威硬件/系统信息）
+    wmi_identified: bool = False    # 是否成功取得 WMI 信息
+    wmi_manufacturer: str = ""      # Win32_ComputerSystem.Manufacturer（如 Dell Inc.）
+    wmi_model: str = ""             # Win32_ComputerSystem.Model（如 OptiPlex 7080）
+    wmi_serial: str = ""            # Win32_BIOS.SerialNumber
+    wmi_bios: str = ""              # Win32_BIOS.SMBIOSBIOSVersion
+    wmi_os: str = ""                # Win32_OperatingSystem.Caption
+    wmi_os_version: str = ""        # Win32_OperatingSystem.Version
+    wmi_os_arch: str = ""           # Win32_OperatingSystem.OSArchitecture
+    wmi_domain: str = ""            # 加入的域（WORKGROUP 表示工作组）
+    wmi_user: str = ""              # 当前登录用户（域\\用户）
+    wmi_cpu: str = ""               # Win32_Processor.Name
+    wmi_ram_gb: float = 0.0         # 物理内存（GB）
+    wmi_last_boot: str = ""         # 最近启动时间（可读字符串）
+    wmi_error: str = ""             # 失败原因（成功时为空）
 
     def to_dict(self) -> dict:
         if self.discovery_method:
@@ -91,5 +106,12 @@ class ScanResult:
             "发现方式": discovered,
             "端口探测方式": _method_map.get(self.scan_method, self.scan_method),
             "操作系统": _os_label,
+            "WMI厂商": self.wmi_manufacturer,
+            "WMI型号": self.wmi_model,
+            "WMI序列号": self.wmi_serial,
+            "WMI系统": (f"{self.wmi_os} {self.wmi_os_version}".strip()
+                        if (self.wmi_os or self.wmi_os_version) else ""),
+            "WMI域/用户": (f"{self.wmi_domain} / {self.wmi_user}".strip(" /")
+                           if (self.wmi_domain or self.wmi_user) else ""),
             "备注": self.remark,
         }

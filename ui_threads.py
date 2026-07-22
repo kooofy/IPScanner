@@ -76,3 +76,39 @@ class MdnsThread(QThread):
         result = mdns_discover(timeout=self.timeout)
         self.log_signal.emit(f"mDNS 发现完成: {len(result)} 个设备")
         self.finished_signal.emit(result)
+
+
+class WmiThread(QThread):
+    """对一批在线 Windows 设备执行 WMI 识别（后台线程，避免界面卡顿）。
+
+    每台设备一次 PowerShell Get-CimInstance 调用；结果逐台回传，由主线程刷新表格。
+    """
+
+    progress_signal = pyqtSignal(int, int)        # current, total
+    result_signal = pyqtSignal(str, object)       # ip, wmi dict
+    finished_signal = pyqtSignal(dict)            # 汇总 {total, ok, fail}
+
+    def __init__(self, targets, creds):
+        super().__init__()
+        self.targets = list(targets)
+        self.creds = creds
+
+    def run(self):
+        from scanner import wmi_query
+        total = len(self.targets)
+        ok = fail = 0
+        for i, ip in enumerate(self.targets, 1):
+            try:
+                d = wmi_query(
+                    ip, self.creds.username, self.creds.password,
+                    self.creds.domain, timeout=8.0,
+                )
+            except Exception as e:  # noqa: BLE001
+                d = {"wmi_error": f"WMI 查询异常: {e}"}
+            self.result_signal.emit(ip, d)
+            if d.get("wmi_error"):
+                fail += 1
+            else:
+                ok += 1
+            self.progress_signal.emit(i, total)
+        self.finished_signal.emit({"total": total, "ok": ok, "fail": fail})

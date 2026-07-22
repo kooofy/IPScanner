@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QLineEdit, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QFileDialog, QMessageBox, QComboBox,
+    QAbstractItemView, QFileDialog, QMessageBox, QComboBox, QCheckBox,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
 )
 from PyQt5.QtGui import QPainter, QBrush, QPen, QColor
@@ -394,3 +394,60 @@ class TopologyDialog(QDialog):
         txt.setDefaultTextColor(self._text_color())
         txt.setPos(x - 45, y + 28)
         self.scene.addItem(txt)
+
+
+class WmiCredentialDialog(QDialog):
+    """采集 WMI 识别所需的管理员凭据。
+
+    密码以 QLineEdit(Password) 显示；勾选"保存凭据(加密)"后由调用方用 DPAPI 加密
+    存入 ipscanner.ini。本对话框不负责持久化，只回传明文凭据。
+    """
+
+    def __init__(self, parent=None, saved_username: str = "", saved_domain: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("WMI 设备识别 — 管理员凭据")
+        self.setMinimumWidth(380)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        layout = QFormLayout(self)
+
+        self.user_edit = QLineEdit(saved_username)
+        self.user_edit.setPlaceholderText("如 administrator 或 user（不含域）")
+        layout.addRow("用户名:", self.user_edit)
+
+        self.pass_edit = QLineEdit()
+        self.pass_edit.setEchoMode(QLineEdit.Password)
+        self.pass_edit.setPlaceholderText("目标主机管理员密码")
+        layout.addRow("密码:", self.pass_edit)
+
+        self.domain_edit = QLineEdit(saved_domain)
+        self.domain_edit.setPlaceholderText("域（可选，工作组可留空）")
+        layout.addRow("域:", self.domain_edit)
+
+        self.save_check = QCheckBox("保存凭据（DPAPI 加密到本机配置）")
+        layout.addRow(self.save_check)
+
+        hint = QLabel(
+            "WMI 识别仅对 Windows 目标有效，需目标开放 DCOM/WMI（通常 135 端口）"
+            "且当前凭据具管理员权限。\n非域环境请填目标本机管理员账号。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addRow(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def get_credentials(self):
+        """返回 (username, password, domain, save)。"""
+        return (
+            self.user_edit.text().strip(),
+            self.pass_edit.text(),
+            self.domain_edit.text().strip(),
+            self.save_check.isChecked(),
+        )
+

@@ -34,14 +34,14 @@ from PyQt5.QtGui import (
     QColor, QFont, QIcon, QPainter, QBrush, QPen, QPixmap, QPalette,
     QCursor, QFontMetrics, QDesktopServices
 )
-from scanner import NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS
+from scanner import NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class, merge_wmi
 from excel_handler import export_results, export_csv, export_html, export_json, create_template, normalize_mac
 from mac_library import MacLibrary
 import history_store
 
-from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog
+from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog
 from ui_icons import _build_dark_palette, get_pc_icons
-from ui_threads import MdnsThread, ScanThread
+from ui_threads import MdnsThread, ScanThread, WmiThread
 from ui_utils import _detect_gateway
 
 
@@ -620,6 +620,11 @@ class MainWindow(QMainWindow):
             QSettings.IniFormat
         )
 
+        # WMI 识别凭据：从配置解密载入（DPAPI，仅本机当前用户可读）
+        self.wmi_creds = WmiCredentialStore()
+        self.wmi_creds.load_from(self.settings)
+        self.wmi_thread = None
+
         # 扫描历史快照 (SQLite, 存于项目目录；含内部信息，已 gitignore)
         self.history_db = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "scan_history.db"
@@ -1092,6 +1097,12 @@ class MainWindow(QMainWindow):
         act_reboot.setToolTip("向目标发送重启指令 (shutdown /r /m)")
         act_reboot.triggered.connect(lambda: self._remote_power("reboot"))
         tool_menu.addAction(act_reboot)
+
+        tool_menu.addSeparator()
+        act_wmi = QAction("WMI 设备识别 (需管理员)...", self)
+        act_wmi.setToolTip("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据")
+        act_wmi.triggered.connect(lambda: self._run_wmi_identification())
+        tool_menu.addAction(act_wmi)
 
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
@@ -1681,6 +1692,93 @@ class MainWindow(QMainWindow):
             sys.stderr.write(f"[ERR] _on_mdns_finished: {e}\n")
             self.status_bar.showMessage(f"mDNS 处理异常: {e}")
 
+    # --- WMI 设备识别 ---
+    def _run_wmi_identification(self, targets=None):
+        """对目标 Windows 设备执行 WMI 识别。
+
+        targets: IP 列表；为 None 时对全部在线、疑似 Windows 的设备批量识别。
+        无凭据时弹窗采集；勾选保存则用 DPAPI 加密持久化到 ipscanner.ini。
+        """
+        # 1) 凭据采集（仅当内存中尚无有效凭据）
+        if not self.wmi_creds.has_creds():
+            dlg = WmiCredentialDialog(
+                self, saved_username=self.wmi_creds.username,
+                saved_domain=self.wmi_creds.domain,
+            )
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            user, pwd, domain, save = dlg.get_credentials()
+            if not user or not pwd:
+                QMessageBox.warning(self, "WMI 识别", "用户名和密码不能为空")
+                return
+            self.wmi_creds.set(user, pwd, domain)
+            if save:
+                self.wmi_creds.save_to(self.settings)
+
+        # 2) 确定目标
+        online_ips = {r.ip for r in self.all_results if r.status == "online"}
+        if targets is None:
+            targets = [
+                r.ip for r in self.all_results
+                if r.status == "online" and (
+                    r.os_guess == "Windows"
+                    or 135 in r.open_ports
+                    or 445 in r.open_ports
+                )
+            ]
+            if not targets:
+                QMessageBox.information(
+                    self, "WMI 识别",
+                    "没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n"
+                    "可先用普通扫描发现设备，再对选中设备执行 WMI 识别。"
+                )
+                return
+        else:
+            targets = [t for t in targets if t in online_ips]
+            if not targets:
+                QMessageBox.information(self, "WMI 识别", "所选设备不在线，无法识别。")
+                return
+
+        # 3) 后台线程逐台识别
+        if self.wmi_thread and self.wmi_thread.isRunning():
+            self.status_bar.showMessage("WMI 识别进行中，请稍候...")
+            return
+        self.status_bar.showMessage(f"WMI 识别启动：共 {len(targets)} 台设备...")
+        self.wmi_thread = WmiThread(targets, self.wmi_creds)
+        self.wmi_thread.progress_signal.connect(
+            lambda i, t: self.status_bar.showMessage(f"WMI 识别 [{i}/{t}] ...")
+        )
+        self.wmi_thread.result_signal.connect(self._on_wmi_result)
+        self.wmi_thread.finished_signal.connect(self._on_wmi_finished)
+        self.wmi_thread.start()
+
+    def _on_wmi_result(self, ip: str, wmi_dict: dict):
+        """单台设备 WMI 结果回传：合并信息并刷新表格行。"""
+        result = next((r for r in self.all_results if r.ip == ip), None)
+        if result is None:
+            return
+        self._apply_wmi(result, wmi_dict)
+        self._upsert_table_row(result)
+
+    def _on_wmi_finished(self, summary: dict):
+        ok = summary.get("ok", 0)
+        fail = summary.get("fail", 0)
+        total = summary.get("total", 0)
+        msg = f"WMI 识别完成：{total} 台，成功 {ok} 台"
+        if fail:
+            msg += f"，失败 {fail} 台（权限/防火墙/非 Windows 等）"
+        self.status_bar.showMessage(msg)
+        self._update_stats()
+
+    @staticmethod
+    def _wmi_device_class(manufacturer: str, model: str) -> str:
+        """根据 WMI 厂商/型号粗略归类设备类别（仅作归类兜底，逻辑在 engine 层）。"""
+        return wmi_device_class(manufacturer, model)
+
+    def _apply_wmi(self, result: ScanResult, d: dict):
+        """把 WMI 查询结果合并进 ScanResult，并用权威信息补全设备指纹。"""
+        merge_wmi(result, d)
+
     # --- 表格操作 ---
 
     def _upsert_table_row(self, result: ScanResult):
@@ -1714,9 +1812,11 @@ class MainWindow(QMainWindow):
         if not details and result.services:
             details = [{"proto": p, "port": PROTOCOL_PORTS.get(p.upper(), 0), "banner": ""}
                        for p in result.services]
-        if not details:
+        if not details and not getattr(result, "wmi_identified", False):
             item.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
             return
+        # 即使没有服务子项，也要展示 WMI 识别结果，故此处统一标记为可展开
+        item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
 
         item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
         parent_index = self.table.indexFromItem(item)
@@ -1761,6 +1861,32 @@ class MainWindow(QMainWindow):
                 child.setData(0, Qt.UserRole + 4, result.snmp_sys_name)
 
             item.addChild(child)
+            self.table.setFirstColumnSpanned(idx, parent_index, True)
+
+        # WMI 远程识别结果（若有）：作为一条子项展示权威硬件/系统信息
+        if getattr(result, "wmi_identified", False):
+            wmi_child = QTreeWidgetItem()
+            wmi_child.setData(0, Qt.UserRole, "wmi")
+            wmi_child.setData(0, Qt.UserRole + 2, result.ip)
+            parts = []
+            if result.wmi_manufacturer:
+                parts.append(result.wmi_manufacturer)
+            if result.wmi_model:
+                parts.append(result.wmi_model)
+            if result.wmi_serial:
+                parts.append(f"SN:{result.wmi_serial}")
+            if result.wmi_os:
+                parts.append(result.wmi_os)
+            if result.wmi_user:
+                parts.append(f"用户:{result.wmi_user}")
+            wmi_text = "WMI, " + " · ".join(parts) if parts else "WMI, 已识别"
+            wmi_child.setIcon(0, self.style().standardIcon(QStyle.SP_ComputerIcon))
+            wmi_child.setText(0, wmi_text)
+            wmi_child.setForeground(0, self._link_color())
+            wmi_child.setToolTip(0, wmi_text)
+            wmi_child.setTextAlignment(0, Qt.AlignLeft | Qt.AlignVCenter)
+            idx = item.childCount()
+            item.addChild(wmi_child)
             self.table.setFirstColumnSpanned(idx, parent_index, True)
 
         # IP 地址列 (col 0) 按内容自适应宽度，避免 IP 被截断
@@ -1856,6 +1982,16 @@ class MainWindow(QMainWindow):
             tip += f" · 设备: {result.device_class}"
             if result.device_model:
                 tip += f" ({result.device_model})"
+        if getattr(result, "wmi_identified", False):
+            tip += f" · WMI: {result.wmi_manufacturer} {result.wmi_model}".rstrip()
+            if result.wmi_os:
+                tip += f" / {result.wmi_os}"
+            if result.wmi_user:
+                tip += f" · 登录: {result.wmi_user}"
+            if result.wmi_serial:
+                tip += f" · SN: {result.wmi_serial}"
+        elif getattr(result, "wmi_error", ""):
+            tip += f" · WMI: 失败（{result.wmi_error}）"
         item.setToolTip(0, tip)
 
         # 状态列 (col 1)：预渲染电脑图标 (在线绿 / 离线灰) + 文字
@@ -2171,6 +2307,13 @@ class MainWindow(QMainWindow):
                 "location": r.location or "",
                 "user": r.user or "",
                 "remark": r.remark or "",
+                "wmi_identified": r.wmi_identified,
+                "wmi_manufacturer": r.wmi_manufacturer or "",
+                "wmi_model": r.wmi_model or "",
+                "wmi_serial": r.wmi_serial or "",
+                "wmi_os": r.wmi_os or "",
+                "wmi_user": r.wmi_user or "",
+                "wmi_domain": r.wmi_domain or "",
             })
         return {"time": time.time(), "devices": devices}
 
@@ -2252,6 +2395,10 @@ class MainWindow(QMainWindow):
             act_wol = QAction("唤醒 (WoL)", self)
             act_wol.triggered.connect(lambda: self._wake_on_lan(mac))
             menu.addAction(act_wol)
+
+        act_wmi_dev = QAction("WMI 识别 (管理员)...", self)
+        act_wmi_dev.triggered.connect(lambda: self._run_wmi_identification([ip]))
+        menu.addAction(act_wmi_dev)
 
         # 工具子菜单：快速启动内置网络工具
         tool_menu = menu.addMenu("工具")
