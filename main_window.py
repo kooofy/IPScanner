@@ -40,11 +40,12 @@ from mac_library import MacLibrary
 import history_store
 import audit_log
 
-from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog, AuditLogDialog, SwitchPortDialog
+from ui_dialogs import DeviceEditDialog, HistoryCompareDialog, MacLibraryDialog, TopologyDialog, WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog, AuditLogDialog, SwitchPortDialog, ChangeReportDialog
 from ui_icons import _build_dark_palette, get_pc_icons
 from ui_threads import MdnsThread, ScanThread, WmiThread
 from ui_utils import _detect_gateway
 from conflict_detector import detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
+from change_detector import detect_changes, get_change_summary
 
 
 STYLE_SHEET = """
@@ -617,6 +618,7 @@ class MainWindow(QMainWindow):
         self.dark_mode = False  # 深色模式开关
         self._conflicts: list = []       # 最近一次冲突检测结果
         self._conflict_ips: dict = {}    # {ip: [conflict_type, ...]} 用于树视图标记
+        self._changes: list = []         # 最近一次资产变更检测结果
 
         # 配置持久化 (QSettings, Ini 格式, 存于项目目录便于查看/重置)
         self.settings = QSettings(
@@ -1004,6 +1006,11 @@ class MainWindow(QMainWindow):
         self.act_conflict.setToolTip("检测 IP/MAC 冲突、未知设备等异常")
         self.act_conflict.triggered.connect(self._run_conflict_detection)
         scan_menu.addAction(self.act_conflict)
+
+        self.act_change = QAction("变更检测", self)
+        self.act_change.setToolTip("对比上次扫描快照，发现新增/消失/替换/改址等设备变动")
+        self.act_change.triggered.connect(lambda: self._run_change_detection(silent=False))
+        scan_menu.addAction(self.act_change)
 
         act_subnet_util = QAction("子网利用率...", self)
         act_subnet_util.setToolTip("按 /24 子网聚合，查看各网段在线占比与设备分布")
@@ -1664,6 +1671,8 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, results):
         try:
             self.all_results = results
+            # 变更检测：在保存新快照前，对比上一次快照
+            self._run_change_detection(silent=True)
             # 保存历史快照用于对比 (P2-5)
             self._save_snapshot(results)
             
@@ -1767,6 +1776,65 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "冲突检测", "未检测到任何冲突，网络状态良好。")
             return
         dlg = ConflictReportDialog(self._conflicts, parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _run_change_detection(self, silent=False):
+        """执行资产变更检测：对比当前扫描结果与上一次快照。
+
+        Args:
+            silent: True 时仅更新状态栏（扫描后自动调用）；
+                    False 时弹出变更报告对话框（菜单手动触发）。
+        """
+        if not self.all_results:
+            if not silent:
+                QMessageBox.information(self, "变更检测", "暂无扫描结果，请先执行扫描。")
+            return
+
+        # 加载最近一次快照作为"上次"基准
+        try:
+            snapshots = history_store.list_snapshots(self.history_db)
+            if not snapshots:
+                self._changes = []
+                if not silent:
+                    QMessageBox.information(self, "变更检测", "没有历史快照可供对比（首次扫描）。")
+                return
+            last_snap = history_store.get_snapshot(snapshots[-1]["id"], self.history_db)
+            prev_devices = last_snap["devices"] if last_snap else []
+        except Exception:
+            prev_devices = []
+
+        if not prev_devices:
+            self._changes = []
+            if not silent:
+                QMessageBox.information(self, "变更检测", "上次快照为空，无法对比。")
+            return
+
+        self._changes = detect_changes(self.all_results, prev_devices)
+
+        # 审计：记录变更检测
+        summary = get_change_summary(self._changes)
+        self._audit(audit_log.CAT_SCAN, "变更检测", summary)
+
+        if silent:
+            # 静默模式：有严重/警告变更时在状态栏提示
+            high = sum(1 for c in self._changes if c.severity == "high")
+            warn = sum(1 for c in self._changes if c.severity == "warning")
+            if high or warn:
+                parts = []
+                if high:
+                    parts.append(f"{high} 严重")
+                if warn:
+                    parts.append(f"{warn} 警告")
+                self.status_bar.showMessage(
+                    f"资产变更：{' · '.join(parts)}（菜单 → 扫描 → 变更检测 查看详情）"
+                )
+            return
+
+        # 手动触发：弹出报告对话框
+        if not self._changes:
+            QMessageBox.information(self, "变更检测", "与上次扫描相比无任何变更，网络状态稳定。")
+            return
+        dlg = ChangeReportDialog(self._changes, parent=self, dark=self.dark_mode)
         dlg.exec_()
 
     def _refresh_conflict_marks(self):
@@ -2502,6 +2570,7 @@ class MainWindow(QMainWindow):
         self.all_results.clear()
         self._conflicts.clear()
         self._conflict_ips.clear()
+        self._changes.clear()
         self._update_stats()
         self.act_export.setEnabled(False)
         self.act_clear.setEnabled(False)

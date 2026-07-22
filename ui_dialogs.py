@@ -20,6 +20,7 @@ from excel_handler import normalize_mac
 from mac_library import MacLibrary
 from ui_utils import _compare_snapshots
 from conflict_detector import Conflict, SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
+from change_detector import Change, SEVERITY_HIGH as CHG_HIGH, SEVERITY_WARNING as CHG_WARNING, SEVERITY_INFO as CHG_INFO
 import history_store
 import audit_log
 from ui_threads import SwitchMapThread
@@ -1085,4 +1086,139 @@ class SwitchPortDialog(QDialog):
             self.table.setItem(row, 6, QTableWidgetItem(m.device_class or "—"))
 
         self.status_label.setText(f"完成：{len(info.mappings)} 条映射")
+
+
+class ChangeReportDialog(QDialog):
+    """资产变更报告：展示本次扫描与上次快照之间的设备变动。"""
+
+    COLS = ["严重度", "变更类型", "IP", "MAC", "主机名", "变更详情"]
+
+    _COLOR_HIGH = QColor(220, 38, 38)     # 红
+    _COLOR_WARN = QColor(217, 119, 6)     # 橙
+    _COLOR_INFO = QColor(107, 114, 128)   # 灰
+
+    def __init__(self, changes, parent=None, dark=False):
+        super().__init__(parent)
+        self.dark = dark
+        self.changes = changes
+        self.setWindowTitle("资产变更报告")
+        self.setMinimumSize(880, 460)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # ── 摘要 ──
+        high = sum(1 for c in changes if c.severity == CHG_HIGH)
+        warn = sum(1 for c in changes if c.severity == CHG_WARNING)
+        info = sum(1 for c in changes if c.severity == CHG_INFO)
+        self.summary_label = QLabel(
+            f"共 {len(changes)} 项变更：{high} 严重 · {warn} 警告 · {info} 提示"
+        )
+        self.summary_label.setStyleSheet("font-size: 13px; padding: 4px 0;")
+        layout.addWidget(self.summary_label)
+
+        # ── 表格 ──
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setAlternatingRowColors(not dark)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+
+        hdr = self.table.horizontalHeader()
+        _col_widths = {0: 60, 1: 90, 2: 120, 3: 140, 4: 120, 5: 300}
+        for col, w in _col_widths.items():
+            hdr.setSectionResizeMode(col, QHeaderView.Interactive)
+            hdr.resizeSection(col, w)
+
+        self.table.setRowCount(len(changes))
+        for row, c in enumerate(changes):
+            # 严重度
+            sev_item = QTableWidgetItem(c.severity_label)
+            sev_item.setTextAlignment(Qt.AlignCenter)
+            color = self._severity_color(c.severity)
+            sev_item.setForeground(color)
+            sev_font = sev_item.font()
+            sev_font.setBold(True)
+            sev_item.setFont(sev_font)
+            self.table.setItem(row, 0, sev_item)
+
+            # 变更类型
+            type_item = QTableWidgetItem(c.type_label)
+            type_item.setForeground(color)
+            self.table.setItem(row, 1, type_item)
+
+            # IP
+            ip_item = QTableWidgetItem(c.ip or "—")
+            ip_font = ip_item.font()
+            ip_font.setFamily("Consolas")
+            ip_item.setFont(ip_font)
+            self.table.setItem(row, 2, ip_item)
+
+            # MAC
+            mac_item = QTableWidgetItem(c.mac or "—")
+            mac_font = mac_item.font()
+            mac_font.setFamily("Consolas")
+            mac_item.setFont(mac_font)
+            self.table.setItem(row, 3, mac_item)
+
+            # 主机名
+            self.table.setItem(row, 4, QTableWidgetItem(c.hostname or "—"))
+
+            # 变更详情
+            detail = c.description
+            if c.old_value and c.new_value:
+                detail += f"\n  {c.old_value} → {c.new_value}"
+            detail_item = QTableWidgetItem(detail)
+            detail_item.setToolTip(detail)
+            self.table.setItem(row, 5, detail_item)
+
+        layout.addWidget(self.table, 1)
+
+        # ── 底部按钮 ──
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        btn_export = QPushButton("导出 CSV")
+        btn_export.clicked.connect(self._export_csv)
+        btn_row.addWidget(btn_export)
+
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(btn_close)
+
+        layout.addLayout(btn_row)
+        self.setLayout(layout)
+
+    def _severity_color(self, severity) -> QColor:
+        if severity == CHG_HIGH:
+            return self._COLOR_HIGH
+        if severity == CHG_WARNING:
+            return self._COLOR_WARN
+        return self._COLOR_INFO
+
+    def _export_csv(self):
+        default_name = f"资产变更报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出变更报告", default_name, "CSV 文件 (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            import csv
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(self.COLS)
+                for c in self.changes:
+                    writer.writerow([
+                        c.severity_label, c.type_label, c.ip, c.mac,
+                        c.hostname, c.description,
+                    ])
+            QMessageBox.information(self, "导出成功", f"报告已保存到：\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", str(e))
 
