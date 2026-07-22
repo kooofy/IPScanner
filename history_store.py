@@ -14,8 +14,9 @@ import ipaddress
 import os
 import sqlite3
 import time
+from app_paths import data_dir
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_history.db")
+DB_PATH = os.path.join(data_dir(), "scan_history.db")
 
 
 def _connect(db_path=None):
@@ -193,7 +194,7 @@ def migrate_from_json(json_path, db_path=None) -> int:
 def ensure_migrated(db_path=None, json_path=None):
     """启动时调用一次：若 SQLite 为空且旧 JSON 存在，则迁移。返回迁移条数。"""
     if json_path is None:
-        json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_history.json")
+        json_path = os.path.join(data_dir(), "scan_history.json")
     if not list_snapshots(db_path) and os.path.exists(json_path):
         return migrate_from_json(json_path, db_path)
     return 0

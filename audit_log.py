@@ -12,8 +12,9 @@
 import os
 import sqlite3
 import time
+from app_paths import data_dir
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit_log.db")
+DB_PATH = os.path.join(data_dir(), "audit_log.db")
 
 # ── 事件分类 ──
 CAT_SCAN = "扫描"

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+from app_paths import data_dir, resource_dir
 import json
 import time
 import math
@@ -872,7 +873,7 @@ class MainWindow(QMainWindow):
 
         # 配置持久化 (QSettings, Ini 格式, 存于项目目录便于查看/重置)
         self.settings = QSettings(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "ipscanner.ini"),
+            os.path.join(data_dir(), "ipscanner.ini"),
             QSettings.IniFormat
         )
 
@@ -884,10 +885,10 @@ class MainWindow(QMainWindow):
 
         # 扫描历史快照 (SQLite, 存于项目目录；含内部信息，已 gitignore)
         self.history_db = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "scan_history.db"
+            data_dir(), "scan_history.db"
         )
         self.history_json = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "scan_history.json"
+            data_dir(), "scan_history.json"
         )
         # 首次启动若已有旧 JSON 历史，自动迁入 SQLite（幂等，可重复调用）
         history_store.ensure_migrated(self.history_db, self.history_json)
@@ -924,7 +925,7 @@ class MainWindow(QMainWindow):
         _BIG_ICON = 32
 
         # 扫描按钮 - 白底 + 绿色播放图标（用图片资源替代绘制）
-        _play_pm = QPixmap("assets/play_icon.png").scaled(
+        _play_pm = QPixmap(os.path.join(resource_dir(), "assets", "play_icon.png")).scaled(
             _BIG_ICON, _BIG_ICON, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.scan_btn = QPushButton("扫描")

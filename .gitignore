@@ -33,3 +33,8 @@ scan_history.db-wal
 audit_log.db
 audit_log.db-shm
 audit_log.db-wal
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec

@@ -13,6 +13,7 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from app_paths import data_dir
 
 from excel_handler import (
     normalize_mac,
@@ -22,7 +23,7 @@ from excel_handler import (
     COLUMN_ALIASES,
 )
 
-DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mac_library.db")
+DEFAULT_DB = os.path.join(data_dir(), "mac_library.db")
 
 # 基础表结构 + 非唯一索引；部分唯一索引在 _init_db 里于去重后创建
 _SCHEMA_BASE = """
