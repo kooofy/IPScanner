@@ -165,30 +165,58 @@ def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
 
     返回 {ip: {"names": set(host名), "services": set(服务类型)} }。
     典型可发现：打印机、NAS、路由器、Apple 设备、IoT、投屏、SMB 等。
-    端口被系统 mDNS 占用或组播不可达时返回空字典（不抛异常）。
+
+    端口策略：
+    - 优先绑定 5353 接收组播（最完整，能收到其余设备的组播广播）；
+    - 若 5353 被系统 mDNS/Bonjour 占用（Windows 常见），回退到随机源端口：
+      向组播组发送查询，响应设备会单播回我们的源端口，仍可被收到（仅
+      失去「被动监听其他设备组播」能力，但足以发现手机等主动响应的设备）。
     """
     by_ip: Dict[str, dict] = {}
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        _bound_5353 = False
         try:
             sock.bind(("", _MDNS_PORT))
+            _bound_5353 = True
         except OSError:
-            # 端口已被系统 mDNS/Bonjour 占用，无法接收组播响应
-            return by_ip
-        try:
-            mreq = socket.inet_aton(_MDNS_GROUP) + socket.inet_aton("0.0.0.0")
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        except OSError:
-            return by_ip
+            # 5353 被系统占用：回退随机端口（仍可收单播响应）
+            try:
+                sock.bind(("", 0))
+            except OSError:
+                return by_ip
+
+        if _bound_5353:
+            try:
+                mreq = socket.inet_aton(_MDNS_GROUP) + socket.inet_aton("0.0.0.0")
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            except OSError:
+                return by_ip
+
         sock.settimeout(0.25)
 
-        queries = [
-            _build_dns_query("_services._dns-sd._udp.local", 12, random.randint(1, 65535)),
-            _build_dns_query("local", 255, random.randint(1, 65535)),   # ANY
+        # 主动查询：DNS-SD 服务枚举 + 通用 ANY + 手机/投屏相关服务类型。
+        # 手机（iPhone/iPad）通常广播 companion-link / airdrop；Android 投屏
+        # 经 googlecast；Apple TV 经 airplay/raop。主动问这些类型能显著提高
+        # 手机被直接识别的概率（即便 MAC 为随机地址）。
+        _svc_types = [
+            "_services._dns-sd._udp.local",
+            "local",                      # ANY
+            "_companion-link._tcp.local",
+            "_airdrop._tcp.local",
+            "_airplay._tcp.local",
+            "_raop._tcp.local",
+            "_googlecast._tcp.local",
+            "_printer._tcp.local",
+            "_ipp._tcp.local",
+            "_homekit._tcp.local",
         ]
-        for q in queries:
+        for name in _svc_types:
+            qtype = 255 if name == "local" else 12   # ANY / PTR
+            q = _build_dns_query(name, qtype, random.randint(1, 65535))
             try:
                 sock.sendto(q, (_MDNS_GROUP, _MDNS_PORT))
             except OSError:

@@ -97,6 +97,34 @@ class TestClassifyPhoneRecognition(unittest.TestCase):
         cls, _ = infer_device(r)
         self.assertIn("Linux 设备", cls)
 
+    # ── A 增强：已知 IoT/家电厂商不应误报为「手机/IoT」 ──
+    def test_roborock_vendor_is_smart_home_not_mobile(self):
+        # 石头扫地机器人：vendor 已知 + Linux/Unix + 无端口，应判智能家居/IoT
+        r = mk(vendor="Beijing Roborock Technology", os_guess="Linux/Unix",
+               open_ports=[], hostname="")
+        cls, _ = infer_device(r)
+        self.assertEqual(cls, "智能家居/IoT")
+
+    def test_iot_vendor_linux_no_ports_is_smart_home(self):
+        r = mk(vendor="Xiaomi Communications Co Ltd", os_guess="Linux/Unix",
+               open_ports=[], hostname="")
+        # 小米同时是手机厂商；无 PC/TV 信号时应判「手机」而非智能家居/IoT
+        cls, _ = infer_device(r)
+        self.assertEqual(cls, "手机")
+
+    def test_iot_network_vendor_linux_no_ports_is_smart_home(self):
+        # TP-Link 等网络/IoT 厂商：vendor 已知 + 无端口 → 智能家居/IoT
+        r = mk(vendor="TP-Link Corporation", os_guess="Linux/Unix",
+               open_ports=[], hostname="")
+        cls, _ = infer_device(r)
+        self.assertEqual(cls, "智能家居/IoT")
+
+    def test_random_mac_linux_no_ports_without_iot_vendor_still_mobile_iot(self):
+        # vendor 为空（随机 MAC、OUI 查不到）仍走「手机/IoT」兜底
+        r = mk(vendor="", os_guess="Linux/Unix", open_ports=[], hostname="")
+        cls, _ = infer_device(r)
+        self.assertEqual(cls, "手机/IoT")
+
 
 if __name__ == "__main__":
     unittest.main()

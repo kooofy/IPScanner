@@ -22,7 +22,7 @@ except ImportError:
         return ""
 
 from .constants import (_OUI_CLASS_HINTS, _PRINTER_BRANDS, _PHONE_OUI_KEYWORDS,
-                         _PHONE_BRAND_DISPLAY)
+                         _PHONE_BRAND_DISPLAY, _IOT_VENDOR_KEYWORDS)
 from .snmp import _snmp_model
 
 from .models import ScanResult
@@ -164,6 +164,14 @@ def infer_device(result: "ScanResult") -> Tuple[str, str]:
         if any(h in hostname for h in _mobile_host):
             device_class = "手机"
 
+    # 4.8) 已知 IoT / 智能家居 / 家电厂商（vendor 非空）：直接判「智能家居/IoT」，
+    # 避免 step5 OS 兜底把「无端口 Linux/Unix」误归为「手机/IoT」。
+    # 注意：手机厂商(apple/samsung/...)已在 step4.5 命中；此处排除它们，
+    # 仅对明确的 IoT/家电/网络厂商生效。
+    if not device_class and vendor:
+        if any(k in vendor for k in _IOT_VENDOR_KEYWORDS):
+            device_class = "智能家居/IoT"
+
     # 5) 仅凭 OS 推测兜底（优先于 OUI 泛化提示，给出更具体的类别）
     if not device_class:
         if result.os_guess == "Windows":
@@ -173,12 +181,14 @@ def infer_device(result: "ScanResult") -> Tuple[str, str]:
             # 现代手机（iOS/Android）常使用随机/私有 MAC，OUI 查不到厂商；
             # 且默认无开放端口、TTL 同属 Linux/Unix 类。无开放端口 + 无 PC/TV/
             # 服务器信号的主机，多为手机或 IoT，而非真正的「Linux 设备/服务器」。
+            # 双保险：vendor 已知且属 IoT 厂商时（step4.8 未覆盖的边界），不标手机/IoT。
             _pc_signals = any(h in hostname for h in
                               ("mac", "pc", "desktop", "laptop", "server", "nas",
                                "router", "switch", "printer", "print"))
             _tv_signals = any(t in hostname for t in
                               ("tv", "bravia", "webos", "tizen", "android tv", "shield"))
-            if not ports and not _pc_signals and not _tv_signals:
+            if (not ports and not _pc_signals and not _tv_signals
+                    and not any(k in vendor for k in _IOT_VENDOR_KEYWORDS)):
                 device_class = "手机/IoT"
             else:
                 device_class = "Linux 设备/服务器" if 22 in ports else "Linux 设备"

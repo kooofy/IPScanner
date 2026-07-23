@@ -260,3 +260,18 @@ _PHONE_BRAND_DISPLAY = {
     "nokia": "Nokia", "lg": "LG", "sony": "Sony", "tcl": "TCL", "lenovo": "Lenovo",
 }
 
+# IoT / 智能家居 / 家电厂商关键字：用于 step5 OS 兜底时排除「手机/IoT」误报，
+# 直接归为「智能家居/IoT」。这些厂商的设备多为无屏 IoT，不应冒认成手机。
+_IOT_VENDOR_KEYWORDS = (
+    "roborock", "石头", "xiaomi", "mijia", "米家", "tuya", "涂鸦",
+    "espressif", "philips", "sengled", "yeelight", "sonos", "bose",
+    "nest", "amazon", "ring", "ecovacs", "科沃斯", "dreame", "追觅",
+    "tp-link", "tplink", "mercury", "tenda", "netgear", "d-link", "dlink",
+    "asus", "ruijie", "h3c", "ubiquiti", "huawei", "rui", "mercury",
+    "broadlink", "orvibo", "欧瑞博", "govee", "aqara", "绿米", "switchbot",
+    "海康", "hikvision", "dahua", "大华", "yi", "小蚁", "imou", "乐橙",
+    "eufy", "anko", "tplink", "klein", "wemo", "belkin", "lutron",
+    "shelly", "sonoff", "gree", "格力", "midea", "美的", "haier", "海尔",
+    "changhong", "长虹", "hisense", "海信", "skyworth", "创维",
+)
+
