@@ -72,6 +72,12 @@ def infer_device(result: "ScanResult") -> Tuple[str, str]:
         device_class = device_class or "智能家居"
     if any("_adb" in s for s in mdns_lower):
         device_class = device_class or "Android/开发板"
+    # Apple 移动设备（iPhone/iPad/Apple Watch）的 Continuity 信号，优先于媒体设备：
+    # 投屏只是手机的一个子场景，companion-link / airdrop 才是真移动设备指纹。
+    # 现代手机常用私有/随机 MAC，OUI 查不到厂商，mDNS 服务类型是可靠线索。
+    if any(("_companion-link" in s or "_airdrop" in s) for s in mdns_lower):
+        device_class = "手机"
+        device_model = device_model or "Apple 移动设备"
 
     # 2) 端口组合规则
     if not device_class:
@@ -149,13 +155,33 @@ def infer_device(result: "ScanResult") -> Tuple[str, str]:
                          if kw in vendor), vendor.split(",")[0] or "手机"
                     ).strip()
 
+    # 4.7) 主机名含手机品牌关键字（即使 MAC 随机化、OUI 为空也能识别移动设备）
+    # 须置于 OS 兜底(step 5)之前，否则会被较模糊的「手机/IoT」抢占。
+    if not device_class:
+        _mobile_host = ("iphone", "ipad", "android", "xiaomi", "huawei",
+                        "oppo", "vivo", "oneplus", "realme", "redmi", "honor",
+                        "galaxy", "pixel")
+        if any(h in hostname for h in _mobile_host):
+            device_class = "手机"
+
     # 5) 仅凭 OS 推测兜底（优先于 OUI 泛化提示，给出更具体的类别）
     if not device_class:
         if result.os_guess == "Windows":
             device_class = "电脑/服务器" if (3389 in ports or (445 in ports and 139 in ports)) \
                 else "Windows 设备"
         elif result.os_guess == "Linux/Unix":
-            device_class = "Linux 设备/服务器" if 22 in ports else "Linux 设备"
+            # 现代手机（iOS/Android）常使用随机/私有 MAC，OUI 查不到厂商；
+            # 且默认无开放端口、TTL 同属 Linux/Unix 类。无开放端口 + 无 PC/TV/
+            # 服务器信号的主机，多为手机或 IoT，而非真正的「Linux 设备/服务器」。
+            _pc_signals = any(h in hostname for h in
+                              ("mac", "pc", "desktop", "laptop", "server", "nas",
+                               "router", "switch", "printer", "print"))
+            _tv_signals = any(t in hostname for t in
+                              ("tv", "bravia", "webos", "tizen", "android tv", "shield"))
+            if not ports and not _pc_signals and not _tv_signals:
+                device_class = "手机/IoT"
+            else:
+                device_class = "Linux 设备/服务器" if 22 in ports else "Linux 设备"
         elif result.os_guess == "网络设备":
             device_class = "网络设备"
         else:
