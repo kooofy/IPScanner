@@ -243,3 +243,20 @@ _OUI_CLASS_HINTS = [
     ("hon hai", "电脑/手机"),
     ("azurewave", "电脑/网卡"),
 ]
+
+# 手机厂商 OUI 关键词：仅凭 MAC(OUI) 只能拿到厂商，无法区分手机/电脑/IoT，
+# 故仅作为「多信号融合识别手机」的候选集，需结合端口/OS/主机名剔除非手机信号。
+_PHONE_OUI_KEYWORDS = (
+    "apple", "samsung", "xiaomi", "huawei", "oppo", "vivo", "google",
+    "oneplus", "realme", "meizu", "honor", "motorola", "nokia", "lg",
+    "sony", "tcl", "lenovo",
+)
+
+# 手机厂商 OUI 关键词 -> 友好中文/品牌名（用于「设备类型」列型号展示）
+_PHONE_BRAND_DISPLAY = {
+    "apple": "Apple", "samsung": "三星", "xiaomi": "小米", "huawei": "华为",
+    "oppo": "OPPO", "vivo": "vivo", "google": "Google", "oneplus": "一加",
+    "realme": "realme", "meizu": "魅族", "honor": "荣耀", "motorola": "Motorola",
+    "nokia": "Nokia", "lg": "LG", "sony": "Sony", "tcl": "TCL", "lenovo": "Lenovo",
+}
+

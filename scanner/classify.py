@@ -21,7 +21,8 @@ except ImportError:
     def get_mac_vendor(mac: str) -> str:
         return ""
 
-from .constants import _OUI_CLASS_HINTS, _PRINTER_BRANDS
+from .constants import (_OUI_CLASS_HINTS, _PRINTER_BRANDS, _PHONE_OUI_KEYWORDS,
+                         _PHONE_BRAND_DISPLAY)
 from .snmp import _snmp_model
 
 from .models import ScanResult
@@ -125,6 +126,28 @@ def infer_device(result: "ScanResult") -> Tuple[str, str]:
                 device_class = "路由器"
             else:
                 device_class = device_class or "网络设备"
+
+    # 4.5) 手机识别：OUI 厂商 + 排除电脑/服务器/电视特征（多信号融合）
+    # 关键：手机连 Wi-Fi 通常无开放端口、TTL 猜测多为 Linux/Unix，若放在 OS 兜底之后
+    # 会被误标为「Linux 设备」，故必须在 OS 兜底之前、且强信号(mDNS/端口/SNMP/UPnP)之后判定。
+    if not device_class:
+        if any(k in vendor for k in _PHONE_OUI_KEYWORDS):
+            _pc_signals = (
+                bool({135, 139, 445, 3389} & ports)          # SMB/RPC/RDP：典型 Windows PC/服务器
+                or result.os_guess == "Windows"
+                or any(h in hostname for h in
+                       ("mac", "pc", "desktop", "laptop", "server", "nas",
+                        "router", "switch", "printer", "print"))
+            )
+            _tv_signals = any(t in hostname for t in
+                              ("tv", "bravia", "webos", "tizen", "android tv", "shield"))
+            if not _pc_signals and not _tv_signals:
+                device_class = "手机"
+                if not device_model:
+                    device_model = next(
+                        (disp for kw, disp in _PHONE_BRAND_DISPLAY.items()
+                         if kw in vendor), vendor.split(",")[0] or "手机"
+                    ).strip()
 
     # 5) 仅凭 OS 推测兜底（优先于 OUI 泛化提示，给出更具体的类别）
     if not device_class:
