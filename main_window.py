@@ -1676,23 +1676,56 @@ class MainWindow(QMainWindow):
             out = ""
         ips = re.findall(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)", out)
         masks = re.findall(r"子网掩码[\.:\s]+([\d.]+)", out)
+        default_ip = self._get_default_local_ip()
         if ips and masks and len(ips) == len(masks):
+            # 1) 优先：默认出口 IP 在 ipconfig 中的 (ip, mask) 配对 -> 真实前缀长度
+            if default_ip:
+                for ip, mask in zip(ips, masks):
+                    if ip == default_ip:
+                        net, prefix = self._ip_mask_to_subnet(ip, mask)
+                        if net:
+                            return f"{net}/{prefix}"
+            # 2) 回退：跳过回环/虚拟网卡，取第一张「真实」网卡
             for ip, mask in zip(ips, masks):
-                if ip.startswith("127."):
+                if ip.startswith("127.") or self._is_virtual_adapter_ip(ip):
                     continue
-                try:
-                    ip_parts = list(map(int, ip.split(".")))
-                    mask_parts = list(map(int, mask.split(".")))
-                    net_parts = [str(ip_parts[i] & mask_parts[i]) for i in range(4)]
-                    prefix = sum(bin(m).count("1") for m in mask_parts)
-                    return f"{'.'.join(net_parts)}/{prefix}"
-                except Exception:
-                    continue
-        ip = self._get_default_local_ip()
-        if ip:
-            parts = ip.split(".")
+                net, prefix = self._ip_mask_to_subnet(ip, mask)
+                if net:
+                    return f"{net}/{prefix}"
+        if default_ip:
+            parts = default_ip.split(".")
             return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
         return None
+
+    @staticmethod
+    def _ip_mask_to_subnet(ip: str, mask: str):
+        """由 IPv4 与子网掩码计算网段地址与前缀长度，失败返回 (None, 0)。"""
+        try:
+            ip_parts = list(map(int, ip.split(".")))
+            mask_parts = list(map(int, mask.split(".")))
+            net_parts = [str(ip_parts[i] & mask_parts[i]) for i in range(4)]
+            prefix = sum(bin(m).count("1") for m in mask_parts)
+            return ".".join(net_parts), prefix
+        except Exception:
+            return None, 0
+
+    @staticmethod
+    def _is_virtual_adapter_ip(ip: str) -> bool:
+        """粗略判断是否为虚拟/容器网卡使用的私有网段（VirtualBox/Docker/链路本地等）。"""
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return False
+        try:
+            a, b = int(parts[0]), int(parts[1])
+        except ValueError:
+            return False
+        if a == 169 and b == 254:                        # 169.254.0.0/16 链路本地(APIPA)
+            return True
+        if a == 172 and 16 <= b <= 31:                   # 172.16.0.0/12 Docker 默认桥
+            return True
+        if a == 192 and b == 168 and int(parts[2]) == 56:  # 192.168.56.0/24 VirtualBox Host-Only
+            return True
+        return False
 
     def _get_c_class_subnet(self):
         """获取本机 IP 的 C 类子网 /24。"""
