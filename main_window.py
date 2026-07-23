@@ -33,9 +33,10 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QColor, QFont, QIcon, QPainter, QBrush, QPen, QPixmap, QImage, QPalette,
-    QCursor, QFontMetrics, QDesktopServices
+    QCursor, QFontMetrics, QDesktopServices, QTextDocument, QPageLayout, QPageSize
 )
 from PyQt5.QtGui import QKeySequence
+from PyQt5.QtPrintSupport import QPrinter, QPrintPreviewDialog
 from scanner import (NetworkScanner, ScanResult, parse_ip_range, COMMON_PORTS,
                       PORT_NAMES, PROTOCOL_PORTS, WmiCredentialStore, wmi_device_class,
                       merge_wmi, netbios_query, merge_netbios, get_ports_for_level,
@@ -1135,6 +1136,13 @@ class MainWindow(QMainWindow):
         self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self._export_results)
         file_menu.addAction(self.act_export)
+
+        act_print = QAction("打印...", self)
+        act_print.setShortcut(QKeySequence("Ctrl+P"))
+        act_print.triggered.connect(self._print_results)
+        file_menu.addAction(act_print)
+
+        file_menu.addSeparator()
 
         act_exit = QAction("退出", self)
         act_exit.setShortcut(QKeySequence("Alt+F4"))
@@ -3379,6 +3387,59 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "导出成功", msg)
         else:
             QMessageBox.warning(self, "导出失败", msg)
+
+    def _print_results(self):
+        """将当前扫描结果表格打印 / 导出为 PDF（先弹打印预览对话框）。"""
+        if self.table.topLevelItemCount() == 0:
+            QMessageBox.information(self, "提示", "当前没有可打印的扫描结果，请先执行扫描。")
+            return
+
+        # 仅取可见列（服务列默认隐藏，跳过），只打印设备顶层行
+        cols = [c for c in range(self.table.columnCount())
+                if not self.table.isColumnHidden(c)]
+        headers = [self.table.headerItem().text(c) for c in cols]
+        rows = []
+        for r in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(r)
+            if item.isHidden():   # 跳过被筛选隐藏的行（如"仅在线"下的离线设备），实现所见即所得
+                continue
+            rows.append([item.text(c) for c in cols])
+
+        doc = QTextDocument()
+        doc.setHtml(self._build_results_print_html(headers, rows))
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageSize(QPageSize(QPageSize.A4))
+        printer.setPageOrientation(QPageLayout.Landscape)
+
+        preview = QPrintPreviewDialog(printer, self)
+        preview.setWindowTitle("打印预览 - 扫描结果")
+        preview.paintRequested.connect(lambda p: doc.print_(p))
+        preview.exec_()
+
+    @staticmethod
+    def _build_results_print_html(headers, rows):
+        def esc(s):
+            return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+        th = "".join(f"<th>{esc(h)}</th>" for h in headers)
+        body = ""
+        for i, row in enumerate(rows):
+            bg = "#F2F2F2" if i % 2 else "#FFFFFF"
+            tds = "".join(f"<td>{esc(c)}</td>" for c in row)
+            body += f"<tr style='background:{bg};'>{tds}</tr>"
+        title = f"局域网扫描结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        return (
+            "<html><head><meta charset='utf-8'>"
+            "<style>"
+            "table{border-collapse:collapse;width:100%;font-size:9pt;"
+            "font-family:'Microsoft YaHei',SimSun,sans-serif;}"
+            "th,td{border:1px solid #999;padding:3px 5px;text-align:left;}"
+            "th{background:#2C3E50;color:#FFFFFF;}"
+            "</style></head><body>"
+            f"<h3 style='margin:0 0 6px 0;'>{esc(title)}</h3>"
+            "<table>" + f"<tr>{th}</tr>" + body + "</table></body></html>"
+        )
 
     # --- 关于 ---
 
