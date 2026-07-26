@@ -1,31 +1,11 @@
 # -*- coding: utf-8 -*-
-import subprocess
 import socket
-import ssl
-import struct
-import threading
-import concurrent.futures
-import ipaddress
-import re
-import time
-import platform
-import os
-import locale
-import random
-import ctypes
+import subprocess
+
 # 隐藏子进程控制台窗口（Windows only；非 Windows 为 0 无副作用）
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
 
 from .constants import _CMD_ENCODING
-
-from .models import ScanResult
 
 
 def _run_cmd(cmd: list, timeout: float = 10) -> str:

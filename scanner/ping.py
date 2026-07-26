@@ -1,30 +1,12 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
-import concurrent.futures
-import ipaddress
-import re
-import time
-import platform
-import os
-import locale
-import random
 import ctypes
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
+import ipaddress
+import platform
+import re
+from typing import Dict, List, Optional, Tuple
 
 from .constants import _LOCAL_MAC_CACHE
 from .util import _run_cmd
-
-from .models import ScanResult
 
 
 def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:

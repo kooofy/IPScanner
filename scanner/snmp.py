@@ -1,29 +1,9 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
-import concurrent.futures
-import ipaddress
-import re
-import time
-import platform
-import os
-import locale
 import random
-import ctypes
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
+import re
+import socket
 
 from .constants import _SNMP_DEFAULT_COMMUNITIES, _SNMP_GET_OIDS
-
-from .models import ScanResult
 
 
 def _ber_len(length: int) -> bytes:

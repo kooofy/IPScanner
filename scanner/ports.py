@@ -1,30 +1,15 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
 import concurrent.futures
-import ipaddress
-import re
-import time
 import platform
-import os
-import locale
 import random
-import ctypes
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
+import re
+import socket
+import struct
+import time
+from typing import List, Tuple
 
 from .constants import COMMON_PORTS, _SYSTEM_SHARES, _raw_cap_cache, _syn_failed
 from .util import _inet_checksum, _local_ip_for_dst, _run_cmd
-
-from .models import ScanResult
 
 
 def scan_port(ip: str, port: int, timeout: float = 0.5) -> bool:

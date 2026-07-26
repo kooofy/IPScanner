@@ -1,25 +1,5 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
-import concurrent.futures
-import ipaddress
-import re
-import time
-import platform
-import os
-import locale
-import random
-import ctypes
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
+from typing import Tuple
 
 from .constants import (_OUI_CLASS_HINTS, _PRINTER_BRANDS, _PHONE_OUI_KEYWORDS,
                          _PHONE_BRAND_DISPLAY, _IOT_VENDOR_KEYWORDS)

@@ -1,31 +1,16 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
+# 注意：本模块已废弃。SYN/UDP 扫描函数已并入 ports.py，本文件保留仅作参考，
+# 无任何模块引用。请使用 scanner.ports 中的同名函数。
 import concurrent.futures
-import ipaddress
-import re
-import time
-import platform
-import os
-import locale
 import random
-import ctypes
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
+import socket
+import struct
+import time
+from typing import List
 
 from .constants import _syn_failed
 from .ports import scan_ports
 from .util import _inet_checksum, _local_ip_for_dst
-
-from .models import ScanResult
 
 
 def _build_syn_packet(src_ip: str, dst_ip: str, src_port: int,

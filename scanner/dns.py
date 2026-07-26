@@ -1,30 +1,15 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
 import concurrent.futures
-import ipaddress
-import re
-import time
 import platform
-import os
-import locale
 import random
-import ctypes
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
-try:
-    from oui_database import get_mac_vendor
-except ImportError:
-    def get_mac_vendor(mac: str) -> str:
-        return ""
+import re
+import socket
+import struct
+import time
+from typing import Dict
 
 from .constants import _MDNS_GROUP, _MDNS_PORT, _resolve_executor, _resolve_executor_lock
 from .util import _run_cmd
-
-from .models import ScanResult
 
 
 def _get_resolve_executor():

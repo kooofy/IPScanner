@@ -1,21 +1,8 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import socket
-import ssl
-import struct
-import threading
 import concurrent.futures
 import ipaddress
-import re
-import time
-import platform
-import os
-import locale
-import random
-import ctypes
 import statistics
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional
 try:
     from oui_database import get_mac_vendor
 except ImportError:
@@ -32,8 +19,6 @@ from .ping import arp_ping, get_local_subnets, get_mac_for_ip, ping_ip
 from .ports import raw_capability, scan_port, scan_ports, scan_shares
 from .range import parse_ip_range
 from .snmp import snmp_get_system
-
-from .models import ScanResult
 
 
 # ── RTT 自适应超时（仅 TCP connect 模式） ──
