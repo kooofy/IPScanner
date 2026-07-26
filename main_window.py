@@ -868,6 +868,7 @@ class MainWindow(QMainWindow):
         self.ip_range_items: list = []
         self._ip_item_map: dict = {}
         self.dark_mode = False  # 深色模式开关
+        self.auto_time = False  # 是否跟随时间自动切换深色/浅色主题
         self._conflicts: list = []       # 最近一次冲突检测结果
         self._conflict_ips: dict = {}    # {ip: [conflict_type, ...]} 用于树视图标记
         self._changes: list = []         # 最近一次资产变更检测结果
@@ -906,8 +907,15 @@ class MainWindow(QMainWindow):
         # 载入地址库计数
         self._refresh_library_label()
 
-        # 应用初始主题
+        # 应用初始主题（若开启跟随时间自动切换，则先按当前时间决定深/浅色）
+        if self.auto_time:
+            self.dark_mode = self._should_be_dark_now()
         self._apply_theme(self.dark_mode)
+        # 按时间自动切换主题：每分钟检查一次时间边界（自动模式下跨过阈值即切换）
+        self._theme_timer = QTimer(self)
+        self._theme_timer.setInterval(60 * 1000)
+        self._theme_timer.timeout.connect(self._check_theme_by_time)
+        self._theme_timer.start()
 
     def _init_ui(self):
         central = QWidget()
@@ -1384,12 +1392,13 @@ class MainWindow(QMainWindow):
 
         # 视图菜单（仿 Advanced IP Scanner「查看」菜单：左列复选/图标，右列文字）
         view_menu = menubar.addMenu("查看(&V)")
-        self.act_dark = QAction("深色模式", self)
-        self.act_dark.setShortcut(QKeySequence("Ctrl+D"))
-        self.act_dark.setCheckable(True)
-        self.act_dark.setChecked(self.dark_mode)
-        self.act_dark.triggered.connect(self._toggle_dark_mode)
-        view_menu.addAction(self.act_dark)
+        # 主题仅由「跟随时间自动切换」控制，不再提供手动切换入口
+
+        self.act_auto_theme = QAction("跟随时间自动切换主题", self)
+        self.act_auto_theme.setCheckable(True)
+        self.act_auto_theme.setChecked(self.auto_time)
+        self.act_auto_theme.triggered.connect(self._toggle_auto_theme)
+        view_menu.addAction(self.act_auto_theme)
 
         # 显示列子菜单 (P2-3)
         col_menu = view_menu.addMenu("显示列")
@@ -1499,11 +1508,37 @@ class MainWindow(QMainWindow):
                 if ip not in getattr(self, "_conflict_ips", {}):
                     item.setForeground(0, _fg)
 
-    def _toggle_dark_mode(self, checked: bool):
-        self.dark_mode = checked
-        self.act_dark.setChecked(checked)
-        self._apply_theme(checked)
-        self._save_settings()
+    def _should_be_dark_now(self) -> bool:
+        """按时间判断当前是否应为深色：18:00–次日 06:00 视为深色时段。"""
+        _h = datetime.now().hour
+        return _h >= 18 or _h < 6
+
+    def _set_dark_mode(self, dark: bool, save: bool = True):
+        """底层设定主题并刷新 UI；save=True 时持久化到配置。"""
+        self.dark_mode = dark
+        self._apply_theme(dark)
+        if save:
+            self._save_settings()
+
+    def _check_theme_by_time(self):
+        """定时器回调：开启自动模式且跨越时间边界时切换主题。"""
+        if not getattr(self, "auto_time", False):
+            return
+        _target = self._should_be_dark_now()
+        if _target != self.dark_mode:
+            self._set_dark_mode(_target, save=True)
+
+    def _toggle_auto_theme(self, checked: bool):
+        """勾选「跟随时间自动切换」：开启时立即按当前时间校正一次主题。"""
+        self.auto_time = checked
+        if checked:
+            _target = self._should_be_dark_now()
+            if _target != self.dark_mode:
+                self._set_dark_mode(_target, save=True)
+            else:
+                self._save_settings()
+        else:
+            self._save_settings()
 
     def _link_color(self) -> QColor:
         """服务链接/可点击文字颜色，随主题变化 (深色下提亮以保证对比度)。"""
@@ -1519,7 +1554,9 @@ class MainWindow(QMainWindow):
         s = self.settings
         # 主题
         self.dark_mode = s.value("theme/dark", False, type=bool)
-        self.act_dark.setChecked(self.dark_mode)
+        self.auto_time = s.value("theme/auto_time", False, type=bool)
+        if hasattr(self, "act_auto_theme"):
+            self.act_auto_theme.setChecked(self.auto_time)
         # 扫描参数
         self.timeout_spin.setValue(s.value("scan/timeout_ms", 1000, type=int))
         self.threads_spin.setValue(s.value("scan/max_threads", 100, type=int))
@@ -1569,6 +1606,7 @@ class MainWindow(QMainWindow):
         """保存当前配置到 ipscanner.ini。"""
         s = self.settings
         s.setValue("theme/dark", self.dark_mode)
+        s.setValue("theme/auto_time", self.auto_time)
         s.setValue("scan/timeout_ms", self.timeout_spin.value())
         s.setValue("scan/max_threads", self.threads_spin.value())
         s.setValue("scan/port_scan", self.port_scan_check.isChecked())
