@@ -35,8 +35,9 @@ def init(lang: str = None):
 
 
 def tr(text: str) -> str:
-    """翻译字符串。未找到翻译时返回原文。"""
-    return _translations.get(text, text)
+    """翻译字符串。未找到翻译或翻译为空时返回原文。"""
+    t = _translations.get(text)
+    return t if t else text
 
 
 def current_lang() -> str:

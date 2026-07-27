@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+from i18n import tr
 try:
     from oui_database import get_mac_vendor
 except ImportError:
@@ -72,43 +73,43 @@ class ScanResult:
 
     def to_dict(self) -> dict:
         if self.discovery_method:
-            discovered = {"arp": "ARP探测", "mdns": "mDNS发现"}.get(
-                self.discovery_method, "Ping"
+            discovered = {"arp": tr("ARP探测"), "mdns": tr("mDNS发现")}.get(
+                self.discovery_method, tr("Ping")
             )
         elif self.status == "online":
-            discovered = "Ping"
+            discovered = tr("Ping")
         else:
             discovered = ""
-        _method_map = {"connect": "TCP全连接", "syn": "TCP-SYN半开", "udp": "UDP"}
+        _method_map = {"connect": tr("TCP全连接"), "syn": tr("TCP-SYN半开"), "udp": tr("UDP")}
         _os_label = ""
         if self.os_guess or self.os_detail:
             _os_label = (f"{self.os_guess} {self.os_detail}".strip())
         return {
-            "IP地址": self.ip,
-            "状态": "在线" if self.status == "online" else "离线",
-            "主机名": self.hostname,
-            "MAC地址": self.mac,
-            "厂商": self.vendor,
-            "设备类型": self.device_class or self.device_type,
-            "设备型号": self.device_model,
-            "位置": self.location,
-            "使用者": self.user,
-            "响应时间(ms)": round(self.response_time, 1) if self.response_time else "",
-            "开放端口": ", ".join(str(p) for p in self.open_ports) if self.open_ports else "",
-            "共享文件夹": ", ".join(self.shares) if self.shares else "",
-            "发现方式": discovered,
-            "端口探测方式": _method_map.get(self.scan_method, self.scan_method),
-            "操作系统": _os_label,
-            "WMI厂商": self.wmi_manufacturer,
-            "WMI型号": self.wmi_model,
-            "WMI序列号": self.wmi_serial,
-            "WMI系统": (f"{self.wmi_os} {self.wmi_os_version}".strip()
+            tr("IP地址"): self.ip,
+            tr("状态"): tr("在线") if self.status == "online" else tr("离线"),
+            tr("主机名"): self.hostname,
+            tr("MAC地址"): self.mac,
+            tr("厂商"): self.vendor,
+            tr("设备类型"): self.device_class or self.device_type,
+            tr("设备型号"): self.device_model,
+            tr("位置"): self.location,
+            tr("使用者"): self.user,
+            tr("响应时间(ms)"): round(self.response_time, 1) if self.response_time else "",
+            tr("开放端口"): ", ".join(str(p) for p in self.open_ports) if self.open_ports else "",
+            tr("共享文件夹"): ", ".join(self.shares) if self.shares else "",
+            tr("发现方式"): discovered,
+            tr("端口探测方式"): _method_map.get(self.scan_method, self.scan_method),
+            tr("操作系统"): _os_label,
+            tr("WMI厂商"): self.wmi_manufacturer,
+            tr("WMI型号"): self.wmi_model,
+            tr("WMI序列号"): self.wmi_serial,
+            tr("WMI系统"): (f"{self.wmi_os} {self.wmi_os_version}".strip()
                         if (self.wmi_os or self.wmi_os_version) else ""),
-            "WMI域/用户": (f"{self.wmi_domain} / {self.wmi_user}".strip(" /")
+            tr("WMI域/用户"): (f"{self.wmi_domain} / {self.wmi_user}".strip(" /")
                            if (self.wmi_domain or self.wmi_user) else ""),
-            "NetBIOS名称": self.netbios_name,
-            "NetBIOS工作组": self.netbios_workgroup,
-            "NetBIOS用户": self.netbios_user,
-            "NetBIOS MAC": self.netbios_mac,
-            "备注": self.remark,
+            tr("NetBIOS名称"): self.netbios_name,
+            tr("NetBIOS工作组"): self.netbios_workgroup,
+            tr("NetBIOS用户"): self.netbios_user,
+            tr("NetBIOS MAC"): self.netbios_mac,
+            tr("备注"): self.remark,
         }

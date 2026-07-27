@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable
 
 from scanner.snmp import snmp_walk, snmp_get_system
+from i18n import tr
 
 
 # ── OID 前缀 ──
@@ -89,35 +90,35 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
             progress_cb(msg)
 
     # 0) 获取交换机基本信息
-    _progress("正在获取交换机信息...")
+    _progress(tr("正在获取交换机信息..."))
     sys_info = snmp_get_system(ip, communities=[community], timeout=timeout)
     if sys_info:
         info.sys_name = sys_info.get("sys_name", "")
         info.sys_descr = sys_info.get("sys_descr", "")
 
     # 1) 遍历 MAC 转发表 (dot1dTpFdbTable)
-    _progress("正在遍历 MAC 转发表...")
+    _progress(tr("正在遍历 MAC 转发表..."))
     fdb_port_raw = snmp_walk(ip, _OID_FDB_PORT, community=community, timeout=timeout)
     if not fdb_port_raw:
         info.error = (
             f"无法从 {ip} 获取 MAC 转发表。\n"
-            "请确认：\n"
-            "  1. 交换机已开启 SNMP 且社区名正确\n"
-            "  2. 本机与交换机网络可达（UDP 161）\n"
-            "  3. 交换机支持 BRIDGE-MIB (dot1dTpFdbTable)"
+            + tr("请确认：\n"
+                 "  1. 交换机已开启 SNMP 且社区名正确\n")
+            + tr("  2. 本机与交换机网络可达（UDP 161）\n"
+                 "  3. 交换机支持 BRIDGE-MIB (dot1dTpFdbTable)")
         )
         return info
 
     # 2) 遍历 dot1dTpFdbStatus（过滤 self/管理地址）
-    _progress("正在读取转发表状态...")
+    _progress(tr("正在读取转发表状态..."))
     fdb_status_raw = snmp_walk(ip, _OID_FDB_STATUS, community=community, timeout=timeout)
 
     # 3) 遍历 dot1dBasePortIfIndex（桥接端口 → ifIndex）
-    _progress("正在读取端口索引映射...")
+    _progress(tr("正在读取端口索引映射..."))
     base_port_raw = snmp_walk(ip, _OID_BASE_PORT_IFINDEX, community=community, timeout=timeout)
 
     # 4) 遍历 ifDescr / ifName（ifIndex → 端口名称）
-    _progress("正在读取端口名称...")
+    _progress(tr("正在读取端口名称..."))
     ifdescr_raw = snmp_walk(ip, _OID_IF_DESCR, community=community, timeout=timeout)
     ifname_raw = snmp_walk(ip, _OID_IF_NAME, community=community, timeout=timeout)
 
@@ -165,7 +166,7 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
                 pass
 
     # MAC → 桥接端口
-    _progress("正在组装映射结果...")
+    _progress(tr("正在组装映射结果..."))
     mappings: List[PortMapping] = []
     for oid, (vbytes, vtag) in fdb_port_raw.items():
         suffix = _extract_suffix(oid, _OID_FDB_PORT)

@@ -57,11 +57,12 @@ from styles import (STYLE_SHEET, DARK_STYLE_SHEET, _gray_icon, _make_tool_icon,
                      _make_pause_icon, _ip_to_int,
                      _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9)
 from main_window_tree import ResultTreeItem, TreeMixin
+from i18n import tr
 
 class MainWindow(TreeMixin, QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("局域网终端扫描工具 — IP Scanner")
+        self.setWindowTitle(tr("局域网终端扫描工具 — IP Scanner"))
         self.setMinimumSize(1200, 750)
         self.resize(1300, 850)
 
@@ -145,7 +146,7 @@ class MainWindow(TreeMixin, QMainWindow):
         _play_pm = QPixmap(os.path.join(resource_dir(), "assets", "play_icon.png")).scaled(
             _BIG_ICON, _BIG_ICON, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
-        self.scan_btn = QPushButton("扫描")
+        self.scan_btn = QPushButton(tr("扫描"))
         self.scan_btn.setIcon(QIcon(_play_pm))
         self.scan_btn.setIconSize(QSize(_BIG_ICON, _BIG_ICON))
         self.scan_btn.setObjectName("primaryBtn")
@@ -158,7 +159,7 @@ class MainWindow(TreeMixin, QMainWindow):
         self.stop_btn.setIcon(_make_pause_icon())
         self.stop_btn.setIconSize(QSize(_BIG_BTN_H - 6, _BIG_BTN_H - 6))
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setToolTip("停止扫描")
+        self.stop_btn.setToolTip(tr("停止扫描"))
 
         tb1.addWidget(self.scan_btn)
         tb1.addWidget(self.stop_btn)
@@ -174,28 +175,28 @@ class MainWindow(TreeMixin, QMainWindow):
         self.local_subnet_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
         self.local_subnet_btn.setIcon(_make_tool_icon("ip", _icon_color, _ICON_SZ))
         self.local_subnet_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
-        self.local_subnet_btn.setToolTip("扫描本机所在子网")
+        self.local_subnet_btn.setToolTip(tr("扫描本机所在子网"))
 
         self.c_subnet_btn = QPushButton()
         self.c_subnet_btn.setObjectName("toolBtnGreen")
         self.c_subnet_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
         self.c_subnet_btn.setIcon(_make_tool_icon("c", _icon_color, _ICON_SZ))
         self.c_subnet_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
-        self.c_subnet_btn.setToolTip("扫描 C 类子网")
+        self.c_subnet_btn.setToolTip(tr("扫描 C 类子网"))
 
         self.expand_btn = QPushButton()
         self.expand_btn.setObjectName("toolBtnYellow")
         self.expand_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
         self.expand_btn.setIcon(_make_tool_icon("expand", _icon_color, _ICON_SZ))
         self.expand_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
-        self.expand_btn.setToolTip("全选并展开所有项")
+        self.expand_btn.setToolTip(tr("全选并展开所有项"))
 
         self.collapse_btn = QPushButton()
         self.collapse_btn.setObjectName("toolBtnYellow")
         self.collapse_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
         self.collapse_btn.setIcon(_make_tool_icon("collapse", _icon_color, _ICON_SZ))
         self.collapse_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
-        self.collapse_btn.setToolTip("收起所有项")
+        self.collapse_btn.setToolTip(tr("收起所有项"))
 
         tb1.addWidget(self.local_subnet_btn)
         tb1.addSpacing(2)
@@ -210,7 +211,7 @@ class MainWindow(TreeMixin, QMainWindow):
         # IP 范围输入
         self.range_input = QLineEdit()
         self.range_input.setPlaceholderText(
-            "例如: 192.168.1.0/24, 192.168.2.0/24 (一行可写多个, 用逗号/空格/换行分隔)"
+            tr("例如: 192.168.1.0/24, 192.168.2.0/24 (一行可写多个, 用逗号/空格/换行分隔)")
         )
         self.range_input.setMinimumWidth(280)
         self.range_input.returnPressed.connect(self._add_ip_range)
@@ -238,9 +239,9 @@ class MainWindow(TreeMixin, QMainWindow):
         # IP 范围输入框（从第一行移来）
         tb2.addWidget(self.range_input, 1)
 
-        tb2.addWidget(QLabel("搜索"))
+        tb2.addWidget(QLabel(tr("搜索")))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("IP / 主机名 / MAC ...")
+        self.search_input.setPlaceholderText(tr("IP / 主机名 / MAC ..."))
         self.search_input.setFixedWidth(200)
         self.search_input.textChanged.connect(self._filter_results)
         tb2.addWidget(self.search_input)
@@ -261,17 +262,17 @@ class MainWindow(TreeMixin, QMainWindow):
         self.threads_spin.setSingleStep(10)
 
         # 端口扫描：从复选框改为「扫描」菜单中的可勾选项
-        self.port_scan_check = QAction("端口扫描", self, checkable=True)
-        self.port_scan_check.setToolTip("对在线设备扫描常见端口")
+        self.port_scan_check = QAction(tr("端口扫描"), self, checkable=True)
+        self.port_scan_check.setToolTip(tr("对在线设备扫描常见端口"))
 
         # mDNS 设备发现：扫描末尾做组播发现（发现 IoT/打印机/NAS 等）
-        self.mdns_check = QAction("mDNS 设备发现", self, checkable=True)
-        self.mdns_check.setToolTip("扫描末尾向本地组播组发现 mDNS/DNS-SD 设备")
+        self.mdns_check = QAction(tr("mDNS 设备发现"), self, checkable=True)
+        self.mdns_check.setToolTip(tr("扫描末尾向本地组播组发现 mDNS/DNS-SD 设备"))
 
         # 筛选：保留 ComboBox 作为值载体，由「视图 > 筛选」子菜单驱动
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["全部", "仅在线", "仅离线", "Excel已匹配", "有服务"])
-        self.filter_combo.setCurrentText("仅在线")
+        self.filter_combo.addItems([tr("全部"), tr("仅在线"), tr("仅离线"), tr("Excel已匹配"), tr("有服务")])
+        self.filter_combo.setCurrentText(tr("仅在线"))
         self.filter_combo.currentIndexChanged.connect(self._filter_results)
 
         # ── 分隔线 ──
@@ -286,8 +287,8 @@ class MainWindow(TreeMixin, QMainWindow):
         self.table = QTreeWidget()
         self.table.setColumnCount(13)
         self.table.setHeaderLabels([
-            "IP地址", "状态", "主机名", "MAC地址",
-            "制造商", "位置", "使用者", "响应时间(ms)", "开放端口", "服务", "操作系统", "设备类型", "备注"
+            tr("IP地址"), tr("状态"), tr("主机名"), tr("MAC地址"),
+            tr("制造商"), tr("位置"), tr("使用者"), tr("响应时间(ms)"), tr("开放端口"), tr("服务"), tr("操作系统"), tr("设备类型"), tr("备注")
         ])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -329,8 +330,8 @@ class MainWindow(TreeMixin, QMainWindow):
 
         # ── 状态栏 ──
         self.status_bar = self.statusBar()
-        self.status_bar.showMessage("就绪")
-        self.status_label = QLabel("就绪")
+        self.status_bar.showMessage(tr("就绪"))
+        self.status_label = QLabel(tr("就绪"))
         self.status_bar.addPermanentWidget(self.status_label)
 
         self.status_stats_label = QLabel("")
@@ -338,7 +339,7 @@ class MainWindow(TreeMixin, QMainWindow):
         self.status_bar.addPermanentWidget(self.status_stats_label)
 
         # 地址库状态（从工具栏移到底部状态栏）
-        self.excel_label = QLabel("地址库: 空")
+        self.excel_label = QLabel(tr("地址库: 空"))
         self.excel_label.setStyleSheet("color: #888888; font-size: 11px;")
         self.status_bar.addPermanentWidget(self.excel_label)
 
@@ -346,69 +347,69 @@ class MainWindow(TreeMixin, QMainWindow):
         menubar = self.menuBar()
 
         # 文件菜单
-        file_menu = menubar.addMenu("文件(&F)")
+        file_menu = menubar.addMenu(tr("文件(&F)"))
 
-        self.act_export = QAction("导出扫描结果", self)
+        self.act_export = QAction(tr("导出扫描结果"), self)
         self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self._export_results)
         file_menu.addAction(self.act_export)
 
-        act_print = QAction("打印...", self)
+        act_print = QAction(tr("打印..."), self)
         act_print.setShortcut(QKeySequence("Ctrl+P"))
         act_print.triggered.connect(self._print_results)
         file_menu.addAction(act_print)
 
         file_menu.addSeparator()
 
-        act_exit = QAction("退出", self)
+        act_exit = QAction(tr("退出"), self)
         act_exit.setShortcut(QKeySequence("Alt+F4"))
         act_exit.triggered.connect(self.close)
         file_menu.addAction(act_exit)
 
         # MAC 地址库菜单
-        lib_menu = menubar.addMenu("地址库(&L)")
+        lib_menu = menubar.addMenu(tr("地址库(&L)"))
 
-        act_lib_manage = QAction("管理地址库...", self)
+        act_lib_manage = QAction(tr("管理地址库..."), self)
         act_lib_manage.setShortcut(QKeySequence("Ctrl+Shift+M"))
         act_lib_manage.triggered.connect(self._open_library_manager)
         lib_menu.addAction(act_lib_manage)
 
-        act_lib_import = QAction("导入地址库", self)
+        act_lib_import = QAction(tr("导入地址库"), self)
         act_lib_import.setShortcut(QKeySequence("Ctrl+I"))
         act_lib_import.triggered.connect(self._import_excel)
         lib_menu.addAction(act_lib_import)
 
-        act_lib_export = QAction("导出地址库", self)
+        act_lib_export = QAction(tr("导出地址库"), self)
         act_lib_export.setShortcut(QKeySequence("Ctrl+Shift+I"))
         act_lib_export.triggered.connect(self._export_library)
         lib_menu.addAction(act_lib_export)
 
         # 扫描菜单
-        scan_menu = menubar.addMenu("扫描(&S)")
+        scan_menu = menubar.addMenu(tr("扫描(&S)"))
 
-        act_scan = QAction("开始扫描", self)
+        act_scan = QAction(tr("开始扫描"), self)
         act_scan.setShortcut(QKeySequence("F5"))
         act_scan.triggered.connect(self._start_scan)
         scan_menu.addAction(act_scan)
 
-        act_stop = QAction("停止扫描", self)
+        act_stop = QAction(tr("停止扫描"), self)
         act_stop.setShortcut(QKeySequence("Esc"))
         act_stop.triggered.connect(self._stop_scan)
         scan_menu.addAction(act_stop)
 
         scan_menu.addSeparator()
 
-        act_add_range = QAction("添加网段", self)
+        act_add_range = QAction(tr("添加网段"), self)
         act_add_range.setShortcut(QKeySequence("Ctrl+Shift+R"))
         act_add_range.triggered.connect(self._add_ip_range)
         scan_menu.addAction(act_add_range)
 
-        act_clear_ranges = QAction("清空网段", self)
+        act_clear_ranges = QAction(tr("清空网段"), self)
         act_clear_ranges.setShortcut(QKeySequence("Ctrl+Shift+L"))
         act_clear_ranges.triggered.connect(self._clear_ranges)
         scan_menu.addAction(act_clear_ranges)
 
-        self.act_clear = QAction("清空结果", self)
+        self.act_clear = QAction(tr("清空结果"), self)
         self.act_clear.setShortcut(QKeySequence("Ctrl+Shift+K"))
         self.act_clear.triggered.connect(self._clear_results)
         scan_menu.addAction(self.act_clear)
@@ -416,20 +417,20 @@ class MainWindow(TreeMixin, QMainWindow):
         scan_menu.addSeparator()
 
         # 发现子菜单：子网扫描 + 独立 mDNS 发现
-        discover_sub = scan_menu.addMenu("发现")
-        act_scan_local = QAction("扫描本机所在子网", self)
+        discover_sub = scan_menu.addMenu(tr("发现"))
+        act_scan_local = QAction(tr("扫描本机所在子网"), self)
         act_scan_local.setShortcut(QKeySequence("Ctrl+1"))
         act_scan_local.triggered.connect(self._scan_local_subnet)
         discover_sub.addAction(act_scan_local)
 
-        act_scan_c = QAction("扫描 C 类子网", self)
+        act_scan_c = QAction(tr("扫描 C 类子网"), self)
         act_scan_c.setShortcut(QKeySequence("Ctrl+2"))
         act_scan_c.triggered.connect(self._scan_c_class_subnet)
         discover_sub.addAction(act_scan_c)
 
-        act_mdns = QAction("网络 mDNS 发现", self)
+        act_mdns = QAction(tr("网络 mDNS 发现"), self)
         act_mdns.setShortcut(QKeySequence("Ctrl+3"))
-        act_mdns.setToolTip("对当前本地链路做 mDNS/DNS-SD 组播发现，发现打印机/NAS/Apple 设备等")
+        act_mdns.setToolTip(tr("对当前本地链路做 mDNS/DNS-SD 组播发现，发现打印机/NAS/Apple 设备等"))
         act_mdns.triggered.connect(self._run_mdns_discovery)
         discover_sub.addAction(act_mdns)
 
@@ -444,10 +445,10 @@ class MainWindow(TreeMixin, QMainWindow):
         # 端口探测方式：全连接 / SYN 半开 / UDP（单选项）
         self.tcp_mode_group = QActionGroup(self)
         self.tcp_mode_group.setExclusive(True)
-        mode_sub = scan_menu.addMenu("端口探测方式")
-        for _m, _label in (("connect", "TCP 全连接"),
-                           ("syn", "TCP SYN 半开"),
-                           ("udp", "UDP 探测")):
+        mode_sub = scan_menu.addMenu(tr("端口探测方式"))
+        for _m, _label in (("connect", tr("TCP 全连接")),
+                           ("syn", tr("TCP SYN 半开")),
+                           ("udp", tr("UDP 探测"))):
             _a = QAction(_label, self, checkable=True)
             _a.setData(_m)
             _a.setActionGroup(self.tcp_mode_group)
@@ -460,8 +461,8 @@ class MainWindow(TreeMixin, QMainWindow):
         # 扫描级别：快速 / 标准 / 全端口（单选项，决定端口探测范围）
         self.scan_level_group = QActionGroup(self)
         self.scan_level_group.setExclusive(True)
-        level_sub = scan_menu.addMenu("扫描级别")
-        level_sub.setToolTip("控制端口探测的端口范围（快速日常巡检 / 标准深度 / 全端口安全评估）")
+        level_sub = scan_menu.addMenu(tr("扫描级别"))
+        level_sub.setToolTip(tr("控制端口探测的端口范围（快速日常巡检 / 标准深度 / 全端口安全评估）"))
         for _lv in ("quick", "standard", "all"):
             _a = QAction(SCAN_LEVEL_LABELS.get(_lv, _lv), self, checkable=True)
             _a.setData(_lv)
@@ -472,8 +473,8 @@ class MainWindow(TreeMixin, QMainWindow):
             )
             level_sub.addAction(_a)
 
-        settings_sub = scan_menu.addMenu("扫描设置")
-        act_open_settings = QAction("打开扫描设置对话框...", self)
+        settings_sub = scan_menu.addMenu(tr("扫描设置"))
+        act_open_settings = QAction(tr("打开扫描设置对话框..."), self)
         act_open_settings.triggered.connect(self._open_scan_settings)
         settings_sub.addAction(act_open_settings)
         settings_sub.addSeparator()
@@ -487,133 +488,146 @@ class MainWindow(TreeMixin, QMainWindow):
             settings_sub.addAction(_act)
 
         # 分析菜单（顶级菜单，从扫描子菜单提升）
-        analysis_menu = menubar.addMenu("分析(&A)")
+        analysis_menu = menubar.addMenu(tr("分析(&A)"))
 
-        act_history = QAction("历史对比...", self)
+        act_history = QAction(tr("历史对比..."), self)
         act_history.setShortcut(QKeySequence("Ctrl+H"))
         act_history.triggered.connect(self._open_history_compare)
         analysis_menu.addAction(act_history)
 
-        act_history_query = QAction("历史检索...", self)
+        act_history_query = QAction(tr("历史检索..."), self)
         act_history_query.setShortcut(QKeySequence("Ctrl+Shift+H"))
-        act_history_query.setToolTip("跨快照按类型/网段/首见时间/IP 检索历史设备")
+        act_history_query.setToolTip(tr("跨快照按类型/网段/首见时间/IP 检索历史设备"))
         act_history_query.triggered.connect(self._open_history_query)
         analysis_menu.addAction(act_history_query)
 
         analysis_menu.addSeparator()
 
-        self.act_conflict = QAction("冲突检测", self)
+        self.act_conflict = QAction(tr("冲突检测"), self)
         self.act_conflict.setShortcut(QKeySequence("Ctrl+Shift+C"))
-        self.act_conflict.setToolTip("检测 IP/MAC 冲突、未知设备等异常")
+        self.act_conflict.setToolTip(tr("检测 IP/MAC 冲突、未知设备等异常"))
         self.act_conflict.triggered.connect(self._run_conflict_detection)
         analysis_menu.addAction(self.act_conflict)
 
-        self.act_change = QAction("变更检测", self)
+        self.act_change = QAction(tr("变更检测"), self)
         self.act_change.setShortcut(QKeySequence("Ctrl+Shift+V"))
-        self.act_change.setToolTip("对比上次扫描快照，发现新增/消失/替换/改址等设备变动")
+        self.act_change.setToolTip(tr("对比上次扫描快照，发现新增/消失/替换/改址等设备变动"))
         self.act_change.triggered.connect(lambda: self._run_change_detection(silent=False))
         analysis_menu.addAction(self.act_change)
 
         analysis_menu.addSeparator()
 
-        act_subnet_util = QAction("子网利用率...", self)
+        act_subnet_util = QAction(tr("子网利用率..."), self)
         act_subnet_util.setShortcut(QKeySequence("Ctrl+U"))
-        act_subnet_util.setToolTip("按 /24 子网聚合，查看各网段在线占比与设备分布")
+        act_subnet_util.setToolTip(tr("按 /24 子网聚合，查看各网段在线占比与设备分布"))
         act_subnet_util.triggered.connect(self._show_subnet_utilization)
         analysis_menu.addAction(act_subnet_util)
 
-        act_audit_log = QAction("审计日志...", self)
+        act_audit_log = QAction(tr("审计日志..."), self)
         act_audit_log.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        act_audit_log.setToolTip("查看扫描活动记录（开始/停止/完成、冲突检测等）")
+        act_audit_log.setToolTip(tr("查看扫描活动记录（开始/停止/完成、冲突检测等）"))
         act_audit_log.triggered.connect(self._show_audit_log)
         analysis_menu.addAction(act_audit_log)
 
         # 工具菜单 (内置 Ping/Tracert/Telnet/SSH 等网络工具, P2)
-        tool_menu = menubar.addMenu("工具(&T)")
+        tool_menu = menubar.addMenu(tr("工具(&T)"))
 
-        act_ping = QAction("Ping (持续)", self)
+        act_ping = QAction(tr("Ping (持续)"), self)
         act_ping.setShortcut(QKeySequence("Ctrl+P"))
-        act_ping.setToolTip("对目标执行持续 Ping (ping -t)")
+        act_ping.setToolTip(tr("对目标执行持续 Ping (ping -t)"))
         act_ping.triggered.connect(lambda: self._launch_network_tool("ping"))
         tool_menu.addAction(act_ping)
 
-        act_tracert = QAction("Tracert (路由追踪)", self)
+        act_tracert = QAction(tr("Tracert (路由追踪)"), self)
         act_tracert.setShortcut(QKeySequence("Ctrl+R"))
-        act_tracert.setToolTip("对目标执行路由追踪 (tracert)")
+        act_tracert.setToolTip(tr("对目标执行路由追踪 (tracert)"))
         act_tracert.triggered.connect(lambda: self._launch_network_tool("tracert"))
         tool_menu.addAction(act_tracert)
 
-        act_telnet = QAction("Telnet", self)
+        act_telnet = QAction(tr("Telnet"), self)
         act_telnet.setShortcut(QKeySequence("Ctrl+N"))
-        act_telnet.setToolTip("对目标启动 Telnet 会话")
+        act_telnet.setToolTip(tr("对目标启动 Telnet 会话"))
         act_telnet.triggered.connect(lambda: self._launch_network_tool("telnet"))
         tool_menu.addAction(act_telnet)
 
-        act_ssh = QAction("SSH", self)
+        act_ssh = QAction(tr("SSH"), self)
         act_ssh.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        act_ssh.setToolTip("对目标启动 SSH 会话 (需 OpenSSH 客户端)")
+        act_ssh.setToolTip(tr("对目标启动 SSH 会话 (需 OpenSSH 客户端)"))
         act_ssh.triggered.connect(lambda: self._launch_network_tool("ssh"))
         tool_menu.addAction(act_ssh)
 
         tool_menu.addSeparator()
 
-        act_rdp = QAction("远程桌面 (RDP)", self)
+        act_rdp = QAction(tr("远程桌面 (RDP)"), self)
         act_rdp.setShortcut(QKeySequence("Ctrl+M"))
-        act_rdp.setToolTip("用系统 mstsc 远程桌面连接目标")
+        act_rdp.setToolTip(tr("用系统 mstsc 远程桌面连接目标"))
         act_rdp.triggered.connect(lambda: self._launch_network_tool("rdp"))
         tool_menu.addAction(act_rdp)
 
-        act_cmd = QAction("打开命令提示符", self)
+        act_cmd = QAction(tr("打开命令提示符"), self)
         act_cmd.setShortcut(QKeySequence("Ctrl+J"))
-        act_cmd.setToolTip("打开以目标命名的命令提示符窗口")
+        act_cmd.setToolTip(tr("打开以目标命名的命令提示符窗口"))
         act_cmd.triggered.connect(lambda: self._launch_network_tool("cmd"))
         tool_menu.addAction(act_cmd)
 
         tool_menu.addSeparator()
 
-        act_shutdown = QAction("远程关机", self)
-        act_shutdown.setToolTip("向目标发送关机指令 (shutdown /s /m)")
+        act_shutdown = QAction(tr("远程关机"), self)
+        act_shutdown.setToolTip(tr("向目标发送关机指令 (shutdown /s /m)"))
         act_shutdown.triggered.connect(lambda: self._remote_power("shutdown"))
         tool_menu.addAction(act_shutdown)
 
-        act_reboot = QAction("远程重启", self)
-        act_reboot.setToolTip("向目标发送重启指令 (shutdown /r /m)")
+        act_reboot = QAction(tr("远程重启"), self)
+        act_reboot.setToolTip(tr("向目标发送重启指令 (shutdown /r /m)"))
         act_reboot.triggered.connect(lambda: self._remote_power("reboot"))
         tool_menu.addAction(act_reboot)
 
         tool_menu.addSeparator()
-        act_wmi = QAction("WMI 设备识别 (需管理员)...", self)
+        act_wmi = QAction(tr("WMI 设备识别 (需管理员)..."), self)
         act_wmi.setShortcut(QKeySequence("Ctrl+Shift+W"))
-        act_wmi.setToolTip("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据")
+        act_wmi.setToolTip(tr("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据"))
         act_wmi.triggered.connect(lambda: self._run_wmi_identification())
         tool_menu.addAction(act_wmi)
 
-        act_netbios = QAction("NetBIOS 识别（轻量）", self)
-        act_netbios.setToolTip("零凭据、不需管理员：获取计算机名/工作组/当前用户/MAC（同网段 UDP/137）")
+        act_netbios = QAction(tr("NetBIOS 识别（轻量）"), self)
+        act_netbios.setToolTip(tr("零凭据、不需管理员：获取计算机名/工作组/当前用户/MAC（同网段 UDP/137）"))
         act_netbios.triggered.connect(lambda: self._run_netbios_identification())
         tool_menu.addAction(act_netbios)
 
-        act_switch_map = QAction("交换机端口映射...", self)
-        act_switch_map.setToolTip("通过 SNMP 获取交换机 MAC 转发表，映射 MAC → 物理端口")
+        act_switch_map = QAction(tr("交换机端口映射..."), self)
+        act_switch_map.setToolTip(tr("通过 SNMP 获取交换机 MAC 转发表，映射 MAC → 物理端口"))
         act_switch_map.triggered.connect(self._show_switch_port_mapping)
         tool_menu.addAction(act_switch_map)
 
         # 视图菜单（仿 Advanced IP Scanner「查看」菜单：左列复选/图标，右列文字）
-        view_menu = menubar.addMenu("查看(&V)")
+        view_menu = menubar.addMenu(tr("查看(&V)"))
         # 主题仅由「跟随时间自动切换」控制，不再提供手动切换入口
 
-        self.act_auto_theme = QAction("跟随时间自动切换主题", self)
+        self.act_auto_theme = QAction(tr("跟随时间自动切换主题"), self)
         self.act_auto_theme.setCheckable(True)
         self.act_auto_theme.setChecked(self.auto_time)
         self.act_auto_theme.triggered.connect(self._toggle_auto_theme)
         view_menu.addAction(self.act_auto_theme)
 
+        view_menu.addSeparator()
+
+        lang_menu = view_menu.addMenu(tr("语言 / Language"))
+        self.act_lang_zh = QAction(tr("中文"), self)
+        self.act_lang_zh.setCheckable(True)
+        self.act_lang_zh.triggered.connect(lambda: self._switch_language("zh-CN"))
+        lang_menu.addAction(self.act_lang_zh)
+
+        self.act_lang_en = QAction(tr("English"), self)
+        self.act_lang_en.setCheckable(True)
+        self.act_lang_en.triggered.connect(lambda: self._switch_language("en-US"))
+        lang_menu.addAction(self.act_lang_en)
+
         # 显示列子菜单 (P2-3)
-        col_menu = view_menu.addMenu("显示列")
+        col_menu = view_menu.addMenu(tr("显示列"))
         self._col_actions = {}
         _col_labels = [
-            "IP地址", "状态", "主机名", "MAC地址", "制造商",
-            "位置", "使用者", "响应时间(ms)", "开放端口", "服务", "操作系统", "设备类型", "备注"
+            tr("IP地址"), tr("状态"), tr("主机名"), tr("MAC地址"), tr("制造商"),
+            tr("位置"), tr("使用者"), tr("响应时间(ms)"), tr("开放端口"), tr("服务"), tr("操作系统"), tr("设备类型"), tr("备注")
         ]
         for _ci, _name in enumerate(_col_labels):
             _act = QAction(_name, self)
@@ -627,13 +641,13 @@ class MainWindow(TreeMixin, QMainWindow):
 
         view_menu.addSeparator()
 
-        act_expand = QAction("展开全部", self)
+        act_expand = QAction(tr("展开全部"), self)
         act_expand.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_ArrowDown)))
         act_expand.setShortcut(QKeySequence("Ctrl++"))
         act_expand.triggered.connect(self._expand_all_items)
         view_menu.addAction(act_expand)
 
-        act_collapse = QAction("收起全部", self)
+        act_collapse = QAction(tr("收起全部"), self)
         act_collapse.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_ArrowUp)))
         act_collapse.setShortcut(QKeySequence("Ctrl+-"))
         act_collapse.triggered.connect(self._collapse_all_items)
@@ -641,7 +655,7 @@ class MainWindow(TreeMixin, QMainWindow):
 
         view_menu.addSeparator()
 
-        act_topology = QAction("拓扑视图...", self)
+        act_topology = QAction(tr("拓扑视图..."), self)
         act_topology.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_DriveNetIcon)))
         act_topology.setShortcut(QKeySequence("Ctrl+T"))
         act_topology.triggered.connect(self._open_topology)
@@ -650,8 +664,8 @@ class MainWindow(TreeMixin, QMainWindow):
         view_menu.addSeparator()
 
         # 筛选：原工具栏下拉框，移入菜单（单选项驱动 filter_combo）
-        filter_menu = view_menu.addMenu("筛选")
-        _filter_opts = ["全部", "仅在线", "仅离线", "Excel已匹配", "有服务"]
+        filter_menu = view_menu.addMenu(tr("筛选"))
+        _filter_opts = [tr("全部"), tr("仅在线"), tr("仅离线"), tr("Excel已匹配"), tr("有服务")]
         _filter_group = QActionGroup(self)
         _filter_group.setExclusive(True)
         for _opt in _filter_opts:
@@ -663,8 +677,8 @@ class MainWindow(TreeMixin, QMainWindow):
             filter_menu.addAction(_fact)
 
         # 帮助菜单
-        help_menu = menubar.addMenu("帮助(&H)")
-        act_about = QAction("关于", self)
+        help_menu = menubar.addMenu(tr("帮助(&H)"))
+        act_about = QAction(tr("关于"), self)
         act_about.setShortcut(QKeySequence("F1"))
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
@@ -748,6 +762,18 @@ class MainWindow(TreeMixin, QMainWindow):
         else:
             self._save_settings()
 
+    def _switch_language(self, lang: str):
+        """切换界面语言，保存偏好并提示重启。"""
+        import i18n
+        if i18n.current_lang() == lang:
+            return
+        self.settings.setValue("ui/language", lang)
+        self.settings.sync()
+        QMessageBox.information(
+            self, tr("语言切换"),
+            tr("语言设置已保存，重启程序后生效。")
+        )
+
     def _link_color(self) -> QColor:
         """服务链接/可点击文字颜色，随主题变化 (深色下提亮以保证对比度)。"""
         return QColor(77, 166, 255) if self.dark_mode else QColor(37, 99, 235)
@@ -765,6 +791,11 @@ class MainWindow(TreeMixin, QMainWindow):
         self.auto_time = s.value("theme/auto_time", False, type=bool)
         if hasattr(self, "act_auto_theme"):
             self.act_auto_theme.setChecked(self.auto_time)
+        # 语言
+        _lang = s.value("ui/language", "")
+        if hasattr(self, "act_lang_zh"):
+            self.act_lang_zh.setChecked(_lang == "zh-CN" or not _lang)
+            self.act_lang_en.setChecked(_lang == "en-US")
         # 扫描参数
         self.timeout_spin.setValue(s.value("scan/timeout_ms", 1000, type=int))
         self.threads_spin.setValue(s.value("scan/max_threads", 100, type=int))
@@ -841,22 +872,22 @@ class MainWindow(TreeMixin, QMainWindow):
     def _open_scan_settings(self):
         """弹出扫描设置对话框（超时 / 线程），由「扫描 > 扫描设置...」触发。"""
         dlg = QDialog(self)
-        dlg.setWindowTitle("扫描设置")
+        dlg.setWindowTitle(tr("扫描设置"))
         dlg.setMinimumWidth(240)
         _layout = QFormLayout(dlg)
         _to = QSpinBox(); _to.setRange(100, 5000); _to.setSingleStep(100)
         _to.setValue(self.timeout_spin.value())
         _th = QSpinBox(); _th.setRange(1, 500); _th.setSingleStep(10)
         _th.setValue(self.threads_spin.value())
-        _layout.addRow("超时 (ms):", _to)
-        _layout.addRow("线程数:", _th)
+        _layout.addRow(tr("超时 (ms):"), _to)
+        _layout.addRow(tr("线程数:"), _th)
         _mode = QComboBox()
-        _mode.addItems(["TCP 全连接", "TCP SYN 半开", "UDP 探测"])
-        _mode_map = {"TCP 全连接": "connect", "TCP SYN 半开": "syn", "UDP 探测": "udp"}
+        _mode.addItems([tr("TCP 全连接"), tr("TCP SYN 半开"), tr("UDP 探测")])
+        _mode_map = {tr("TCP 全连接"): "connect", tr("TCP SYN 半开"): "syn", tr("UDP 探测"): "udp"}
         _mode.setCurrentText(
-            {v: k for k, v in _mode_map.items()}.get(self.tcp_scan_mode, "TCP 全连接")
+            {v: k for k, v in _mode_map.items()}.get(self.tcp_scan_mode, tr("TCP 全连接"))
         )
-        _layout.addRow("端口探测方式:", _mode)
+        _layout.addRow(tr("端口探测方式:"), _mode)
         _btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         _btns.accepted.connect(dlg.accept)
         _btns.rejected.connect(dlg.reject)
@@ -879,8 +910,8 @@ class MainWindow(TreeMixin, QMainWindow):
             if _old_mode != self.tcp_scan_mode:
                 _changes.append(f"探测方式 {_old_mode}→{self.tcp_scan_mode}")
             self._audit(
-                audit_log.CAT_SYSTEM, "修改扫描设置",
-                " · ".join(_changes) if _changes else "无变化",
+                audit_log.CAT_SYSTEM, tr("修改扫描设置"),
+                " · ".join(_changes) if _changes else tr("无变化"),
             )
 
     # --- IP 范围管理 ---
@@ -920,8 +951,8 @@ class MainWindow(TreeMixin, QMainWindow):
             )
         except Exception:
             out = ""
-        ips = re.findall(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)", out)
-        masks = re.findall(r"子网掩码[\.:\s]+([\d.]+)", out)
+        ips = re.findall(tr(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)"), out)
+        masks = re.findall(tr(r"子网掩码[\.:\s]+([\d.]+)"), out)
         default_ip = self._get_default_local_ip()
         if ips and masks and len(ips) == len(masks):
             # 1) 优先：默认出口 IP 在 ipconfig 中的 (ip, mask) 配对 -> 真实前缀长度
@@ -987,7 +1018,7 @@ class MainWindow(TreeMixin, QMainWindow):
         if subnet:
             self._fill_subnet_range(subnet)
         else:
-            QMessageBox.warning(self, "提示", "无法获取本机 IP，请手动输入扫描范围。")
+            QMessageBox.warning(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
 
     def _scan_c_class_subnet(self):
         """扫描 C 类子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
@@ -995,7 +1026,7 @@ class MainWindow(TreeMixin, QMainWindow):
         if subnet:
             self._fill_subnet_range(subnet)
         else:
-            QMessageBox.warning(self, "提示", "无法获取本机 IP，请手动输入扫描范围。")
+            QMessageBox.warning(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
 
     def _fill_subnet_range(self, subnet: str):
         """将网段填入范围输入框并静默加入待扫列表（不弹重复提示、不自动扫描）。
@@ -1038,19 +1069,18 @@ class MainWindow(TreeMixin, QMainWindow):
             self.range_input.clear()
             self.range_input.setFocus()
             # 审计：记录添加网段
-            self._audit(audit_log.CAT_RANGE, "添加网段", ", ".join(added_tokens))
+            self._audit(audit_log.CAT_RANGE, tr("添加网段"), ", ".join(added_tokens))
 
         if added == 0:
             # 全部无效或全部重复，未新增任何网段
             if invalid:
                 QMessageBox.warning(
-                    self, "格式错误",
-                    "以下项无法解析:\n  " + "\n  ".join(invalid) +
-                    "\n\n支持格式 (可一行多个, 用逗号/空格/换行分隔):\n"
-                    "  192.168.1.0/24\n  192.168.1.1-254\n  192.168.1.1"
+                    self, tr("格式错误"),
+                    tr("以下项无法解析:\n  ") + "\n  ".join(invalid) +
+                    tr("\n\n支持格式 (可一行多个, 用逗号/空格/换行分隔):\n") + "  192.168.1.0/24\n  192.168.1.1-254\n  192.168.1.1"
                 )
             elif dup:
-                QMessageBox.information(self, "提示", "这些网段都已添加过了")
+                QMessageBox.information(self, tr("提示"), tr("这些网段都已添加过了"))
             return
 
         # 有成功添加时，仅对"重复 / 无效"做补充提示，避免无效输入被静默吞掉
@@ -1059,12 +1089,12 @@ class MainWindow(TreeMixin, QMainWindow):
             if dup:
                 msg.append(f"已跳过 {dup} 个重复网段")
             if invalid:
-                msg.append("以下项无法解析, 已忽略:\n  " + "\n  ".join(invalid))
-            QMessageBox.information(self, "提示", "\n".join(msg))
+                msg.append(tr("以下项无法解析, 已忽略:\n  ") + "\n  ".join(invalid))
+            QMessageBox.information(self, tr("提示"), "\n".join(msg))
 
     def _clear_ranges(self):
         if self.ip_range_items:
-            self._audit(audit_log.CAT_RANGE, "清空网段", f"移除 {len(self.ip_range_items)} 个网段")
+            self._audit(audit_log.CAT_RANGE, tr("清空网段"), f"移除 {len(self.ip_range_items)} 个网段")
         self.ip_range_items.clear()
         self._update_range_list()
 
@@ -1124,7 +1154,7 @@ class MainWindow(TreeMixin, QMainWindow):
             if text:
                 self._add_ip_range()
             if not self.ip_range_items:
-                QMessageBox.warning(self, "提示", "请先添加至少一个 IP 范围")
+                QMessageBox.warning(self, tr("提示"), tr("请先添加至少一个 IP 范围"))
                 return
 
         self.scan_btn.setEnabled(False)
@@ -1156,19 +1186,19 @@ class MainWindow(TreeMixin, QMainWindow):
         # 审计：记录扫描开始
         total_ips = sum(len(parse_ip_range(r)) for r in self.ip_range_items)
         self._audit(
-            audit_log.CAT_SCAN, "开始扫描",
+            audit_log.CAT_SCAN, tr("开始扫描"),
             f"范围: {', '.join(self.ip_range_items)} ({total_ips} 个IP) | "
             f"超时 {self.timeout_spin.value()}ms · 线程 {self.threads_spin.value()} · "
             f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}"
-            f"{' · 级别 ' + SCAN_LEVEL_LABELS.get(self.scan_level, self.scan_level) if self.port_scan_check.isChecked() else ''}",
+            f"{tr(' · 级别 ') + SCAN_LEVEL_LABELS.get(self.scan_level, self.scan_level) if self.port_scan_check.isChecked() else ''}",
         )
         self.scan_thread.start()
 
     def _stop_scan(self):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop()
-            self.status_bar.showMessage("正在停止扫描...")
-            self._audit(audit_log.CAT_SCAN, "停止扫描", "用户手动中止扫描")
+            self.status_bar.showMessage(tr("正在停止扫描..."))
+            self._audit(audit_log.CAT_SCAN, tr("停止扫描"), tr("用户手动中止扫描"))
             self.scan_thread.wait(3000)
 
     def _toggle_protocol(self, proto, checked):
@@ -1180,7 +1210,7 @@ class MainWindow(TreeMixin, QMainWindow):
             if proto in self.selected_protocols:
                 self.selected_protocols.remove(proto)
         self.status_bar.showMessage(
-            f"已选择协议: {', '.join(self.selected_protocols) if self.selected_protocols else '无'}"
+            f"已选择协议: {', '.join(self.selected_protocols) if self.selected_protocols else tr('无')}"
         )
 
     def _set_tcp_mode(self, mode: str):
@@ -1188,10 +1218,10 @@ class MainWindow(TreeMixin, QMainWindow):
         self.tcp_scan_mode = mode
         self._sync_tcp_mode_menu()
         self._save_settings()
-        _label = {"connect": "TCP 全连接", "syn": "TCP SYN 半开", "udp": "UDP 探测"}.get(mode, mode)
+        _label = {"connect": tr("TCP 全连接"), "syn": tr("TCP SYN 半开"), "udp": tr("UDP 探测")}.get(mode, mode)
         _tip = ""
         if mode in ("syn", "udp"):
-            _tip = "（需管理员权限；Windows 还需 Npcap，否则自动回退全连接）"
+            _tip = tr("（需管理员权限；Windows 还需 Npcap，否则自动回退全连接）")
         self.status_bar.showMessage(f"端口探测方式: {_label}{_tip}")
 
     def _sync_tcp_mode_menu(self):
@@ -1232,7 +1262,7 @@ class MainWindow(TreeMixin, QMainWindow):
                     result.remark = match.get("remark", "")
                     result.excel_matched = True
             except Exception as e:
-                print("地址库匹配出错:", e)
+                print(tr("地址库匹配出错:"), e)
         self._upsert_table_row(result)
 
     def _on_scan_finished(self, results):
@@ -1275,13 +1305,13 @@ class MainWindow(TreeMixin, QMainWindow):
             _online = sum(1 for r in results if r.status == "online")
             _offline = sum(1 for r in results if r.status == "offline")
             self._audit(
-                audit_log.CAT_SCAN, "扫描完成",
+                audit_log.CAT_SCAN, tr("扫描完成"),
                 f"共 {_total} 个IP · 在线 {_online} · 离线 {_offline} · "
                 f"未知 {_total - _online - _offline}",
             )
             # 扫描完成后自动执行冲突检测（静默，仅更新标记和状态栏）
             self._run_conflict_detection(silent=True)
-            self.status_bar.showMessage("扫描完成")
+            self.status_bar.showMessage(tr("扫描完成"))
         except Exception as e:
             sys.stderr.write(f"[ERR] _on_scan_finished 异常: {e}\n")
             import traceback
@@ -1302,7 +1332,7 @@ class MainWindow(TreeMixin, QMainWindow):
         """
         if not self.all_results:
             if not silent:
-                QMessageBox.information(self, "冲突检测", "暂无扫描结果，请先执行扫描。")
+                QMessageBox.information(self, tr("冲突检测"), tr("暂无扫描结果，请先执行扫描。"))
             return
 
         library = self.library if self.library.is_loaded() else None
@@ -1320,9 +1350,9 @@ class MainWindow(TreeMixin, QMainWindow):
         _warn = sum(1 for c in self._conflicts if c.severity == SEVERITY_WARNING)
         _info = sum(1 for c in self._conflicts if c.severity == SEVERITY_INFO)
         self._audit(
-            audit_log.CAT_CONFLICT, "冲突检测",
+            audit_log.CAT_CONFLICT, tr("冲突检测"),
             f"严重 {_high} · 警告 {_warn} · 提示 {_info}"
-            + ("（未发现冲突）" if not self._conflicts else ""),
+            + (tr("（未发现冲突）") if not self._conflicts else ""),
         )
 
         if silent:
@@ -1340,7 +1370,7 @@ class MainWindow(TreeMixin, QMainWindow):
 
         # 手动触发：弹出报告对话框
         if not self._conflicts:
-            QMessageBox.information(self, "冲突检测", "未检测到任何冲突，网络状态良好。")
+            QMessageBox.information(self, tr("冲突检测"), tr("未检测到任何冲突，网络状态良好。"))
             return
         dlg = ConflictReportDialog(self._conflicts, parent=self, dark=self.dark_mode)
         dlg.exec_()
@@ -1354,7 +1384,7 @@ class MainWindow(TreeMixin, QMainWindow):
         """
         if not self.all_results:
             if not silent:
-                QMessageBox.information(self, "变更检测", "暂无扫描结果，请先执行扫描。")
+                QMessageBox.information(self, tr("变更检测"), tr("暂无扫描结果，请先执行扫描。"))
             return
 
         # 加载最近一次快照作为"上次"基准
@@ -1363,7 +1393,7 @@ class MainWindow(TreeMixin, QMainWindow):
             if not snapshots:
                 self._changes = []
                 if not silent:
-                    QMessageBox.information(self, "变更检测", "没有历史快照可供对比（首次扫描）。")
+                    QMessageBox.information(self, tr("变更检测"), tr("没有历史快照可供对比（首次扫描）。"))
                 return
             last_snap = history_store.get_snapshot(snapshots[-1]["id"], self.history_db)
             prev_devices = last_snap["devices"] if last_snap else []
@@ -1373,14 +1403,14 @@ class MainWindow(TreeMixin, QMainWindow):
         if not prev_devices:
             self._changes = []
             if not silent:
-                QMessageBox.information(self, "变更检测", "上次快照为空，无法对比。")
+                QMessageBox.information(self, tr("变更检测"), tr("上次快照为空，无法对比。"))
             return
 
         self._changes = detect_changes(self.all_results, prev_devices)
 
         # 审计：记录变更检测
         summary = get_change_summary(self._changes)
-        self._audit(audit_log.CAT_SCAN, "变更检测", summary)
+        self._audit(audit_log.CAT_SCAN, tr("变更检测"), summary)
 
         if silent:
             # 静默模式：有严重/警告变更时在状态栏提示
@@ -1399,7 +1429,7 @@ class MainWindow(TreeMixin, QMainWindow):
 
         # 手动触发：弹出报告对话框
         if not self._changes:
-            QMessageBox.information(self, "变更检测", "与上次扫描相比无任何变更，网络状态稳定。")
+            QMessageBox.information(self, tr("变更检测"), tr("与上次扫描相比无任何变更，网络状态稳定。"))
             return
         dlg = ChangeReportDialog(self._changes, parent=self, dark=self.dark_mode)
         dlg.exec_()
@@ -1408,7 +1438,7 @@ class MainWindow(TreeMixin, QMainWindow):
     def _show_subnet_utilization(self):
         """弹出子网利用率对话框。"""
         if not self.all_results:
-            QMessageBox.information(self, "子网利用率", "暂无扫描结果，请先执行扫描。")
+            QMessageBox.information(self, tr("子网利用率"), tr("暂无扫描结果，请先执行扫描。"))
             return
         dlg = SubnetUtilizationDialog(self.all_results, parent=self, dark=self.dark_mode)
         dlg.exec_()
@@ -1427,7 +1457,7 @@ class MainWindow(TreeMixin, QMainWindow):
 
     def _show_switch_port_mapping(self):
         """弹出交换机端口映射对话框。"""
-        self._audit(audit_log.CAT_DEVICE, "交换机端口映射", "打开端口映射工具")
+        self._audit(audit_log.CAT_DEVICE, tr("交换机端口映射"), tr("打开端口映射工具"))
         dlg = SwitchPortDialog(
             scan_results=self.all_results, parent=self, dark=self.dark_mode
         )
@@ -1436,7 +1466,7 @@ class MainWindow(TreeMixin, QMainWindow):
     def _run_mdns_discovery(self):
         """独立触发 mDNS/DNS-SD 组播发现（不依赖扫描），发现结果合并到树与 all_results。"""
         if self.mdns_thread and self.mdns_thread.isRunning():
-            self.status_bar.showMessage("mDNS 发现进行中...")
+            self.status_bar.showMessage(tr("mDNS 发现进行中..."))
             return
         self.mdns_thread = MdnsThread(timeout=2.5)
         self.mdns_thread.log_signal.connect(
@@ -1468,10 +1498,10 @@ class MainWindow(TreeMixin, QMainWindow):
                         r.discovery_method = "mdns"
                     if not r.hostname and host:
                         r.hostname = host
-                if services and "mDNS" not in r.services:
-                    r.services.append("mDNS")
+                if services and tr("mDNS") not in r.services:
+                    r.services.append(tr("mDNS"))
                     r.service_details.append({
-                        "proto": "mDNS", "port": 0, "banner": ", ".join(services)
+                        "proto": tr("mDNS"), "port": 0, "banner": ", ".join(services)
                     })
                 self._upsert_table_row(r)
                 added += 1
@@ -1483,7 +1513,7 @@ class MainWindow(TreeMixin, QMainWindow):
                 self.act_export.setEnabled(True)
             else:
                 self.status_bar.showMessage(
-                    "mDNS 未发现新设备（可能网内无 mDNS 设备 / 组播端口被占用）"
+                    tr("mDNS 未发现新设备（可能网内无 mDNS 设备 / 组播端口被占用）")
                 )
         except Exception as e:
             sys.stderr.write(f"[ERR] _on_mdns_finished: {e}\n")
@@ -1506,7 +1536,7 @@ class MainWindow(TreeMixin, QMainWindow):
                 return
             user, pwd, domain, save = dlg.get_credentials()
             if not user or not pwd:
-                QMessageBox.warning(self, "WMI 识别", "用户名和密码不能为空")
+                QMessageBox.warning(self, tr("WMI 识别"), tr("用户名和密码不能为空"))
                 return
             self.wmi_creds.set(user, pwd, domain)
             if save:
@@ -1518,27 +1548,26 @@ class MainWindow(TreeMixin, QMainWindow):
             targets = [
                 r.ip for r in self.all_results
                 if r.status == "online" and (
-                    r.os_guess == "Windows"
+                    r.os_guess == tr("Windows")
                     or 135 in r.open_ports
                     or 445 in r.open_ports
                 )
             ]
             if not targets:
                 QMessageBox.information(
-                    self, "WMI 识别",
-                    "没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n"
-                    "可先用普通扫描发现设备，再对选中设备执行 WMI 识别。"
+                    self, tr("WMI 识别"),
+                    tr("没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n" "可先用普通扫描发现设备，再对选中设备执行 WMI 识别。")
                 )
                 return
         else:
             targets = [t for t in targets if t in online_ips]
             if not targets:
-                QMessageBox.information(self, "WMI 识别", "所选设备不在线，无法识别。")
+                QMessageBox.information(self, tr("WMI 识别"), tr("所选设备不在线，无法识别。"))
                 return
 
         # 3) 后台线程逐台识别
         if self.wmi_thread and self.wmi_thread.isRunning():
-            self.status_bar.showMessage("WMI 识别进行中，请稍候...")
+            self.status_bar.showMessage(tr("WMI 识别进行中，请稍候..."))
             return
         self.status_bar.showMessage(f"WMI 识别启动：共 {len(targets)} 台设备...")
         self.wmi_thread = WmiThread(targets, self.wmi_creds)
@@ -1565,7 +1594,7 @@ class MainWindow(TreeMixin, QMainWindow):
         if fail:
             msg += f"，失败 {fail} 台（权限/防火墙/非 Windows 等）"
         self._audit(
-            audit_log.CAT_DEVICE, "WMI 识别",
+            audit_log.CAT_DEVICE, tr("WMI 识别"),
             f"共 {total} 台 · 成功 {ok} · 失败 {fail}",
         )
         self.status_bar.showMessage(msg)
@@ -1593,26 +1622,25 @@ class MainWindow(TreeMixin, QMainWindow):
             targets = [
                 r.ip for r in self.all_results
                 if r.status == "online" and (
-                    r.os_guess == "Windows"
+                    r.os_guess == tr("Windows")
                     or 135 in r.open_ports
                     or 445 in r.open_ports
                 )
             ]
             if not targets:
                 QMessageBox.information(
-                    self, "NetBIOS 识别",
-                    "没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n"
-                    "可先扫描发现设备，再对选中设备执行 NetBIOS 识别。"
+                    self, tr("NetBIOS 识别"),
+                    tr("没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n" "可先扫描发现设备，再对选中设备执行 NetBIOS 识别。")
                 )
                 return
         else:
             targets = [t for t in targets if t in online_ips]
             if not targets:
-                QMessageBox.information(self, "NetBIOS 识别", "所选设备不在线，无法识别。")
+                QMessageBox.information(self, tr("NetBIOS 识别"), tr("所选设备不在线，无法识别。"))
                 return
 
         if self.netbios_thread and self.netbios_thread.isRunning():
-            self.status_bar.showMessage("NetBIOS 识别进行中，请稍候...")
+            self.status_bar.showMessage(tr("NetBIOS 识别进行中，请稍候..."))
             return
         self.status_bar.showMessage(f"NetBIOS 识别启动：共 {len(targets)} 台设备...")
         self.netbios_thread = NetbiosThread(targets, timeout=1.5)
@@ -1639,7 +1667,7 @@ class MainWindow(TreeMixin, QMainWindow):
         if fail:
             msg += f"，失败 {fail} 台（防火墙/非 Windows/未开放 137 等）"
         self._audit(
-            audit_log.CAT_DEVICE, "NetBIOS 识别",
+            audit_log.CAT_DEVICE, tr("NetBIOS 识别"),
             f"共 {total} 台 · 成功 {ok} · 失败 {fail}",
         )
         self.status_bar.showMessage(msg)
@@ -1661,7 +1689,7 @@ class MainWindow(TreeMixin, QMainWindow):
             target = self._selected_target()
         if not target:
             text, ok = QInputDialog.getText(
-                self, "选择目标", f"请输入要执行「{tool.upper()}」的目标 IP 或主机名:"
+                self, tr("选择目标"), f"请输入要执行「{tool.upper()}」的目标 IP 或主机名:"
             )
             if not ok or not text.strip():
                 return
@@ -1676,25 +1704,24 @@ class MainWindow(TreeMixin, QMainWindow):
             cmd = f"telnet {target}"
         elif tool == "ssh":
             user, ok = QInputDialog.getText(
-                self, "SSH 连接", "请输入登录用户名:", text=getpass.getuser()
+                self, tr("SSH 连接"), tr("请输入登录用户名:"), text=getpass.getuser()
             )
             if not ok or not user.strip():
                 return
             if not shutil.which("ssh"):
                 QMessageBox.warning(
-                    self, "未找到 ssh",
-                    "系统未安装 OpenSSH 客户端（ssh.exe）。\n"
-                    "请在“设置 → 应用 → 可选功能”中启用“OpenSSH 客户端”后重试。"
+                    self, tr("未找到 ssh"),
+                    tr("系统未安装 OpenSSH 客户端（ssh.exe）。\n" "请在“设置 → 应用 → 可选功能”中启用“OpenSSH 客户端”后重试。")
                 )
                 return
             cmd = f"ssh {user.strip()}@{target}"
         elif tool == "rdp":
             try:
                 subprocess.Popen(["mstsc.exe", f"/v:{target}"])
-                self._audit(audit_log.CAT_DEVICE, "启动网络工具", f"RDP · 目标 {target}")
+                self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"RDP · 目标 {target}")
                 self.status_bar.showMessage(f"已启动 RDP: {target}")
             except Exception as e:
-                QMessageBox.warning(self, "启动失败", f"无法启动远程桌面: {e}")
+                QMessageBox.warning(self, tr("启动失败"), f"无法启动远程桌面: {e}")
             return
         elif tool == "cmd":
             cmd = f"title IPScanner 已连接 {target}"
@@ -1706,10 +1733,10 @@ class MainWindow(TreeMixin, QMainWindow):
                 ["cmd.exe", "/k", cmd],
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
-            self._audit(audit_log.CAT_DEVICE, "启动网络工具", f"{tool.upper()} · 目标 {target}")
+            self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"{tool.upper()} · 目标 {target}")
             self.status_bar.showMessage(f"已启动 {tool.upper()}: {target}")
         except Exception as e:
-            QMessageBox.warning(self, "启动失败", f"无法启动 {tool}: {e}")
+            QMessageBox.warning(self, tr("启动失败"), f"无法启动 {tool}: {e}")
 
     def _remote_power(self, action: str):
         """
@@ -1721,14 +1748,14 @@ class MainWindow(TreeMixin, QMainWindow):
         target = self._selected_target()
         if not target:
             text, ok = QInputDialog.getText(
-                self, "远程" + ("关机" if action == "shutdown" else "重启"),
-                "请输入目标 IP 或主机名:"
+                self, tr("远程") + (tr("关机") if action == "shutdown" else tr("重启")),
+                tr("请输入目标 IP 或主机名:")
             )
             if not ok or not text.strip():
                 return
             target = text.strip()
 
-        _verb = "关机" if action == "shutdown" else "重启"
+        _verb = tr("关机") if action == "shutdown" else tr("重启")
         reply = QMessageBox.question(
             self, f"确认远程{_verb}",
             f"确定要向 {target} 发送远程{_verb}指令吗？\n"
@@ -1754,7 +1781,7 @@ class MainWindow(TreeMixin, QMainWindow):
                     f"目标 {target} · 指令已发送",
                 )
                 QMessageBox.information(
-                    self, "指令已发送",
+                    self, tr("指令已发送"),
                     f"已向 {target} 发送远程{_verb}指令。"
                 )
                 self.status_bar.showMessage(f"已发送远程{_verb}: {target}")
@@ -1765,15 +1792,15 @@ class MainWindow(TreeMixin, QMainWindow):
                     f"目标 {target} · 退出码 {proc.returncode}",
                 )
                 QMessageBox.warning(
-                    self, "远程" + _verb + "失败",
+                    self, tr("远程") + _verb + tr("失败"),
                     f"向 {target} 发送{_verb}指令失败 (退出码 {proc.returncode})。\n"
                     + (_err + "\n\n" if _err else "")
-                    + "常见原因：目标未授权、网络不可达、缺少权限，\n"
-                    + "或本地未以管理员身份运行本程序。"
+                    + tr("常见原因：目标未授权、网络不可达、缺少权限，\n")
+                    + tr("或本地未以管理员身份运行本程序。")
                 )
         except Exception as e:
             QMessageBox.warning(
-                self, "远程" + _verb + "失败",
+                self, tr("远程") + _verb + tr("失败"),
                 f"执行远程{_verb}指令时出错: {e}"
             )
 
@@ -1785,21 +1812,21 @@ class MainWindow(TreeMixin, QMainWindow):
         if descr:
             text += f"\n系统描述 (sysDescr):\n{descr}"
         else:
-            text += "\n(未获取到 sysDescr)"
-        QMessageBox.information(self, "SNMP 设备信息", text)
+            text += tr("\n(未获取到 sysDescr)")
+        QMessageBox.information(self, tr("SNMP 设备信息"), text)
 
     def _open_service(self, proto, ip):
         """根据协议打开浏览器 / 远程桌面。"""
-        if proto == "HTTP":
+        if proto == tr("HTTP"):
             QDesktopServices.openUrl(QUrl(f"http://{ip}"))
-        elif proto == "HTTPS":
+        elif proto == tr("HTTPS"):
             QDesktopServices.openUrl(QUrl(f"https://{ip}"))
-        elif proto == "FTP":
+        elif proto == tr("FTP"):
             QDesktopServices.openUrl(QUrl(f"ftp://{ip}"))
-        elif proto == "RDP":
+        elif proto == tr("RDP"):
             if not QProcess.startDetached("mstsc", [f"/v:{ip}"]):
                 QMessageBox.information(
-                    self, "远程桌面",
+                    self, tr("远程桌面"),
                     f"未能自动启动远程桌面连接。\n请手动运行：mstsc /v:{ip}"
                 )
 
@@ -1848,7 +1875,7 @@ class MainWindow(TreeMixin, QMainWindow):
                 db_path=self.history_db,
             )
         except Exception as e:
-            print("保存历史快照失败:", e)
+            print(tr("保存历史快照失败:"), e)
 
     def _open_history_compare(self):
         dlg = HistoryCompareDialog(self, db_path=self.history_db)
@@ -1860,7 +1887,7 @@ class MainWindow(TreeMixin, QMainWindow):
 
     def _open_topology(self):
         if not self.all_results:
-            QMessageBox.information(self, "拓扑视图", "请先完成一次扫描，再查看拓扑。")
+            QMessageBox.information(self, tr("拓扑视图"), tr("请先完成一次扫描，再查看拓扑。"))
             return
         gw_ip = _detect_gateway()
         dlg = TopologyDialog(self.all_results, gw_ip, self.dark_mode, self)
@@ -1873,7 +1900,7 @@ class MainWindow(TreeMixin, QMainWindow):
         import socket as sock
         mac_clean = mac.replace("-", "").replace(":", "").replace(".", "").strip().upper()
         if len(mac_clean) != 12 or not all(c in "0123456789ABCDEF" for c in mac_clean):
-            QMessageBox.warning(self, "WoL 唤醒", f"MAC 地址格式无效，无法唤醒：\n{mac}")
+            QMessageBox.warning(self, tr("WoL 唤醒"), f"MAC 地址格式无效，无法唤醒：\n{mac}")
             return
         try:
             mac_bytes = bytes.fromhex(mac_clean)
@@ -1884,13 +1911,13 @@ class MainWindow(TreeMixin, QMainWindow):
             s.close()
             self.status_bar.showMessage(f"已向 {mac} 发送 WoL 魔术包")
             QMessageBox.information(
-                self, "WoL 唤醒",
+                self, tr("WoL 唤醒"),
                 f"已向 {mac} 发送唤醒魔术包。\n\n请确保目标设备已开启 WOL：\n"
-                "• BIOS/UEFI 中启用 Wake on LAN\n"
-                "• 网卡属性中允许「允许此设备唤醒计算机」"
+                + tr("• BIOS/UEFI 中启用 Wake on LAN\n"
+                     "• 网卡属性中允许「允许此设备唤醒计算机」")
             )
         except Exception as e:
-            QMessageBox.warning(self, "WoL 唤醒", f"发送失败：{e}")
+            QMessageBox.warning(self, tr("WoL 唤醒"), f"发送失败：{e}")
 
     def _open_library_manager(self):
         dlg = MacLibraryDialog(self.library, self)
@@ -1906,10 +1933,10 @@ class MainWindow(TreeMixin, QMainWindow):
             if self.all_results:
                 self._refresh_matches_from_library()
             self._audit(
-                audit_log.CAT_LIBRARY, "新增设备",
+                audit_log.CAT_LIBRARY, tr("新增设备"),
                 f"IP {ip or '—'} · MAC {mac or '—'} · 地址库共 {self.library.count()} 条",
             )
-            self.status_bar.showMessage("已加入地址库")
+            self.status_bar.showMessage(tr("已加入地址库"))
 
     def _edit_library_entry(self, device_id: int):
         dlg = DeviceEditDialog(self.library, parent=self, device_id=device_id)
@@ -1917,7 +1944,7 @@ class MainWindow(TreeMixin, QMainWindow):
             self._refresh_library_label()
             if self.all_results:
                 self._refresh_matches_from_library()
-            self._audit(audit_log.CAT_LIBRARY, "编辑设备", f"设备 #{device_id}")
+            self._audit(audit_log.CAT_LIBRARY, tr("编辑设备"), f"设备 #{device_id}")
 
     def _delete_library_entry(self, device_id: int):
         dev = self.library.get_by_id(device_id)
@@ -1925,7 +1952,7 @@ class MainWindow(TreeMixin, QMainWindow):
             return
         label = dev.get("mac") or dev.get("ip") or f"#{device_id}"
         reply = QMessageBox.question(
-            self, "确认删除",
+            self, tr("确认删除"),
             f"确定从地址库删除该设备吗？\n\n{label}",
             QMessageBox.Yes | QMessageBox.No,
         )
@@ -1935,17 +1962,17 @@ class MainWindow(TreeMixin, QMainWindow):
             if self.all_results:
                 self._refresh_matches_from_library()
             self._audit(
-                audit_log.CAT_LIBRARY, "删除设备",
+                audit_log.CAT_LIBRARY, tr("删除设备"),
                 f"{label} · 地址库余 {self.library.count()} 条",
             )
-            self.status_bar.showMessage("已从地址库删除")
+            self.status_bar.showMessage(tr("已从地址库删除"))
 
     # --- Excel ---
 
     def _import_excel(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择 Excel 文件（可多选，自动合并进地址库）", "",
-            "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)"
+            self, tr("选择 Excel 文件（可多选，自动合并进地址库）"), "",
+            tr("Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)")
         )
         if not files:
             return
@@ -1965,7 +1992,7 @@ class MainWindow(TreeMixin, QMainWindow):
         # 审计：记录地址库导入
         if ok_files:
             self._audit(
-                audit_log.CAT_LIBRARY, "导入地址库",
+                audit_log.CAT_LIBRARY, tr("导入地址库"),
                 f"合并 {ok_files} 个文件 · 地址库共 {self.library.count()} 条"
                 + (f" · 失败 {len(errs)} 个" if errs else ""),
             )
@@ -1975,10 +2002,10 @@ class MainWindow(TreeMixin, QMainWindow):
             self._refresh_matches_from_library()
 
         if errs:
-            QMessageBox.warning(self, "部分文件导入失败", "\n".join(errs))
+            QMessageBox.warning(self, tr("部分文件导入失败"), "\n".join(errs))
         elif ok_files:
             QMessageBox.information(
-                self, "导入成功",
+                self, tr("导入成功"),
                 f"已合并 {ok_files} 个文件到地址库，共 {self.library.count()} 条。\n"
                 f"扫描联网设备后将自动按 MAC 匹配。"
             )
@@ -1989,53 +2016,53 @@ class MainWindow(TreeMixin, QMainWindow):
             self.excel_label.setText(f"地址库: {n} 条")
             self.excel_label.setStyleSheet("color: #2E7D32; font-size: 11px; font-weight: bold;")
         else:
-            self.excel_label.setText("地址库: 空")
+            self.excel_label.setText(tr("地址库: 空"))
             self.excel_label.setStyleSheet("color: #888888; font-size: 11px;")
 
     def _export_library(self):
         default_name = f"MAC地址库_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "导出地址库", default_name, "Excel 文件 (*.xlsx)"
+            self, tr("导出地址库"), default_name, tr("Excel 文件 (*.xlsx)")
         )
         if not file_path:
             return
         success, msg = self.library.export_to_excel(file_path)
         if success:
             self._audit(
-                audit_log.CAT_EXPORT, "导出地址库",
+                audit_log.CAT_EXPORT, tr("导出地址库"),
                 f"{self.library.count()} 条 · {os.path.basename(file_path)}",
             )
             self.status_bar.showMessage(msg)
-            QMessageBox.information(self, "导出成功", msg)
+            QMessageBox.information(self, tr("导出成功"), msg)
         else:
-            QMessageBox.warning(self, "导出失败", msg)
+            QMessageBox.warning(self, tr("导出失败"), msg)
 
     def _generate_template(self):
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "保存 Excel 模板", "设备清单模板.xlsx",
-            "Excel 文件 (*.xlsx)"
+            self, tr("保存 Excel 模板"), tr("设备清单模板.xlsx"),
+            tr("Excel 文件 (*.xlsx)")
         )
         if not file_path:
             return
         success, msg = create_template(file_path)
         if success:
             self._audit(
-                audit_log.CAT_EXPORT, "生成 Excel 模板",
+                audit_log.CAT_EXPORT, tr("生成 Excel 模板"),
                 os.path.basename(file_path),
             )
-            QMessageBox.information(self, "成功", msg)
+            QMessageBox.information(self, tr("成功"), msg)
         else:
-            QMessageBox.warning(self, "失败", msg)
+            QMessageBox.warning(self, tr("失败"), msg)
 
     def _export_results(self):
         if not self.all_results:
-            QMessageBox.warning(self, "提示", "没有可导出的结果")
+            QMessageBox.warning(self, tr("提示"), tr("没有可导出的结果"))
             return
 
         default_name = f"扫描结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         file_path, selected_filter = QFileDialog.getSaveFileName(
-            self, "导出扫描结果", default_name,
-            "Excel 文件 (*.xlsx);;CSV 文件 (*.csv);;HTML 文件 (*.html);;JSON 文件 (*.json)"
+            self, tr("导出扫描结果"), default_name,
+            tr("Excel 文件 (*.xlsx);;CSV 文件 (*.csv);;HTML 文件 (*.html);;JSON 文件 (*.json)")
         )
         if not file_path:
             return
@@ -2069,18 +2096,18 @@ class MainWindow(TreeMixin, QMainWindow):
 
         if success:
             self._audit(
-                audit_log.CAT_EXPORT, "导出扫描结果",
+                audit_log.CAT_EXPORT, tr("导出扫描结果"),
                 f"{_fmt} · {len(self.all_results)} 条 · {os.path.basename(path)}",
             )
             self.status_bar.showMessage(msg)
-            QMessageBox.information(self, "导出成功", msg)
+            QMessageBox.information(self, tr("导出成功"), msg)
         else:
-            QMessageBox.warning(self, "导出失败", msg)
+            QMessageBox.warning(self, tr("导出失败"), msg)
 
     def _print_results(self):
         """将当前扫描结果表格打印 / 导出为 PDF（先弹打印预览对话框）。"""
         if self.table.topLevelItemCount() == 0:
-            QMessageBox.information(self, "提示", "当前没有可打印的扫描结果，请先执行扫描。")
+            QMessageBox.information(self, tr("提示"), tr("当前没有可打印的扫描结果，请先执行扫描。"))
             return
 
         # 仅取可见列（服务列默认隐藏，跳过），只打印设备顶层行
@@ -2102,7 +2129,7 @@ class MainWindow(TreeMixin, QMainWindow):
         printer.setPageOrientation(QPageLayout.Landscape)
 
         preview = QPrintPreviewDialog(printer, self)
-        preview.setWindowTitle("打印预览 - 扫描结果")
+        preview.setWindowTitle(tr("打印预览 - 扫描结果"))
         preview.paintRequested.connect(lambda p: doc.print_(p))
         preview.exec_()
 
@@ -2133,23 +2160,20 @@ class MainWindow(TreeMixin, QMainWindow):
     # --- 关于 ---
 
     def _show_about(self):
-        QMessageBox.about(self, "关于", (
-            "<h3>局域网终端扫描工具</h3>"
-            "<p>版本 1.0</p>"
-        "<p>功能：</p>"
-        "<ul>"
-        "<li>支持 CIDR / IP 范围 / 跨网段扫描</li>"
-        "<li>ICMP Ping + ARP 主动探测（发现禁 Ping 主机）+ 主机名 + 端口探测</li>"
-        "<li>端口探测方式：TCP 全连接 / SYN 半开 / UDP（可切换）</li>"
-        "<li>共享文件夹探测（SMB 共享枚举）</li>"
-        "<li>Excel 设备信息导入与自动匹配</li>"
-        "<li>结果导出为 Excel / CSV / HTML / JSON</li>"
-        "<li>mDNS 设备发现（组播发现打印机 / NAS / Apple 设备 / IoT 等）</li>"
-        "<li>操作系统探测（TTL 推测 + 服务 banner 提取版本）</li>"
-        "<li>设备指纹深度（端口/服务/mDNS/UPnP/SNMP 综合推断设备类型与型号）</li>"
-        "<li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>"
-        "</ul>"
-            "<p style='color: #94A3B8;'>基于 PyQt5 开发</p>"
+        QMessageBox.about(self, tr("关于"), (
+            tr("<h3>局域网终端扫描工具</h3>" "<p>版本 1.0</p>")
+            + tr("<p>功能：</p>") + "<ul>"
+            + tr("<li>支持 CIDR / IP 范围 / 跨网段扫描</li>"
+                 "<li>ICMP Ping + ARP 主动探测（发现禁 Ping 主机）+ 主机名 + 端口探测</li>")
+            + tr("<li>端口探测方式：TCP 全连接 / SYN 半开 / UDP（可切换）</li>"
+                 "<li>共享文件夹探测（SMB 共享枚举）</li>")
+            + tr("<li>Excel 设备信息导入与自动匹配</li>"
+                 "<li>结果导出为 Excel / CSV / HTML / JSON</li>")
+            + tr("<li>mDNS 设备发现（组播发现打印机 / NAS / Apple 设备 / IoT 等）</li>"
+                 "<li>操作系统探测（TTL 推测 + 服务 banner 提取版本）</li>")
+            + tr("<li>设备指纹深度（端口/服务/mDNS/UPnP/SNMP 综合推断设备类型与型号）</li>"
+                 "<li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>")
+            + "</ul>" + tr("<p style='color: #94A3B8;'>基于 PyQt5 开发</p>")
         ))
 
     def closeEvent(self, event):

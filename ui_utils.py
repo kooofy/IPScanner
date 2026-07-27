@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """通用工具函数：网关探测、快照对比、IP 校验。"""
+from i18n import tr
 
 
 def _detect_gateway() -> str:
@@ -46,28 +47,28 @@ def _compare_snapshots(base: dict, target: dict) -> list:
 
     for ip, td in target_map.items():
         if ip not in base_map:
-            diffs.append({"ip": ip, "change": "新增设备", "old": "—", "new": _fmt(td)})
+            diffs.append({"ip": ip, "change": tr("新增设备"), "old": "—", "new": _fmt(td)})
     for ip, bd in base_map.items():
         if ip not in target_map:
-            diffs.append({"ip": ip, "change": "消失设备", "old": _fmt(bd), "new": "—"})
+            diffs.append({"ip": ip, "change": tr("消失设备"), "old": _fmt(bd), "new": "—"})
     for ip in base_map:
         if ip in target_map:
             bd, td = base_map[ip], target_map[ip]
             if bd.get("status") != td.get("status"):
-                diffs.append({"ip": ip, "change": "状态变更",
+                diffs.append({"ip": ip, "change": tr("状态变更"),
                               "old": bd.get("status", "—"), "new": td.get("status", "—")})
             if (bd.get("mac") or "") != (td.get("mac") or ""):
-                diffs.append({"ip": ip, "change": "MAC 变更",
+                diffs.append({"ip": ip, "change": tr("MAC 变更"),
                               "old": bd.get("mac") or "—", "new": td.get("mac") or "—"})
             if (bd.get("hostname") or "") != (td.get("hostname") or ""):
-                diffs.append({"ip": ip, "change": "主机名变更",
+                diffs.append({"ip": ip, "change": tr("主机名变更"),
                               "old": bd.get("hostname") or "—", "new": td.get("hostname") or "—"})
             # 设备识别类字段变更（新增字段，旧快照缺省为空，不影响兼容）
             for field, label in (
-                ("device_class", "设备类型变更"),
-                ("open_ports", "开放端口变更"),
-                ("location", "位置变更"),
-                ("user", "使用者变更"),
+                ("device_class", tr("设备类型变更")),
+                ("open_ports", tr("开放端口变更")),
+                ("location", tr("位置变更")),
+                ("user", tr("使用者变更")),
             ):
                 bv, tv = bd.get(field) or "", td.get(field) or ""
                 if bv != tv:

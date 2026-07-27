@@ -16,6 +16,7 @@
 import socket
 import struct
 from typing import Dict
+from i18n import tr
 
 NETBIOS_NS_PORT = 137
 
@@ -85,17 +86,17 @@ def _parse_nbstat_response(data: bytes, ip: str) -> Dict[str, object]:
     """
     try:
         if len(data) < 12:
-            return _error_dict("响应过短，可能不是 NBSTAT 应答")
+            return _error_dict(tr("响应过短，可能不是 NBSTAT 应答"))
         off = 12
         # 跳过 Question 段（QNAME + QTYPE + QCLASS）
         off = _skip_name(data, off)
         if off + 4 > len(data):
-            return _error_dict("Question 段解析越界")
+            return _error_dict(tr("Question 段解析越界"))
         off += 4  # QTYPE(2) + QCLASS(2)
         # Answer 段
         off = _skip_name(data, off)  # Answer NAME（通常为压缩指针 0xC00C）
         if off + 10 > len(data):     # TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
-            return _error_dict("Answer 头解析越界")
+            return _error_dict(tr("Answer 头解析越界"))
         ans_type = struct.unpack(">H", data[off:off + 2])[0]
         off += 2
         off += 2                      # CLASS
@@ -103,10 +104,10 @@ def _parse_nbstat_response(data: bytes, ip: str) -> Dict[str, object]:
         rdlen = struct.unpack(">H", data[off:off + 2])[0]
         off += 2
         if ans_type != 0x0021:
-            return _error_dict("应答类型非 NBSTAT")
+            return _error_dict(tr("应答类型非 NBSTAT"))
         rdata_end = off + rdlen
         if off + 2 > rdata_end:
-            return _error_dict("RDATA 越界")
+            return _error_dict(tr("RDATA 越界"))
         num_names = struct.unpack(">H", data[off:off + 2])[0]
         off += 2
         comp_name = None
@@ -159,7 +160,7 @@ def netbios_query(ip: str, timeout: float = 2.0) -> Dict[str, object]:
         data, _ = sock.recvfrom(65535)
         return _parse_nbstat_response(data, ip)
     except socket.timeout:
-        return _error_dict("NetBIOS 超时（目标可能未开放 UDP/137 或防火墙拦截）")
+        return _error_dict(tr("NetBIOS 超时（目标可能未开放 UDP/137 或防火墙拦截）"))
     except (ConnectionResetError, ConnectionRefusedError, OSError) as e:
         return _error_dict(f"NetBIOS 连接失败: {e}")
     except Exception as e:  # noqa: BLE001

@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .constants import _LOCAL_MAC_CACHE
 from .util import _run_cmd
+from i18n import tr
 
 
 def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
@@ -15,7 +16,7 @@ def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
     Windows 使用系统 ping 命令。
     TTL 用于 OS 推测（Windows≈128 / Linux·macOS·BSD≈64 / 部分网络设备≈255）。
     """
-    is_windows = platform.system() == "Windows"
+    is_windows = platform.system() == tr("Windows")
     if is_windows:
         cmd = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
     else:
@@ -32,7 +33,7 @@ def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
             ttl = int(ttl_match.group(1))
         if "TTL=" in output or "ttl=" in output:
             # 提取响应时间
-            time_match = re.search(r"时间[=:](\d+)\s*ms", output)
+            time_match = re.search(tr(r"时间[=:](\d+)\s*ms"), output)
             if not time_match:
                 time_match = re.search(r"time[=:](\d+\.?\d*)\s*ms", output)
             if not time_match:
@@ -50,7 +51,7 @@ def get_local_mac_map() -> Dict[str, str]:
     Windows 下使用 ipconfig /all，Linux 下使用 ifconfig/ip addr
     """
     mac_map = {}
-    is_windows = platform.system() == "Windows"
+    is_windows = platform.system() == tr("Windows")
     
     try:
         if is_windows:
@@ -60,14 +61,14 @@ def get_local_mac_map() -> Dict[str, str]:
             for line in output.splitlines():
                 line = line.strip()
                 # 匹配物理地址行
-                mac_match = re.search(r"物理地址[ .]+: ([0-9a-fA-F\-]{17})", line)
+                mac_match = re.search(tr(r"物理地址[ .]+: ([0-9a-fA-F\-]{17})"), line)
                 if not mac_match:
                     mac_match = re.search(r"Physical Address[ .]+: ([0-9a-fA-F\-]{17})", line)
                 if mac_match:
                     current_mac = mac_match.group(1).replace("-", ":").lower()
                     continue
                 # 匹配 IPv4 地址行
-                ip_match = re.search(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                ip_match = re.search(tr(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)"), line)
                 if not ip_match:
                     ip_match = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
                 if ip_match and current_mac:
@@ -115,7 +116,7 @@ def arp_ping(ip: str) -> str:
     无需管理员权限（走 iphlpapi 的 SendARP，非原始套接字）。
     命中返回 '' 分隔的小写 MAC，未命中/不支持返回空串。
     """
-    if platform.system() != "Windows":
+    if platform.system() != tr("Windows"):
         return ""
     try:
         ws2 = ctypes.windll.ws2_32
@@ -150,20 +151,20 @@ def get_local_subnets() -> List:
     用于约束 ARP 主动探测范围（只对同网段离线 IP 探测，避免路由范围浪费时间）。
     """
     nets = []
-    if platform.system() != "Windows":
+    if platform.system() != tr("Windows"):
         return nets
     try:
         output = _run_cmd(["ipconfig"], timeout=10)
         cur_ip = None
         for line in output.splitlines():
             line = line.strip()
-            m = re.search(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+            m = re.search(tr(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)"), line)
             if not m:
                 m = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
             if m:
                 cur_ip = m.group(1)
                 continue
-            sm = re.search(r"子网掩码[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+            sm = re.search(tr(r"子网掩码[ .]+: (\d+\.\d+\.\d+\.\d+)"), line)
             if not sm:
                 sm = re.search(r"Subnet Mask[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
             if sm and cur_ip:

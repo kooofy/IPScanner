@@ -10,6 +10,7 @@
 """
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
+from i18n import tr
 
 
 # 冲突严重级别
@@ -23,15 +24,15 @@ CONFLICT_DUPLICATE_HOSTNAME = "duplicate_hostname"
 CONFLICT_UNKNOWN_DEVICE = "unknown_device"
 
 _TYPE_LABELS = {
-    CONFLICT_DUPLICATE_MAC: "MAC 地址重复",
-    CONFLICT_DUPLICATE_HOSTNAME: "主机名重复",
-    CONFLICT_UNKNOWN_DEVICE: "未知设备",
+    CONFLICT_DUPLICATE_MAC: tr("MAC 地址重复"),
+    CONFLICT_DUPLICATE_HOSTNAME: tr("主机名重复"),
+    CONFLICT_UNKNOWN_DEVICE: tr("未知设备"),
 }
 
 _SEVERITY_LABELS = {
-    SEVERITY_HIGH: "严重",
-    SEVERITY_WARNING: "警告",
-    SEVERITY_INFO: "提示",
+    SEVERITY_HIGH: tr("严重"),
+    SEVERITY_WARNING: tr("警告"),
+    SEVERITY_INFO: tr("提示"),
 }
 
 
@@ -102,7 +103,7 @@ def _detect_duplicate_mac(online_results) -> List[Conflict]:
         ips = [r.ip for r in rs]
         hostnames = [r.hostname or "—" for r in rs]
         vendors = list({r.vendor for r in rs if r.vendor})
-        vendor_str = vendors[0] if len(vendors) == 1 else ", ".join(vendors) if vendors else "未知"
+        vendor_str = vendors[0] if len(vendors) == 1 else ", ".join(vendors) if vendors else tr("未知")
 
         desc = f"MAC {mac} 同时出现在 {len(ips)} 个在线 IP 上"
         detail_parts = [f"IP: {', '.join(ips)}"]

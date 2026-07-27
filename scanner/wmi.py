@@ -17,6 +17,7 @@ import sys
 import json
 import base64
 import subprocess
+from i18n import tr
 
 # 单次查询超时（秒）。WMI/DCOM 在防火墙拦截或权限不足时可能长时间挂起，
 # 统一用 subprocess timeout 兜底，避免界面线程被拖死。
@@ -71,7 +72,7 @@ def _flatten(raw: dict) -> dict:
     cs = raw.get("ComputerSystem") or {}
     bios = raw.get("BIOS") or {}
     os_ = raw.get("OS") or {}
-    cpu = raw.get("CPU") or {}
+    cpu = raw.get(tr("CPU")) or {}
 
     # Win32_ComputerSystem 在某些版本返回的是单行对象（dict），但 PowerShell
     # Select-Object 在单结果时仍是对象；ConvertTo-Json 默认对单元素数组会拆成对象，
@@ -115,7 +116,7 @@ def _flatten(raw: dict) -> dict:
 
     # 任一关键字段缺失即视为基本失败（多半是权限/防火墙导致返回空对象）
     if not (out["wmi_manufacturer"] or out["wmi_model"] or out["wmi_os"]):
-        out["wmi_error"] = "目标未返回任何设备信息（权限不足、WMI/DCOM 被防火墙拦截，或目标非 Windows）"
+        out["wmi_error"] = tr("目标未返回任何设备信息（权限不足、WMI/DCOM 被防火墙拦截，或目标非 Windows）")
     return out
 
 
@@ -153,7 +154,7 @@ def wmi_query(ip: str, username: str, password: str, domain: str = "",
             "wmi_bios": "", "wmi_os": "", "wmi_os_version": "", "wmi_os_arch": "",
             "wmi_domain": "", "wmi_user": "", "wmi_cpu": "", "wmi_ram_gb": 0.0,
             "wmi_last_boot": "", "wmi_hostname": "",
-            "wmi_error": "缺少目标 IP 或凭据（用户名/密码不能为空）",
+            "wmi_error": tr("缺少目标 IP 或凭据（用户名/密码不能为空）"),
         }
 
     # 凭证用户名：已带域分隔符则用原值，否则拼 domain\\user
@@ -179,14 +180,14 @@ def wmi_query(ip: str, username: str, password: str, domain: str = "",
     except subprocess.TimeoutExpired:
         return _error_dict(f"WMI 查询超时（{timeout:.0f}s），目标可能防火墙拦截或不可达")
     except FileNotFoundError:
-        return _error_dict("未找到 powershell，WMI 识别仅支持 Windows 宿主")
+        return _error_dict(tr("未找到 powershell，WMI 识别仅支持 Windows 宿主"))
     except Exception as e:  # noqa: BLE001
         return _error_dict(f"启动 PowerShell 失败: {e}")
 
     out_text = (proc.stdout or "").strip()
     err_text = (proc.stderr or "").strip()
     if not out_text:
-        msg = err_text or (f"PowerShell 退出码 {proc.returncode}" if proc.returncode else "无输出")
+        msg = err_text or (f"PowerShell 退出码 {proc.returncode}" if proc.returncode else tr("无输出"))
         return _error_dict(f"WMI 查询无输出: {msg}")
 
     try:
@@ -195,7 +196,7 @@ def wmi_query(ip: str, username: str, password: str, domain: str = "",
         return _error_dict(f"WMI 返回无法解析: {out_text[:200]}")
 
     if raw.get("ok") is not True:
-        return _error_dict(raw.get("error") or "WMI 查询失败")
+        return _error_dict(raw.get("error") or tr("WMI 查询失败"))
 
     result = _flatten(raw)
     # 若 flatten 判定为空（授权失败但 PowerShell 没抛错），补充 stderr 线索
@@ -220,12 +221,12 @@ def wmi_device_class(manufacturer: str, model: str) -> str:
     server_kw = ("poweredge", "proliant", "system x", "server", "r720", "r730",
                  "r740", "dl360", "dl380", "tower server")
     if any(k in text for k in server_kw):
-        return "服务器"
+        return tr("服务器")
     pc_vendors = ("dell", "hp", "hewlett", "lenovo", "thinkcentre", "thinkpad",
                   "asus", "acer", "msi", "micro-star", "apple", "gigabyte",
-                  "神舟", "清华同方", "华为", "hasee")
+                  tr("神舟"), tr("清华同方"), tr("华为"), "hasee")
     if any(v in text for v in pc_vendors):
-        return "电脑"
+        return tr("电脑")
     return ""
 
 

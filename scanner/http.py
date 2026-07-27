@@ -5,6 +5,7 @@ import ssl
 from typing import Tuple
 
 from .constants import _PRINTER_BRANDS, _PRINTER_MODEL_RE
+from i18n import tr
 
 
 def _read_http(ip: str, port: int, timeout: float = 1.0) -> Tuple[str, str, str]:
@@ -78,8 +79,8 @@ def _extract_http_brand(text: str) -> Tuple[str, str]:
         model = " ".join(w.capitalize() for w in model.split())
 
     # 3) 若正文里有明显"打印机"中文信号，但没命中国际品牌，给一个通用品牌提示
-    if not brand and ("打印机" in text or "printer" in low or "laser" in low or "inkjet" in low):
-        brand = "打印机"
+    if not brand and (tr("打印机") in text or "printer" in low or "laser" in low or "inkjet" in low):
+        brand = tr("打印机")
 
     return brand, model
 

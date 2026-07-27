@@ -7,6 +7,7 @@
 - 非 Windows 环境无 DPAPI，自动退化为"仅内存、不持久化"，save_to 静默跳过。
 """
 import base64
+from i18n import tr
 
 try:
     import ctypes
@@ -55,10 +56,10 @@ if _HAS_DPAPI:
             _kernel32.LocalFree(blob_out.pbData)
 else:
     def _protect(plaintext: str) -> bytes:
-        raise RuntimeError("当前平台不支持 DPAPI 加密")
+        raise RuntimeError(tr("当前平台不支持 DPAPI 加密"))
 
     def _unprotect(blob: bytes) -> str:
-        raise RuntimeError("当前平台不支持 DPAPI 解密")
+        raise RuntimeError(tr("当前平台不支持 DPAPI 解密"))
 
 
 class WmiCredentialStore:
@@ -88,7 +89,7 @@ class WmiCredentialStore:
                 settings.setValue("wmi/password_enc", base64.b64encode(blob).decode("ascii"))
                 self.saved = True
         except Exception as e:  # noqa: BLE001
-            print("WMI 凭据加密保存失败（已忽略）:", e)
+            print(tr("WMI 凭据加密保存失败（已忽略）:"), e)
 
     def load_from(self, settings):
         """从 QSettings 解密载入。解密失败则清空密码，不影响启动。"""
@@ -102,5 +103,5 @@ class WmiCredentialStore:
                 self.password = _unprotect(base64.b64decode(enc))
                 self.saved = True
             except Exception as e:  # noqa: BLE001
-                print("WMI 凭据解密失败（已忽略）:", e)
+                print(tr("WMI 凭据解密失败（已忽略）:"), e)
                 self.password = ""

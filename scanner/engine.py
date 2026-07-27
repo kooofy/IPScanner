@@ -19,6 +19,7 @@ from .ping import arp_ping, get_local_subnets, get_mac_for_ip, ping_ip
 from .ports import raw_capability, scan_port, scan_ports, scan_shares
 from .range import parse_ip_range
 from .snmp import snmp_get_system
+from i18n import tr
 
 
 # ── RTT 自适应超时（仅 TCP connect 模式） ──
@@ -89,7 +90,7 @@ class NetworkScanner:
                 _syn_failed = False
             else:
                 self.warnings.append(
-                    f"{'SYN' if tcp_scan_mode == 'syn' else 'UDP'} 探测需要管理员权限"
+                    f"{'SYN' if tcp_scan_mode == 'syn' else tr('UDP')} 探测需要管理员权限"
                     f"（Windows 还需 Npcap），已回退到 TCP 全连接扫描。{reason}"
                 )
 
@@ -115,7 +116,7 @@ class NetworkScanner:
         if protocols:
             for proto in protocols:
                 proto_upper = proto.upper()
-                if proto_upper == "SNMP":
+                if proto_upper == tr("SNMP"):
                     snmp_enabled = True
                 elif proto_upper in PROTOCOL_PORTS:
                     proto_port_map[proto_upper] = PROTOCOL_PORTS[proto_upper]
@@ -192,7 +193,7 @@ class NetworkScanner:
                     _tcp_os = _match_tcp_stack(_sig)
                     # 仅在 ICMP 无结论或 TCP 识别为网络设备时覆盖，
                     # 避免与已较准确的 ICMP TTL 推测冲突
-                    if _tcp_os and (not result.os_guess or _tcp_os == "网络设备"):
+                    if _tcp_os and (not result.os_guess or _tcp_os == tr("网络设备")):
                         result.os_guess = _tcp_os
 
             svc_list = []
@@ -207,7 +208,7 @@ class NetworkScanner:
                     if port in detected_proto_ports:
                         svc_list.append(proto)
                         detail = {"proto": proto, "port": port}
-                        if proto == "HTTP":
+                        if proto == tr("HTTP"):
                             # 单次 GET 同时提取 banner(标题) 与设备品牌/型号
                             # （对只开 80/443 的打印机很关键，省掉一次 TCP 往返）
                             http_banner, http_brand, http_model = _read_http(ip, port, 1.2)
@@ -223,7 +224,7 @@ class NetworkScanner:
                                 detail["banner"] = disp
                             else:
                                 detail["banner"] = http_banner
-                        elif proto == "HTTPS":
+                        elif proto == tr("HTTPS"):
                             detail["banner"] = _read_https_banner(ip, port, 1.2)
                         svc_details.append(detail)
                         # 如果没开完整端口扫描，也把协议端口加入开放端口列表
@@ -254,12 +255,12 @@ class NetworkScanner:
                     result.snmp_sys_descr = snmp_info.get("sys_descr", "")
                     if not result.hostname and result.snmp_sys_name:
                         result.hostname = result.snmp_sys_name
-                    if "SNMP" not in result.services:
-                        result.services.append("SNMP")
+                    if tr("SNMP") not in result.services:
+                        result.services.append(tr("SNMP"))
                     result.service_details.append({
-                        "proto": "SNMP",
+                        "proto": tr("SNMP"),
                         "port": 161,
-                        "banner": result.snmp_sys_descr or "SNMP 设备信息",
+                        "banner": result.snmp_sys_descr or tr("SNMP 设备信息"),
                     })
 
             # 共享文件夹探测 (SMB / 445)：对在线设备的 SMB 服务枚举共享目录
@@ -271,10 +272,10 @@ class NetworkScanner:
                 shares = scan_shares(ip, timeout=1.5)
                 if shares:
                     result.shares = shares
-                    if "SMB共享" not in result.services:
-                        result.services.append("SMB共享")
+                    if tr("SMB共享") not in result.services:
+                        result.services.append(tr("SMB共享"))
                     result.service_details.append({
-                        "proto": "SMB共享",
+                        "proto": tr("SMB共享"),
                         "port": 445,
                         "banner": f"{len(shares)} 个共享: " + ", ".join(shares),
                         "shares": shares,
@@ -388,10 +389,10 @@ class NetworkScanner:
                         r = results[ip]
                         if not r.hostname and names:
                             r.hostname = names[0].rstrip(".")
-                        if services and "mDNS" not in r.services:
-                            r.services.append("mDNS")
+                        if services and tr("mDNS") not in r.services:
+                            r.services.append(tr("mDNS"))
                             r.service_details.append({
-                                "proto": "mDNS", "port": 0,
+                                "proto": tr("mDNS"), "port": 0,
                                 "banner": ", ".join(services),
                             })
                         if r.status != "online":
@@ -403,9 +404,9 @@ class NetworkScanner:
                                         discovery_method="mdns",
                                         hostname=names[0].rstrip(".") if names else "")
                         if services:
-                            nr.services.append("mDNS")
+                            nr.services.append(tr("mDNS"))
                             nr.service_details.append({
-                                "proto": "mDNS", "port": 0,
+                                "proto": tr("mDNS"), "port": 0,
                                 "banner": ", ".join(services),
                             })
                         results[ip] = nr
@@ -423,8 +424,7 @@ class NetworkScanner:
         # 运行时原始套接字发送被系统拒绝（如 Windows 拦截 TCP 原始发送）的回退告警
         if effective_tcp_mode in ("syn", "udp") and _syn_failed:
             self.warnings.append(
-                "SYN/UDP 探测在发送阶段被系统拒绝"
-                "（Windows 需 Npcap 或以管理员运行），本次端口扫描已回退到 TCP 全连接。"
+                tr("SYN/UDP 探测在发送阶段被系统拒绝" "（Windows 需 Npcap 或以管理员运行），本次端口扫描已回退到 TCP 全连接。")
             )
 
         # 记录 RTT 自适应最终收敛的 connect 超时，供上层日志展示

@@ -3,6 +3,7 @@
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from scanner import NetworkScanner, ScanResult
+from i18n import tr
 
 
 class ScanThread(QThread):
@@ -74,10 +75,10 @@ class MdnsThread(QThread):
             except ImportError:
                 mdns_discover = None
         if mdns_discover is None:
-            self.log_signal.emit("mDNS 模块不可用")
+            self.log_signal.emit(tr("mDNS 模块不可用"))
             self.finished_signal.emit({})
             return
-        self.log_signal.emit("正在做 mDNS 组播发现...")
+        self.log_signal.emit(tr("正在做 mDNS 组播发现..."))
         result = mdns_discover(timeout=self.timeout)
         self.log_signal.emit(f"mDNS 发现完成: {len(result)} 个设备")
         self.finished_signal.emit(result)

@@ -13,18 +13,19 @@ import os
 import sqlite3
 import time
 from app_paths import data_dir
+from i18n import tr
 
 DB_PATH = os.path.join(data_dir(), "audit_log.db")
 
 # ── 事件分类 ──
-CAT_SCAN = "扫描"
-CAT_CONFLICT = "冲突检测"
-CAT_RANGE = "网段"
-CAT_RESULT = "结果"
-CAT_LIBRARY = "地址库"
-CAT_EXPORT = "导出"
-CAT_DEVICE = "设备操作"
-CAT_SYSTEM = "系统"
+CAT_SCAN = tr("扫描")
+CAT_CONFLICT = tr("冲突检测")
+CAT_RANGE = tr("网段")
+CAT_RESULT = tr("结果")
+CAT_LIBRARY = tr("地址库")
+CAT_EXPORT = tr("导出")
+CAT_DEVICE = tr("设备操作")
+CAT_SYSTEM = tr("系统")
 
 CATEGORIES = [
     CAT_SCAN, CAT_CONFLICT, CAT_RANGE, CAT_RESULT,

@@ -11,6 +11,7 @@ import audit_log
 from conflict_detector import SEVERITY_HIGH
 from ui_icons import get_pc_icons
 from styles import _ip_to_int, _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9
+from i18n import tr
 
 class ResultTreeItem(QTreeWidgetItem):
     """结果树项：重写 < 以支持按列的数值排序（IP / 响应时间 / 序号）。
@@ -78,16 +79,16 @@ class TreeMixin:
                     tips.append(f"[{c.severity_label}] {c.description}")
             existing_tip = item.toolTip(0) or ip
             # 去掉旧的冲突提示（如果有）
-            if " | 冲突:" in existing_tip:
-                existing_tip = existing_tip.split(" | 冲突:")[0]
+            if tr(" | 冲突:") in existing_tip:
+                existing_tip = existing_tip.split(tr(" | 冲突:"))[0]
             item.setToolTip(0, f"{existing_tip} | 冲突: {'; '.join(tips)}")
         else:
             # 无冲突：恢复正常
             item.setText(0, ip)
             item.setForeground(0, self._default_fg_color())
             existing_tip = item.toolTip(0) or ip
-            if " | 冲突:" in existing_tip:
-                existing_tip = existing_tip.split(" | 冲突:")[0]
+            if tr(" | 冲突:") in existing_tip:
+                existing_tip = existing_tip.split(tr(" | 冲突:"))[0]
                 item.setToolTip(0, existing_tip)
 
     def _default_fg_color(self):
@@ -174,7 +175,7 @@ class TreeMixin:
             # 注意：必须使用 QTreeView.setFirstColumnSpanned(row, parent_index, True) 才能生效。
 
             # SNMP 保留 sysName/sysDescr 供点击弹窗展示
-            if proto_upper == "SNMP":
+            if proto_upper == tr("SNMP"):
                 child.setData(0, Qt.UserRole + 3, result.snmp_sys_descr)
                 child.setData(0, Qt.UserRole + 4, result.snmp_sys_name)
 
@@ -197,7 +198,7 @@ class TreeMixin:
                 parts.append(result.wmi_os)
             if result.wmi_user:
                 parts.append(f"用户:{result.wmi_user}")
-            wmi_text = "WMI, " + " · ".join(parts) if parts else "WMI, 已识别"
+            wmi_text = "WMI, " + " · ".join(parts) if parts else tr("WMI, 已识别")
             wmi_child.setIcon(0, self.style().standardIcon(QStyle.SP_ComputerIcon))
             wmi_child.setText(0, wmi_text)
             wmi_child.setForeground(0, self._link_color())
@@ -221,7 +222,7 @@ class TreeMixin:
                 parts.append(f"用户:{result.netbios_user}")
             if result.netbios_mac:
                 parts.append(f"MAC:{result.netbios_mac}")
-            nb_text = "NetBIOS, " + " · ".join(parts) if parts else "NetBIOS, 已识别"
+            nb_text = "NetBIOS, " + " · ".join(parts) if parts else tr("NetBIOS, 已识别")
             nb_child.setIcon(0, self.style().standardIcon(QStyle.SP_ComputerIcon))
             nb_child.setText(0, nb_text)
             nb_child.setForeground(0, self._link_color())
@@ -239,16 +240,16 @@ class TreeMixin:
 
     def _service_icon(self, proto: str):
         proto_upper = proto.upper()
-        if proto_upper in ("HTTP", "HTTPS"):
+        if proto_upper in (tr("HTTP"), tr("HTTPS")):
             return self._globe_icon()
         icon_map = {
-            "FTP": QStyle.SP_DirIcon,
-            "RDP": QStyle.SP_ComputerIcon,
-            "SSH": QStyle.SP_CommandLink,
+            tr("FTP"): QStyle.SP_DirIcon,
+            tr("RDP"): QStyle.SP_ComputerIcon,
+            tr("SSH"): QStyle.SP_CommandLink,
             "TELNET": QStyle.SP_CommandLink,
-            "SNMP": QStyle.SP_DriveNetIcon,
-            "SMB共享": QStyle.SP_DriveNetIcon,
-            "mDNS": QStyle.SP_DriveNetIcon,
+            tr("SNMP"): QStyle.SP_DriveNetIcon,
+            tr("SMB共享"): QStyle.SP_DriveNetIcon,
+            tr("mDNS"): QStyle.SP_DriveNetIcon,
         }
         sp = icon_map.get(proto_upper)
         if sp:
@@ -291,14 +292,14 @@ class TreeMixin:
     def _service_desc(self, proto: str, ip: str) -> str:
         proto_upper = proto.upper()
         port = PROTOCOL_PORTS.get(proto_upper, "")
-        if proto_upper == "HTTP":
+        if proto_upper == tr("HTTP"):
             return f"HTTP服务, 端口 {port} ({ip}:{port})" if port else f"HTTP服务 ({ip})"
-        elif proto_upper == "HTTPS":
+        elif proto_upper == tr("HTTPS"):
             return f"HTTPS服务, 端口 {port} ({ip}:{port})" if port else f"HTTPS服务 ({ip})"
-        elif proto_upper == "FTP":
-            return f"FTP服务, 端口 {port}" if port else "FTP服务"
-        elif proto_upper == "RDP":
-            return f"远程桌面服务, 端口 {port}" if port else "远程桌面服务"
+        elif proto_upper == tr("FTP"):
+            return f"FTP服务, 端口 {port}" if port else tr("FTP服务")
+        elif proto_upper == tr("RDP"):
+            return f"远程桌面服务, 端口 {port}" if port else tr("远程桌面服务")
         else:
             return f"{proto_upper}服务"
 
@@ -316,9 +317,9 @@ class TreeMixin:
         # 工具提示：标注发现方式（ARP 探测发现的静默主机）
         tip = result.ip
         if result.discovery_method == "arp":
-            tip += " （ARP 主动探测发现 · 禁 Ping 但在线）"
+            tip += tr(" （ARP 主动探测发现 · 禁 Ping 但在线）")
         elif result.discovery_method == "mdns":
-            tip += " （mDNS 发现 · 组播发现设备）"
+            tip += tr(" （mDNS 发现 · 组播发现设备）")
         if result.os_guess:
             tip += f" · OS: {result.os_guess}"
             if result.os_detail:
@@ -353,7 +354,7 @@ class TreeMixin:
 
         # 状态列 (col 1)：预渲染电脑图标 (在线绿 / 离线灰) + 文字
         item.setData(1, Qt.UserRole, result.status)
-        item.setData(1, Qt.DisplayRole, "在线" if result.status == "online" else "离线")
+        item.setData(1, Qt.DisplayRole, tr("在线") if result.status == "online" else tr("离线"))
         item.setTextAlignment(1, Qt.AlignCenter)
         online_icon, offline_icon = get_pc_icons()
         if result.status == "online":
@@ -402,7 +403,7 @@ class TreeMixin:
         # 完整端口列表由 tooltip 承载。
         ports_disp, ports_full = format_ports_display(result.open_ports)
         item.setText(8, ports_disp)
-        item.setToolTip(8, ports_full if ports_full != "—" else "无开放端口")
+        item.setToolTip(8, ports_full if ports_full != "—" else tr("无开放端口"))
         item.setFont(8, _FONT_CONSOLAS_9)
 
         svc = result.services or []
@@ -434,16 +435,16 @@ class TreeMixin:
         filter_type = self.filter_combo.currentText()
 
         show = True
-        if filter_type == "仅在线":
+        if filter_type == tr("仅在线"):
             status = item.data(1, Qt.UserRole)
             show = show and (status == "online")
-        elif filter_type == "仅离线":
+        elif filter_type == tr("仅离线"):
             status = item.data(1, Qt.UserRole)
             show = show and (status == "offline")
-        elif filter_type == "Excel已匹配":
+        elif filter_type == tr("Excel已匹配"):
             type_text = item.text(4)
             show = show and (type_text != "—")
-        elif filter_type == "有服务":
+        elif filter_type == tr("有服务"):
             services_text = item.text(9)
             show = show and (services_text != "—")
 
@@ -470,7 +471,7 @@ class TreeMixin:
             proto = item.data(0, Qt.UserRole + 1)
             ip = item.data(0, Qt.UserRole + 2)
             if proto and ip:
-                if proto == "SNMP":
+                if proto == tr("SNMP"):
                     descr = item.data(0, Qt.UserRole + 3) or ""
                     name = item.data(0, Qt.UserRole + 4) or ""
                     self._show_snmp_info(ip, name, descr)
@@ -499,7 +500,7 @@ class TreeMixin:
 
     def _clear_results(self):
         if self.all_results:
-            self._audit(audit_log.CAT_RESULT, "清空结果", f"清除 {len(self.all_results)} 条扫描结果")
+            self._audit(audit_log.CAT_RESULT, tr("清空结果"), f"清除 {len(self.all_results)} 条扫描结果")
         self.table.clear()
         self._ip_item_map.clear()
         self.all_results.clear()
@@ -509,7 +510,7 @@ class TreeMixin:
         self._update_stats()
         self.act_export.setEnabled(False)
         self.act_clear.setEnabled(False)
-        self.status_bar.showMessage("已清空结果")
+        self.status_bar.showMessage(tr("已清空结果"))
 
 
     def _show_context_menu(self, pos):
@@ -532,54 +533,54 @@ class TreeMixin:
 
         menu = QMenu(self)
 
-        act_copy_ip = QAction("复制 IP", self)
+        act_copy_ip = QAction(tr("复制 IP"), self)
         act_copy_ip.triggered.connect(lambda: self._copy_item_cell(top_item, 0))
         menu.addAction(act_copy_ip)
 
-        act_copy_mac = QAction("复制 MAC", self)
+        act_copy_mac = QAction(tr("复制 MAC"), self)
         act_copy_mac.triggered.connect(lambda: self._copy_item_cell(top_item, 3))
         menu.addAction(act_copy_mac)
 
-        act_copy_host = QAction("复制主机名", self)
+        act_copy_host = QAction(tr("复制主机名"), self)
         act_copy_host.triggered.connect(lambda: self._copy_item_cell(top_item, 2))
         menu.addAction(act_copy_host)
 
         menu.addSeparator()
 
-        act_copy_row = QAction("复制整行", self)
+        act_copy_row = QAction(tr("复制整行"), self)
         act_copy_row.triggered.connect(lambda: self._copy_item_row(top_item))
         menu.addAction(act_copy_row)
 
         menu.addSeparator()
 
-        act_rescan = QAction("重新扫描此 IP", self)
+        act_rescan = QAction(tr("重新扫描此 IP"), self)
         act_rescan.triggered.connect(lambda: self._rescan_single_item(top_item))
         menu.addAction(act_rescan)
 
         if mac:
-            act_wol = QAction("唤醒 (WoL)", self)
+            act_wol = QAction(tr("唤醒 (WoL)"), self)
             act_wol.triggered.connect(lambda: self._wake_on_lan(mac))
             menu.addAction(act_wol)
 
-        act_wmi_dev = QAction("WMI 识别 (管理员)...", self)
+        act_wmi_dev = QAction(tr("WMI 识别 (管理员)..."), self)
         act_wmi_dev.triggered.connect(lambda: self._run_wmi_identification([ip]))
         menu.addAction(act_wmi_dev)
 
-        act_netbios_dev = QAction("NetBIOS 识别（轻量）", self)
+        act_netbios_dev = QAction(tr("NetBIOS 识别（轻量）"), self)
         act_netbios_dev.triggered.connect(lambda: self._run_netbios_identification([ip]))
         menu.addAction(act_netbios_dev)
 
         # 工具子菜单：快速启动内置网络工具
-        tool_menu = menu.addMenu("工具")
+        tool_menu = menu.addMenu(tr("工具"))
         for label, tool in [
-            ("Ping (持续)", "ping"),
-            ("Tracert (路由追踪)", "tracert"),
-            ("Telnet", "telnet"),
-            ("SSH", "ssh"),
-            ("远程桌面 (RDP)", "rdp"),
-            ("打开命令提示符", "cmd"),
-            ("远程关机", "shutdown"),
-            ("远程重启", "reboot"),
+            (tr("Ping (持续)"), "ping"),
+            (tr("Tracert (路由追踪)"), "tracert"),
+            (tr("Telnet"), "telnet"),
+            (tr("SSH"), "ssh"),
+            (tr("远程桌面 (RDP)"), "rdp"),
+            (tr("打开命令提示符"), "cmd"),
+            (tr("远程关机"), "shutdown"),
+            (tr("远程重启"), "reboot"),
         ]:
             tool_menu.addAction(label).triggered.connect(
                 lambda _checked=False, t=tool: (
@@ -591,15 +592,15 @@ class TreeMixin:
         menu.addSeparator()
 
         if lib_dev:
-            act_edit_lib = QAction("编辑地址库条目", self)
+            act_edit_lib = QAction(tr("编辑地址库条目"), self)
             act_edit_lib.triggered.connect(lambda: self._edit_library_entry(lib_dev["id"]))
             menu.addAction(act_edit_lib)
 
-            act_del_lib = QAction("从地址库删除", self)
+            act_del_lib = QAction(tr("从地址库删除"), self)
             act_del_lib.triggered.connect(lambda: self._delete_library_entry(lib_dev["id"]))
             menu.addAction(act_del_lib)
         else:
-            act_add_lib = QAction("加入地址库...", self)
+            act_add_lib = QAction(tr("加入地址库..."), self)
             act_add_lib.triggered.connect(lambda: self._add_to_library(ip, mac))
             menu.addAction(act_add_lib)
 
@@ -621,7 +622,7 @@ class TreeMixin:
         for col in range(self.table.columnCount()):
             texts.append(item.text(col))
         QApplication.clipboard().setText("\t".join(texts))
-        self.status_bar.showMessage("已复制整行")
+        self.status_bar.showMessage(tr("已复制整行"))
 
 
     def _rescan_single_item(self, item):

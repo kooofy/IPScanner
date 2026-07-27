@@ -10,6 +10,7 @@ from typing import List, Tuple
 
 from .constants import COMMON_PORTS, _SYSTEM_SHARES, _raw_cap_cache, _syn_failed
 from .util import _inet_checksum, _local_ip_for_dst, _run_cmd
+from i18n import tr
 
 
 def scan_port(ip: str, port: int, timeout: float = 0.5) -> bool:
@@ -30,7 +31,7 @@ def scan_shares(ip: str, timeout: float = 1.5) -> List[str]:
     仅 Windows 可用；非 Windows 或探测失败返回空列表。
     过滤 ADMIN$/IPC$/PRINT$ 及 X$ 盘符类系统隐藏共享，仅保留用户共享。
     """
-    if platform.system() != "Windows":
+    if platform.system() != tr("Windows"):
         return []
     try:
         output = _run_cmd(["net", "view", f"\\\\{ip}"], timeout=timeout)
@@ -41,14 +42,14 @@ def scan_shares(ip: str, timeout: float = 1.5) -> List[str]:
                 continue
             # 跳过表头 / 分隔线 / 成功提示 / 错误提示
             if ("----" in s
-                    or s.startswith("共享名") or s.startswith("Share name")
-                    or s.startswith("命令成功") or "successfully" in s.lower()
-                    or "找不到" in s or "找不到" in s or "系统错误" in s
+                    or s.startswith(tr("共享名")) or s.startswith("Share name")
+                    or s.startswith(tr("命令成功")) or "successfully" in s.lower()
+                    or tr("找不到") in s or tr("找不到") in s or tr("系统错误") in s
                     or "System error" in s or "The command" in s):
                 continue
             # 共享行首列为共享名，次列为类型 (Disk/Print/IPC/磁盘/打印/设备)
             m = re.match(
-                r"^(\S+)\s+(Disk|Print|IPC|Device|磁盘|打印|设备)", s, re.IGNORECASE
+                tr(r"^(\S+)\s+(Disk|Print|IPC|Device|磁盘|打印|设备)"), s, re.IGNORECASE
             )
             if not m:
                 continue
@@ -124,7 +125,7 @@ def raw_capability() -> Tuple[bool, str]:
         s.close()
         _raw_cap_cache = (True, "")
     except OSError:
-        _raw_cap_cache = (False, "无权限创建原始套接字（需以管理员/root 运行）")
+        _raw_cap_cache = (False, tr("无权限创建原始套接字（需以管理员/root 运行）"))
     except Exception as e:
         _raw_cap_cache = (False, f"原始套接字不可用: {e}")
     return _raw_cap_cache

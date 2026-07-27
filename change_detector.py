@@ -12,6 +12,7 @@
 """
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
+from i18n import tr
 
 
 # ── 变更类型 ──
@@ -42,19 +43,19 @@ class Change:
     @property
     def type_label(self) -> str:
         return {
-            CHANGE_NEW_DEVICE: "新增设备",
-            CHANGE_DEVICE_GONE: "设备消失",
-            CHANGE_MAC_CHANGED: "MAC 变更",
-            CHANGE_IP_CHANGED: "IP 变更",
-            CHANGE_HOSTNAME_CHANGED: "主机名变更",
+            CHANGE_NEW_DEVICE: tr("新增设备"),
+            CHANGE_DEVICE_GONE: tr("设备消失"),
+            CHANGE_MAC_CHANGED: tr("MAC 变更"),
+            CHANGE_IP_CHANGED: tr("IP 变更"),
+            CHANGE_HOSTNAME_CHANGED: tr("主机名变更"),
         }.get(self.change_type, self.change_type)
 
     @property
     def severity_label(self) -> str:
         return {
-            SEVERITY_HIGH: "严重",
-            SEVERITY_WARNING: "警告",
-            SEVERITY_INFO: "提示",
+            SEVERITY_HIGH: tr("严重"),
+            SEVERITY_WARNING: tr("警告"),
+            SEVERITY_INFO: tr("提示"),
         }.get(self.severity, self.severity)
 
 
@@ -202,7 +203,7 @@ def detect_changes(current_results, previous_devices: List[dict]) -> List[Change
 def get_change_summary(changes: List[Change]) -> str:
     """生成变更摘要文本（用于状态栏/审计日志）。"""
     if not changes:
-        return "无变更"
+        return tr("无变更")
     high = sum(1 for c in changes if c.severity == SEVERITY_HIGH)
     warn = sum(1 for c in changes if c.severity == SEVERITY_WARNING)
     info = sum(1 for c in changes if c.severity == SEVERITY_INFO)

@@ -17,6 +17,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QIcon, QPixmap
 
 from main_window import MainWindow, STYLE_SHEET
+from i18n import tr
 
 
 # ── 全局异常捕获 ──────────────────────────────────────────────
@@ -30,7 +31,7 @@ def _global_except_hook(exc_type, exc_value, exc_tb):
             _f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 未捕获异常(excepthook):\n{_err}\n{'=' * 60}\n")
     except Exception:
         pass
-    sys.stderr.write(">>> [未捕获异常]\n" + _err)
+    sys.stderr.write(tr(">>> [未捕获异常]\n") + _err)
 
 sys.excepthook = _global_except_hook
 
@@ -45,7 +46,7 @@ def _thread_except_hook(args):
             _f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 线程未捕获异常:\n{_err}\n{'=' * 60}\n")
     except Exception:
         pass
-    sys.stderr.write(">>> [线程未捕获异常]\n" + _err)
+    sys.stderr.write(tr(">>> [线程未捕获异常]\n") + _err)
     if _thread_hook_prev:
         _thread_hook_prev(args)
 
@@ -78,8 +79,8 @@ class SafeApp(QApplication):
                 SafeApp._last_popup = _now
                 try:
                     QMessageBox.critical(
-                        None, "运行时错误（已捕获，未崩溃）",
-                        "程序捕获到一个错误，已写入 crash.log：\n\n" + err[-1500:]
+                        None, tr("运行时错误（已捕获，未崩溃）"),
+                        tr("程序捕获到一个错误，已写入 crash.log：\n\n") + err[-1500:]
                     )
                 except Exception:
                     pass
@@ -89,6 +90,13 @@ class SafeApp(QApplication):
 # ── 入口 ──────────────────────────────────────────────────────
 
 def main():
+    import i18n
+    # 优先读取用户保存的语言偏好，否则自动检测系统语言
+    from PyQt5.QtCore import QSettings
+    _settings = QSettings("ipscanner.ini", QSettings.IniFormat)
+    _saved_lang = _settings.value("ui/language", "")
+    i18n.init(_saved_lang if _saved_lang else None)
+
     # 高 DPI 必须在 QApplication 实例创建之前设置，否则 Qt 会打印警告
     # 并在某些 Windows 环境导致事件循环里 access violation 闪退。
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

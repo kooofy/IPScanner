@@ -10,6 +10,7 @@ from typing import Dict
 
 from .constants import _MDNS_GROUP, _MDNS_PORT, _resolve_executor, _resolve_executor_lock
 from .util import _run_cmd
+from i18n import tr
 
 
 def _get_resolve_executor():
@@ -38,7 +39,7 @@ def resolve_hostname(ip: str, timeout: float = 1.0) -> str:
 
 def get_netbios_name(ip: str, timeout: float = 2.0) -> str:
     """通过 nbtstat 获取 NetBIOS 名称 (Windows)"""
-    if platform.system() != "Windows":
+    if platform.system() != tr("Windows"):
         return ""
     try:
         output = _run_cmd(["nbtstat", "-A", ip], timeout=timeout)
@@ -46,7 +47,7 @@ def get_netbios_name(ip: str, timeout: float = 2.0) -> str:
             stripped = line.strip()
             if "<00>" not in stripped:
                 continue
-            if re.search(r"GROUP|组", stripped, re.IGNORECASE):
+            if re.search(tr(r"GROUP|组"), stripped, re.IGNORECASE):
                 continue
             m = re.match(r"^(\S+)\s+<00>", stripped)
             if m:

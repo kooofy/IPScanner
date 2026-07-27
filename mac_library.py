@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from app_paths import data_dir
+from i18n import tr
 
 from excel_handler import (
     normalize_mac,
@@ -217,7 +218,7 @@ class MacLibrary:
         except Exception as e:
             return False, f"无法打开文件: {e}"
         if not rows:
-            return False, "文件为空"
+            return False, tr("文件为空")
 
         # 表头行定位 (兼容首行是大标题的情况)
         header_row_idx = 0
@@ -230,7 +231,7 @@ class MacLibrary:
         raw_headers = [str(h).strip() if h is not None else "" for h in rows[header_row_idx]]
         mapping = detect_columns(raw_headers)
         if "ip" not in mapping and "mac" not in mapping:
-            return False, "未找到 IP/MAC 列，无法自动匹配设备（请在清单中补充 MAC 或 IP 列后重试）"
+            return False, tr("未找到 IP/MAC 列，无法自动匹配设备（请在清单中补充 MAC 或 IP 列后重试）")
 
         ip_cols = mapping.get("ip", [])
         mac_cols = mapping.get("mac", [])
@@ -294,7 +295,7 @@ class MacLibrary:
                 added += 1
 
         if added == 0 and updated == 0 and skipped == 0:
-            return False, "MAC/IP 数据为空，该文件无法在扫描时自动匹配设备（请检查 MAC 列是否已填写）"
+            return False, tr("MAC/IP 数据为空，该文件无法在扫描时自动匹配设备（请检查 MAC 列是否已填写）")
 
         msg = (f"已从 {os.path.basename(file_path)} 合并：新增 {added} 条，"
                f"更新已有 {updated} 条，无变化跳过 {skipped} 条")
@@ -309,9 +310,9 @@ class MacLibrary:
 
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "MAC地址库"
-            headers = ["ID", "IP地址", "MAC地址", "设备类型", "位置", "使用者", "备注", "来源文件"]
-            hf = Font(name="微软雅黑", size=11, bold=True, color="FFFFFF")
+            ws.title = tr("MAC地址库")
+            headers = ["ID", tr("IP地址"), tr("MAC地址"), tr("设备类型"), tr("位置"), tr("使用者"), tr("备注"), tr("来源文件")]
+            hf = Font(name=tr("微软雅黑"), size=11, bold=True, color="FFFFFF")
             hf_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
             for ci, h in enumerate(headers, 1):
                 c = ws.cell(row=1, column=ci, value=h)

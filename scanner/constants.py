@@ -4,13 +4,14 @@ import locale
 import platform
 import re
 import threading
+from i18n import tr
 
 """
 扫描引擎常量：端口映射、扫描级别、OUI 分类提示等。
 """
 
 
-_IS_WINDOWS = platform.system() == "Windows"
+_IS_WINDOWS = platform.system() == tr("Windows")
 
 
 _CMD_ENCODING = None
@@ -39,9 +40,9 @@ COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445,
 #   all     : 1-65535 全端口（安全评估，最慢）
 SCAN_LEVELS = ("quick", "standard", "all")
 SCAN_LEVEL_LABELS = {
-    "quick": "快速 (21)",
-    "standard": "标准 (1023)",
-    "all": "全端口 (65535)",
+    "quick": tr("快速 (21)"),
+    "standard": tr("标准 (1023)"),
+    "all": tr("全端口 (65535)"),
 }
 
 
@@ -84,21 +85,21 @@ UDP_PORTS = [53, 67, 69, 123, 137, 138, 161, 500, 514, 1900, 5353]
 
 
 PORT_NAMES = {
-    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
-    67: "DHCP", 69: "TFTP", 80: "HTTP", 110: "POP3", 123: "NTP",
+    21: tr("FTP"), 22: tr("SSH"), 23: tr("Telnet"), 25: "SMTP", 53: "DNS",
+    67: "DHCP", 69: "TFTP", 80: tr("HTTP"), 110: "POP3", 123: "NTP",
     135: "RPC", 137: "NetBIOS-NS", 138: "NetBIOS-DGM", 139: "NetBIOS",
-    143: "IMAP", 161: "SNMP", 443: "HTTPS", 445: "SMB", 500: "IKE",
+    143: "IMAP", 161: tr("SNMP"), 443: tr("HTTPS"), 445: "SMB", 500: "IKE",
     514: "Syslog", 993: "IMAPS", 995: "POP3S", 1433: "MSSQL", 1521: "Oracle",
-    1900: "SSDP", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
-    5353: "mDNS", 5900: "VNC", 8080: "HTTP-Alt", 8443: "HTTPS-Alt",
+    1900: "SSDP", 3306: "MySQL", 3389: tr("RDP"), 5432: "PostgreSQL",
+    5353: tr("mDNS"), 5900: "VNC", 8080: "HTTP-Alt", 8443: "HTTPS-Alt",
 }
 
 
 PROTOCOL_PORTS = {
-    "HTTP": 80,
-    "HTTPS": 443,
-    "FTP": 21,
-    "RDP": 3389,
+    tr("HTTP"): 80,
+    tr("HTTPS"): 443,
+    tr("FTP"): 21,
+    tr("RDP"): 3389,
 }
 
 
@@ -132,7 +133,7 @@ _PRINTER_BRANDS = [
     ("samsung", "Samsung"), ("sharp", "Sharp"), ("toshiba", "Toshiba"),
     ("fuji", "Fuji Xerox"), ("xerox", "Fuji Xerox"), ("panasonic", "Panasonic"),
     ("oki", "OKI"), ("lenovo", "Lenovo"), ("pantum", "Pantum"),
-    ("震旦", "Aurora"), ("奔图", "Pantum"), ("联想", "Lenovo"),
+    (tr("震旦"), "Aurora"), (tr("奔图"), "Pantum"), (tr("联想"), "Lenovo"),
 ]
 
 
@@ -160,68 +161,68 @@ _MDNS_PORT = 5353
 
 
 _OUI_CLASS_HINTS = [
-    ("hikvision", "摄像头"),
-    ("dahua", "摄像头"),
-    ("axis", "摄像头"),
-    ("tiandy", "摄像头"),
-    ("uniview", "摄像头"),
-    ("foscam", "摄像头"),
-    ("reolink", "摄像头"),
-    ("ezviz", "摄像头"),
-    ("hi351", "摄像头"),               # 海思芯片，多见于摄像头
-    ("synology", "NAS"),
-    ("qnap", "NAS"),
-    ("terramaster", "NAS"),
-    ("western digital", "NAS/存储"),
-    ("seagate", "NAS/存储"),
-    ("cisco", "网络设备"),
-    ("aruba", "AP/交换机"),
-    ("juniper", "网络设备"),
-    ("fortinet", "防火墙"),
-    ("mikrotik", "路由器/防火墙"),
-    ("ubiquiti", "AP/路由器"),
-    ("ruijie", "路由器/交换机"),
-    ("h3c", "路由器/交换机"),
-    ("tp-link", "路由器"),
-    ("tplink", "路由器"),
-    ("netgear", "路由器"),
-    ("d-link", "路由器"),
-    ("dlink", "路由器"),
-    ("asus", "路由器"),
-    ("mercury", "路由器"),
-    ("tenda", "路由器"),
-    ("huawei", "路由器/手机"),
-    ("xiaomi", "IoT/路由器"),
-    ("apple", "手机/电脑/IoT"),
-    ("samsung", "电视/手机/打印机"),
-    ("lg", "电视"),
-    ("sony", "电视/游戏机"),
-    ("philips", "灯具/IoT"),
-    ("sengled", "灯具/IoT"),
-    ("yeelight", "灯具/IoT"),
-    ("tuya", "IoT"),
-    ("espressif", "IoT开发板"),
-    ("raspberry", "开发板/IoT"),
-    ("sonos", "音箱"),
-    ("bose", "音箱"),
-    ("google", "手机/音箱/Nest"),
-    ("nest", "IoT/摄像头"),
-    ("amazon", "音箱/路由器"),
-    ("nintendo", "游戏机"),
-    ("microsoft", "电脑/游戏机"),
-    ("nvidia", "电脑/游戏机"),
-    ("hp ", "打印机/电脑"),
-    ("hewlett", "打印机/电脑"),
-    ("canon", "打印机"),
-    ("brother", "打印机"),
-    ("epson", "打印机"),
-    ("xerox", "打印机"),
-    ("lexmark", "打印机"),
-    ("intel", "电脑/网卡"),
-    ("dell", "电脑"),
-    ("lenovo", "电脑"),
-    ("hon hai", "电脑/手机"),
-    ("azurewave", "电脑/网卡"),
+    ("hikvision", tr("摄像头")),
+    ("dahua", tr("摄像头")),
+    ("axis", tr("摄像头")),
+    ("tiandy", tr("摄像头")),
+    ("uniview", tr("摄像头")),
+    ("foscam", tr("摄像头")),
+    ("reolink", tr("摄像头")),
+    ("ezviz", tr("摄像头")),
+    ("hi351", tr("摄像头")),               # 海思芯片，多见于摄像头
+    ("synology", tr("NAS")),
+    ("qnap", tr("NAS")),
+    ("terramaster", tr("NAS")),
+    ("western digital", tr("NAS/存储")),
+    ("seagate", tr("NAS/存储")),
+    ("cisco", tr("网络设备")),
+    ("aruba", tr("AP/交换机")),
+    ("juniper", tr("网络设备")),
+    ("fortinet", tr("防火墙")),
+    ("mikrotik", tr("路由器/防火墙")),
+    ("ubiquiti", tr("AP/路由器")),
+    ("ruijie", tr("路由器/交换机")),
+    ("h3c", tr("路由器/交换机")),
+    ("tp-link", tr("路由器")),
+    ("tplink", tr("路由器")),
+    ("netgear", tr("路由器")),
+    ("d-link", tr("路由器")),
+    ("dlink", tr("路由器")),
+    ("asus", tr("路由器")),
+    ("mercury", tr("路由器")),
+    ("tenda", tr("路由器")),
+    ("huawei", tr("路由器/手机")),
+    ("xiaomi", tr("IoT/路由器")),
+    ("apple", tr("手机/电脑/IoT")),
+    ("samsung", tr("电视/手机/打印机")),
+    ("lg", tr("电视")),
+    ("sony", tr("电视/游戏机")),
+    ("philips", tr("灯具/IoT")),
+    ("sengled", tr("灯具/IoT")),
+    ("yeelight", tr("灯具/IoT")),
+    ("tuya", tr("IoT")),
+    ("espressif", tr("IoT开发板")),
+    ("raspberry", tr("开发板/IoT")),
+    ("sonos", tr("音箱")),
+    ("bose", tr("音箱")),
+    ("google", tr("手机/音箱/Nest")),
+    ("nest", tr("IoT/摄像头")),
+    ("amazon", tr("音箱/路由器")),
+    ("nintendo", tr("游戏机")),
+    ("microsoft", tr("电脑/游戏机")),
+    ("nvidia", tr("电脑/游戏机")),
+    ("hp ", tr("打印机/电脑")),
+    ("hewlett", tr("打印机/电脑")),
+    ("canon", tr("打印机")),
+    ("brother", tr("打印机")),
+    ("epson", tr("打印机")),
+    ("xerox", tr("打印机")),
+    ("lexmark", tr("打印机")),
+    ("intel", tr("电脑/网卡")),
+    ("dell", tr("电脑")),
+    ("lenovo", tr("电脑")),
+    ("hon hai", tr("电脑/手机")),
+    ("azurewave", tr("电脑/网卡")),
 ]
 
 # 手机厂商 OUI 关键词：仅凭 MAC(OUI) 只能拿到厂商，无法区分手机/电脑/IoT，
@@ -234,24 +235,24 @@ _PHONE_OUI_KEYWORDS = (
 
 # 手机厂商 OUI 关键词 -> 友好中文/品牌名（用于「设备类型」列型号展示）
 _PHONE_BRAND_DISPLAY = {
-    "apple": "Apple", "samsung": "三星", "xiaomi": "小米", "huawei": "华为",
-    "oppo": "OPPO", "vivo": "vivo", "google": "Google", "oneplus": "一加",
-    "realme": "realme", "meizu": "魅族", "honor": "荣耀", "motorola": "Motorola",
+    "apple": "Apple", "samsung": tr("三星"), "xiaomi": tr("小米"), "huawei": tr("华为"),
+    "oppo": "OPPO", "vivo": "vivo", "google": "Google", "oneplus": tr("一加"),
+    "realme": "realme", "meizu": tr("魅族"), "honor": tr("荣耀"), "motorola": "Motorola",
     "nokia": "Nokia", "lg": "LG", "sony": "Sony", "tcl": "TCL", "lenovo": "Lenovo",
 }
 
 # IoT / 智能家居 / 家电厂商关键字：用于 step5 OS 兜底时排除「手机/IoT」误报，
 # 直接归为「智能家居/IoT」。这些厂商的设备多为无屏 IoT，不应冒认成手机。
 _IOT_VENDOR_KEYWORDS = (
-    "roborock", "石头", "xiaomi", "mijia", "米家", "tuya", "涂鸦",
+    "roborock", tr("石头"), "xiaomi", "mijia", tr("米家"), "tuya", tr("涂鸦"),
     "espressif", "philips", "sengled", "yeelight", "sonos", "bose",
-    "nest", "amazon", "ring", "ecovacs", "科沃斯", "dreame", "追觅",
+    "nest", "amazon", "ring", "ecovacs", tr("科沃斯"), "dreame", tr("追觅"),
     "tp-link", "tplink", "mercury", "tenda", "netgear", "d-link", "dlink",
     "asus", "ruijie", "h3c", "ubiquiti", "huawei", "rui", "mercury",
-    "broadlink", "orvibo", "欧瑞博", "govee", "aqara", "绿米", "switchbot",
-    "海康", "hikvision", "dahua", "大华", "yi", "小蚁", "imou", "乐橙",
+    "broadlink", "orvibo", tr("欧瑞博"), "govee", "aqara", tr("绿米"), "switchbot",
+    tr("海康"), "hikvision", "dahua", tr("大华"), "yi", tr("小蚁"), "imou", tr("乐橙"),
     "eufy", "anko", "tplink", "klein", "wemo", "belkin", "lutron",
-    "shelly", "sonoff", "gree", "格力", "midea", "美的", "haier", "海尔",
-    "changhong", "长虹", "hisense", "海信", "skyworth", "创维",
+    "shelly", "sonoff", "gree", tr("格力"), "midea", tr("美的"), "haier", tr("海尔"),
+    "changhong", tr("长虹"), "hisense", tr("海信"), "skyworth", tr("创维"),
 )
 
