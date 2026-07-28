@@ -502,5 +502,18 @@
   "<li>Excel 设备信息导入与自动匹配</li><li>结果导出为 Excel / CSV / HTML / JSON</li>": "<li>Excel device info import & auto-matching</li><li>Export results to Excel / CSV / HTML / JSON</li>",
   "<li>mDNS 设备发现（组播发现打印机 / NAS / Apple 设备 / IoT 等）</li><li>操作系统探测（TTL 推测 + 服务 banner 提取版本）</li>": "<li>mDNS device discovery (multicast: printers, NAS, Apple devices, IoT)</li><li>OS detection (TTL inference + service banner version extraction)</li>",
   "<li>设备指纹深度（端口/服务/mDNS/UPnP/SNMP 综合推断设备类型与型号）</li><li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>": "<li>Deep device fingerprint (ports/services/mDNS/UPnP/SNMP fusion)</li><li>Built-in tools: Ping / Tracert / Telnet / SSH / RDP / Cmd / Remote Shutdown / Reboot</li>",
-  "<p style=\"color: #94A3B8;\">基于 PyQt5 开发</p>": "<p style=\"color: #94A3B8;\">Built with PyQt5</p>"
+  "<p style=\"color: #94A3B8;\">基于 PyQt5 开发</p>": "<p style=\"color: #94A3B8;\">Built with PyQt5</p>",
+  "检查 OUI 更新...": "Check OUI Update...",
+  "从 IEEE 官网下载最新 MAC 厂商数据库": "Download latest MAC vendor DB from IEEE",
+  "检查 OUI 更新": "OUI Update",
+  "将从 IEEE 官网下载最新的 MAC 厂商数据库（约 2MB），\n并重建本地 OUI 数据库。是否继续？": "Download the latest MAC vendor database (~2MB) from IEEE\nand rebuild the local OUI database. Continue?",
+  "正在更新 OUI 数据库...": "Updating OUI Database...",
+  "OUI 更新": "OUI Update",
+  "OUI 更新失败": "OUI Update Failed",
+  "OUI 数据库更新成功！\n\n": "OUI database updated successfully!\n\n",
+  "更新 OUI 数据库时出错：\n": "Error updating OUI database:\n",
+  "未知错误": "Unknown Error",
+  "正在发现网络拓扑 (LLDP/CDP)...": "Discovering network topology (LLDP/CDP)...",
+  "拓扑发现": "Topology Discovery",
+  "跳过": "Skip"
 }

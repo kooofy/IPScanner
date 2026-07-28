@@ -517,17 +517,22 @@ class HistoryQueryDialog(QDialog):
 
 
 class TopologyDialog(QDialog):
-    """以中心网关 + 辐射主机的星型拓扑展示当前扫描结果。"""
+    """网络拓扑视图：LLDP/CDP 真实链路 + 终端设备。
 
-    def __init__(self, results, gateway_ip, dark, parent=None):
+    若提供了 topology（含 LLDP/CDP 链路），展示真实拓扑；
+    否则回退到网关为中心的星型拓扑。
+    """
+
+    def __init__(self, results, gateway_ip, dark, parent=None, topology=None):
         super().__init__(parent)
         self.setWindowTitle(tr("网络拓扑视图"))
-        self.setMinimumSize(820, 600)
+        self.setMinimumSize(900, 680)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         self.results = list(results)
         self.gateway_ip = gateway_ip
         self.dark = dark
+        self.topology = topology  # Topology 对象，None = 回退星型
 
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -535,7 +540,8 @@ class TopologyDialog(QDialog):
         self.view = QGraphicsView()
         self.view.setRenderHint(QPainter.Antialiasing, True)
         self.scene = QGraphicsScene()
-        self.scene.setBackgroundBrush(QBrush(QColor(30, 30, 30) if dark else QColor(248, 248, 248)))
+        bg = QColor(30, 30, 30) if dark else QColor(248, 248, 248)
+        self.scene.setBackgroundBrush(QBrush(bg))
         self.view.setScene(self.scene)
         layout.addWidget(self.view, 1)
 
@@ -544,25 +550,151 @@ class TopologyDialog(QDialog):
         layout.addWidget(self.legend)
 
         self.setLayout(layout)
-        self._build_topology()
+
+        if self.topology and self.topology.links:
+            self._build_real_topology()
+        else:
+            self._build_star_topology()
 
     def _update_legend(self):
-        self.legend.setText(
-            tr("<span style='color:#E69500;'>●</span> 网关   "
-               "<span style='color:#22A34A;'>●</span> 在线   ")
-            + tr("<span style='color:#B4B4B4;'>●</span> 离线")
-        )
+        items = [
+            tr("<span style='color:#E69500;'>●</span> 网关"),
+            tr("<span style='color:#22A34A;'>●</span> 在线"),
+            tr("<span style='color:#B4B4B4;'>●</span> 离线"),
+        ]
+        if self.topology and self.topology.links:
+            items += [
+                tr("<span style='color:#4DA6FF;'>━</span> LLDP"),
+                tr("<span style='color:#22C55E;'>━</span> CDP"),
+            ]
+        self.legend.setText("   ".join(items))
         self.legend.setStyleSheet("font-size: 12px; padding: 4px;")
 
     def _text_color(self):
         return QColor(224, 224, 224) if self.dark else QColor(40, 40, 40)
 
-    def _build_topology(self):
+    # ── 真实拓扑 (LLDP/CDP) ──
+
+    def _build_real_topology(self):
+        topo = self.topology
+        node_pos = {}          # node_id -> (x, y)
+        switch_nodes = [n for n in topo.nodes if n.is_switch]
+        host_nodes = [n for n in topo.nodes if not n.is_switch]
+
+        # 布局：交换机水平排列，主机围绕其连接的交换机
+        n_sw = len(switch_nodes)
+        sw_spacing = 250
+        sw_y = -100
+
+        for i, sw in enumerate(switch_nodes):
+            x = (i - (n_sw - 1) / 2) * sw_spacing
+            node_pos[sw.id] = (x, sw_y)
+
+        # 主机按连接交换机分组
+        host_by_switch = {}  # switch_id -> [node, ...]
+        unassigned = list(host_nodes)
+        for link in topo.links:
+            if link.source_id in node_pos and link.target_id not in node_pos:
+                host_by_switch.setdefault(link.source_id, []).append(link.target_id)
+
+        # 放置主机
+        for sw_id, connected in host_by_switch.items():
+            sx, sy = node_pos.get(sw_id, (0, sw_y))
+            n = len(connected)
+            for i, hid in enumerate(connected):
+                host = next((n for n in topo.nodes if n.id == hid), None)
+                if host and hid in unassigned:
+                    unassigned.remove(hid)
+                ang = math.pi * (i / max(n, 1) - 0.5) + math.pi / 2
+                r = 120 + (n * 4)
+                x = sx + r * math.cos(ang)
+                y = sy + r * math.sin(ang)
+                node_pos[hid] = (x, y)
+
+        # 剩余未分配主机：圈在中心
+        cx, cy = 0, 200
+        for i, hid in enumerate(unassigned):
+            ang = 2 * math.pi * i / max(len(unassigned), 1)
+            r = 300
+            node_pos[hid] = (cx + r * math.cos(ang), cy + r * math.sin(ang))
+
+        # 绘制链路
+        for link in topo.links:
+            if link.source_id in node_pos and link.target_id in node_pos:
+                x1, y1 = node_pos[link.source_id]
+                x2, y2 = node_pos[link.target_id]
+                if link.protocol == "LLDP":
+                    pen = QPen(QColor(77, 166, 255), 2)
+                elif link.protocol == "CDP":
+                    pen = QPen(QColor(34, 197, 94), 2)
+                else:
+                    pen = QPen(self._muted(), 1)
+                self.scene.addLine(x1, y1, x2, y2, pen)
+                # 端口标签
+                mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+                if link.source_port:
+                    lbl = QGraphicsTextItem(link.source_port)
+                    lbl.setDefaultTextColor(self._muted())
+                    lbl.setScale(0.6)
+                    lbl.setPos(mid_x - 20, mid_y - 12)
+                    self.scene.addItem(lbl)
+
+        # 绘制节点
+        for node in topo.nodes:
+            if node.id in node_pos:
+                x, y = node_pos[node.id]
+                if node.is_switch:
+                    self._add_switch_node(x, y, node)
+                else:
+                    self._add_device_node(x, y, node)
+
+        self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-60, -60, 60, 60))
+
+    def _add_switch_node(self, x, y, node):
+        """绘制交换机节点（方形）。"""
+        w, h = 50, 30
+        color = QColor(14, 99, 156)
+        rect = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
+        rect.setBrush(QBrush(color))
+        rect.setPen(QPen(QColor(255, 255, 255, 80), 1.5))
+        self.scene.addItem(rect)
+        parts = [node.label]
+        if node.model:
+            parts.append(node.model[:20])
+        txt = QGraphicsTextItem("\n".join(parts))
+        txt.setDefaultTextColor(self._link_blue())
+        txt.setPos(x - 45, y + h / 2 + 4)
+        txt.setScale(0.75)
+        self.scene.addItem(txt)
+
+    def _add_device_node(self, x, y, node):
+        """绘制终端设备节点（圆形）。"""
+        # 从 results 取在线状态
+        online = True
+        for r in self.results:
+            if r.ip == node.ip or r.ip == node.id:
+                online = r.status == "online"
+                break
+        color = QColor(34, 163, 74) if online else QColor(180, 180, 180)
+        dot = QGraphicsEllipseItem(x - 10, y - 10, 20, 20)
+        dot.setBrush(QBrush(color))
+        dot.setPen(QPen(QColor(0, 0, 0, 60), 1))
+        self.scene.addItem(dot)
+        label = node.label
+        txt = QGraphicsTextItem(label)
+        txt.setDefaultTextColor(self._text_color())
+        txt.setScale(0.7)
+        txt.setPos(x - 35, y + 12)
+        self.scene.addItem(txt)
+
+    # ── 回退星型拓扑 ──
+
+    def _build_star_topology(self):
         cx, cy = 0, 0
         hosts = self.results
         n = len(hosts)
         R = max(200, 50 + n * 7)
-        edge_pen = QPen(QColor(150, 156, 166) if self.dark else QColor(170, 170, 170), 1)
+        edge_pen = QPen(self._muted(), 1)
 
         for i, r in enumerate(hosts):
             ang = 2 * math.pi * i / n if n else 0
@@ -590,7 +722,6 @@ class TopologyDialog(QDialog):
         self.scene.addItem(txt)
 
     def _add_gateway_node(self, x, y):
-        # 若网关 IP 命中扫描结果，展示其主机名 / MAC
         sub = self.gateway_ip or tr("未知")
         for r in self.results:
             if r.ip == self.gateway_ip:
@@ -606,6 +737,12 @@ class TopologyDialog(QDialog):
         txt.setDefaultTextColor(self._text_color())
         txt.setPos(x - 45, y + 28)
         self.scene.addItem(txt)
+
+    def _muted(self):
+        return QColor(150, 156, 166) if self.dark else QColor(170, 170, 170)
+
+    def _link_blue(self):
+        return QColor(77, 166, 255) if self.dark else QColor(14, 99, 156)
 
 
 class WmiCredentialDialog(QDialog):

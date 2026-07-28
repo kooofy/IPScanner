@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QComboBox, QGroupBox, QMenu, QAction, QAbstractItemView, QSplitter,
     QStyle, QTextEdit, QFrame, QToolButton, QSizePolicy,
     QDialog, QFormLayout, QDialogButtonBox, QActionGroup, QInputDialog,
+    QProgressDialog,
     QTableWidget, QTableWidgetItem,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem,
     QGraphicsLineItem, QGraphicsTextItem
@@ -58,6 +59,7 @@ from styles import (STYLE_SHEET, DARK_STYLE_SHEET, _gray_icon, _make_tool_icon,
                      _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9)
 from main_window_tree import ResultTreeItem, TreeMixin
 from i18n import tr
+from change_detector import detect_changes, get_change_summary
 
 class MainWindow(TreeMixin, QMainWindow):
     def __init__(self):
@@ -678,6 +680,14 @@ class MainWindow(TreeMixin, QMainWindow):
 
         # 帮助菜单
         help_menu = menubar.addMenu(tr("帮助(&H)"))
+
+        act_oui_update = QAction(tr("检查 OUI 更新..."), self)
+        act_oui_update.setToolTip(tr("从 IEEE 官网下载最新 MAC 厂商数据库"))
+        act_oui_update.triggered.connect(self._update_oui_db)
+        help_menu.addAction(act_oui_update)
+
+        help_menu.addSeparator()
+
         act_about = QAction(tr("关于"), self)
         act_about.setShortcut(QKeySequence("F1"))
         act_about.triggered.connect(self._show_about)
@@ -943,7 +953,15 @@ class MainWindow(TreeMixin, QMainWindow):
             return None
 
     def _get_local_subnet(self):
-        """根据 ipconfig 获取本机真实子网（含前缀长度），失败回退到 /24。"""
+        """获取本机真实子网（含前缀长度），失败回退到 /24。"""
+        import platform as _plat
+        if _plat.system() == "Windows":
+            return self._get_local_subnet_windows()
+        else:
+            return self._get_local_subnet_unix()
+
+    def _get_local_subnet_windows(self):
+        """Windows: 解析 ipconfig 输出。"""
         try:
             out = subprocess.check_output(
                 ["ipconfig"], encoding="gbk", errors="ignore",
@@ -951,24 +969,67 @@ class MainWindow(TreeMixin, QMainWindow):
             )
         except Exception:
             out = ""
-        ips = re.findall(tr(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)"), out)
-        masks = re.findall(tr(r"子网掩码[\.:\s]+([\d.]+)"), out)
+        ips = re.findall(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)", out)
+        masks = re.findall(r"子网掩码[\.:\s]+([\d.]+)", out)
         default_ip = self._get_default_local_ip()
         if ips and masks and len(ips) == len(masks):
-            # 1) 优先：默认出口 IP 在 ipconfig 中的 (ip, mask) 配对 -> 真实前缀长度
             if default_ip:
                 for ip, mask in zip(ips, masks):
                     if ip == default_ip:
                         net, prefix = self._ip_mask_to_subnet(ip, mask)
                         if net:
                             return f"{net}/{prefix}"
-            # 2) 回退：跳过回环/虚拟网卡，取第一张「真实」网卡
             for ip, mask in zip(ips, masks):
                 if ip.startswith("127.") or self._is_virtual_adapter_ip(ip):
                     continue
                 net, prefix = self._ip_mask_to_subnet(ip, mask)
                 if net:
                     return f"{net}/{prefix}"
+        if default_ip:
+            parts = default_ip.split(".")
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        return None
+
+    def _get_local_subnet_unix(self):
+        """Linux/macOS: 解析 ip addr / ip route 输出。"""
+        try:
+            out = subprocess.check_output(["ip", "route", "show", "default"], timeout=5).decode()
+        except Exception:
+            try:
+                out = subprocess.check_output(["ip", "addr", "show"], timeout=5).decode()
+            except Exception:
+                out = ""
+
+        # 优先取默认路由的源 IP 和接口
+        m = re.search(r"src\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if m:
+            default_ip = m.group(1)
+            # 从 ip addr 中找对应接口的前缀长度
+            try:
+                addr_out = subprocess.check_output(["ip", "addr", "show"], timeout=5).decode()
+                # 找包含此 IP 的行: "inet 192.168.1.1/24"
+                for line in addr_out.splitlines():
+                    if default_ip in line:
+                        pm = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+                        if pm:
+                            return f"{pm.group(1)}/{pm.group(2)}"
+            except Exception:
+                pass
+            parts = default_ip.split(".")
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+
+        # 回退：从 ip addr 取第一个非回环接口
+        try:
+            addr_out = subprocess.check_output(["ip", "addr", "show"], timeout=5).decode()
+        except Exception:
+            addr_out = out
+        for line in addr_out.splitlines():
+            pm = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+            if pm and not pm.group(1).startswith("127."):
+                return f"{pm.group(1)}/{pm.group(2)}"
+
+        # 最后回退
+        default_ip = self._get_default_local_ip()
         if default_ip:
             parts = default_ip.split(".")
             return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
@@ -1681,10 +1742,11 @@ class MainWindow(TreeMixin, QMainWindow):
 
     def _launch_network_tool(self, tool: str, target: str = None):
         """
-        启动内置网络工具。target 缺省时取当前选中设备 IP，否则弹窗询问。
-        交互式工具 (ping/tracert/telnet/ssh) 在新控制台窗口中运行；
-        RDP 直接调起 mstsc；cmd 打开以目标命名的命令提示符。
+        启动内置网络工具。跨平台：Windows/Linux/macOS 自动适配命令。
         """
+        import platform as _plat
+        _win = _plat.system() == "Windows"
+
         if not target:
             target = self._selected_target()
         if not target:
@@ -1695,11 +1757,10 @@ class MainWindow(TreeMixin, QMainWindow):
                 return
             target = text.strip()
 
-        # 构造命令
         if tool == "ping":
-            cmd = f"ping -t {target}"
+            cmd = f"ping -t {target}" if _win else f"ping {target}"
         elif tool == "tracert":
-            cmd = f"tracert {target}"
+            cmd = f"tracert {target}" if _win else f"traceroute {target}"
         elif tool == "telnet":
             cmd = f"telnet {target}"
         elif tool == "ssh":
@@ -1709,42 +1770,68 @@ class MainWindow(TreeMixin, QMainWindow):
             if not ok or not user.strip():
                 return
             if not shutil.which("ssh"):
-                QMessageBox.warning(
-                    self, tr("未找到 ssh"),
-                    tr("系统未安装 OpenSSH 客户端（ssh.exe）。\n" "请在“设置 → 应用 → 可选功能”中启用“OpenSSH 客户端”后重试。")
-                )
+                if _win:
+                    msg = tr("系统未安装 OpenSSH 客户端（ssh.exe）。\n"
+                             "请在「设置 → 应用 → 可选功能」中启用「OpenSSH 客户端」后重试。")
+                else:
+                    msg = tr("系统未安装 SSH 客户端。请执行: sudo apt install openssh-client")
+                QMessageBox.warning(self, tr("未找到 ssh"), msg)
                 return
             cmd = f"ssh {user.strip()}@{target}"
         elif tool == "rdp":
-            try:
-                subprocess.Popen(["mstsc.exe", f"/v:{target}"])
-                self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"RDP · 目标 {target}")
-                self.status_bar.showMessage(f"已启动 RDP: {target}")
-            except Exception as e:
-                QMessageBox.warning(self, tr("启动失败"), f"无法启动远程桌面: {e}")
-            return
+            if _win:
+                try:
+                    subprocess.Popen(["mstsc.exe", f"/v:{target}"])
+                    self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"RDP · 目标 {target}")
+                    self.status_bar.showMessage(f"已启动 RDP: {target}")
+                except Exception as e:
+                    QMessageBox.warning(self, tr("启动失败"), f"无法启动远程桌面: {e}")
+                return
+            else:
+                QMessageBox.information(self, tr("远程桌面"),
+                    tr("RDP 为 Windows 专有功能。Linux/macOS 请使用 Remmina 或 FreeRDP 客户端。"))
+                return
         elif tool == "cmd":
-            cmd = f"title IPScanner 已连接 {target}"
+            if _win:
+                cmd = f"title IPScanner 已连接 {target}"
+            else:
+                cmd = f"echo 'IPScanner connected to {target}'; exec $SHELL"
         else:
             return
 
+        # 启动控制台
         try:
-            subprocess.Popen(
-                ["cmd.exe", "/k", cmd],
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-            )
+            if _win:
+                subprocess.Popen(["cmd", "/k", cmd])
+            else:
+                # Linux/macOS: 在终端中运行
+                if shutil.which("x-terminal-emulator"):
+                    subprocess.Popen(["x-terminal-emulator", "-e", cmd])
+                elif shutil.which("gnome-terminal"):
+                    subprocess.Popen(["gnome-terminal", "--", "bash", "-c", f"{cmd}; exec bash"])
+                elif shutil.which("xterm"):
+                    subprocess.Popen(["xterm", "-e", cmd])
+                elif shutil.which("open"):  # macOS
+                    subprocess.Popen(["open", "-a", "Terminal", "--args", cmd])
+                else:
+                    QMessageBox.information(self, tr("启动网络工具"),
+                        tr("未找到可用的终端模拟器。请在终端中手动执行:\n") + cmd)
+                    return
+
             self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"{tool.upper()} · 目标 {target}")
             self.status_bar.showMessage(f"已启动 {tool.upper()}: {target}")
         except Exception as e:
-            QMessageBox.warning(self, tr("启动失败"), f"无法启动 {tool}: {e}")
+            QMessageBox.warning(self, tr("启动失败"), f"无法启动 {tool.upper()}: {e}")
 
     def _remote_power(self, action: str):
         """
-        远程关机 / 重启：向目标发送 shutdown 指令。
-        action: "shutdown" -> 关机；"reboot" -> 重启。
-        需目标主机允许远程关机（本地管理员权限 + 远程注册表/足够权限），
-        部分环境需在“本地安全策略”中授予“强制从远程系统关机”权限。
+        远程关机 / 重启。
+        Windows: shutdown /s /m 或 /r /m。
+        Linux/macOS: ssh root@target shutdown 或 reboot。
         """
+        import platform as _plat
+        _win = _plat.system() == "Windows"
+
         target = self._selected_target()
         if not target:
             text, ok = QInputDialog.getText(
@@ -1765,7 +1852,13 @@ class MainWindow(TreeMixin, QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        # /f 强制关闭应用；/t 0 立即执行；/m 指定远程目标
+        if _win:
+            self._remote_power_windows(target, action, _verb)
+        else:
+            self._remote_power_unix(target, action, _verb)
+
+    def _remote_power_windows(self, target, action, _verb):
+        """Windows: shutdown 命令。"""
         _flag = "/s" if action == "shutdown" else "/r"
         cmd = ["shutdown", _flag, "/m", f"\\\\{target}", "/f", "/t", "0"]
         try:
@@ -1776,21 +1869,13 @@ class MainWindow(TreeMixin, QMainWindow):
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if proc.returncode == 0:
-                self._audit(
-                    audit_log.CAT_DEVICE, f"远程{_verb}",
-                    f"目标 {target} · 指令已发送",
-                )
-                QMessageBox.information(
-                    self, tr("指令已发送"),
-                    f"已向 {target} 发送远程{_verb}指令。"
-                )
+                self._audit(audit_log.CAT_DEVICE, f"远程{_verb}", f"目标 {target} · 指令已发送")
+                QMessageBox.information(self, tr("指令已发送"), f"已向 {target} 发送远程{_verb}指令。")
                 self.status_bar.showMessage(f"已发送远程{_verb}: {target}")
             else:
                 _err = (proc.stderr or proc.stdout or "").strip()
-                self._audit(
-                    audit_log.CAT_DEVICE, f"远程{_verb}失败",
-                    f"目标 {target} · 退出码 {proc.returncode}",
-                )
+                self._audit(audit_log.CAT_DEVICE, f"远程{_verb}失败",
+                            f"目标 {target} · 退出码 {proc.returncode}")
                 QMessageBox.warning(
                     self, tr("远程") + _verb + tr("失败"),
                     f"向 {target} 发送{_verb}指令失败 (退出码 {proc.returncode})。\n"
@@ -1799,10 +1884,32 @@ class MainWindow(TreeMixin, QMainWindow):
                     + tr("或本地未以管理员身份运行本程序。")
                 )
         except Exception as e:
-            QMessageBox.warning(
-                self, tr("远程") + _verb + tr("失败"),
-                f"执行远程{_verb}指令时出错: {e}"
-            )
+            QMessageBox.warning(self, tr("远程") + _verb + tr("失败"), f"执行远程{_verb}指令时出错: {e}")
+
+    def _remote_power_unix(self, target, action, _verb):
+        """Linux/macOS: 通过 SSH 执行 shutdown/reboot。"""
+        if not shutil.which("ssh"):
+            QMessageBox.warning(self, tr("未找到 ssh"),
+                tr("远程关机需要 SSH。请安装 openssh-client 后重试。"))
+            return
+
+        _cmd = "shutdown -h now" if action == "shutdown" else "reboot"
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+                    "root@" + target, _cmd]
+        try:
+            proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+            if proc.returncode == 0:
+                self._audit(audit_log.CAT_DEVICE, f"远程{_verb}", f"目标 {target} · SSH 指令已发送")
+                QMessageBox.information(self, tr("指令已发送"),
+                    f"已通过 SSH 向 {target} 发送远程{_verb}指令。")
+                self.status_bar.showMessage(f"已发送远程{_verb}: {target}")
+            else:
+                _err = (proc.stderr or proc.stdout or "").strip()
+                QMessageBox.warning(self, tr("远程") + _verb + tr("失败"),
+                    f"SSH 连接 {target} 失败：{_err}\n\n"
+                    + tr("提示：目标需开启 SSH 且允许 root 登录，或配置免密 sudo。"))
+        except Exception as e:
+            QMessageBox.warning(self, tr("远程") + _verb + tr("失败"), f"执行失败: {e}")
 
     def _show_snmp_info(self, ip, name, descr):
         """点击 SNMP 服务子项 → 弹窗展示设备识别信息"""
@@ -1890,8 +1997,46 @@ class MainWindow(TreeMixin, QMainWindow):
             QMessageBox.information(self, tr("拓扑视图"), tr("请先完成一次扫描，再查看拓扑。"))
             return
         gw_ip = _detect_gateway()
-        dlg = TopologyDialog(self.all_results, gw_ip, self.dark_mode, self)
-        dlg.exec_()
+
+        # 尝试 LLDP/CDP 拓扑发现（后台线程，避免卡界面）
+        self._topo_result = None
+        self._topo_progress = QProgressDialog(
+            tr("正在发现网络拓扑 (LLDP/CDP)..."), tr("跳过"), 0, 0, self
+        )
+        self._topo_progress.setWindowTitle(tr("拓扑发现"))
+        self._topo_progress.setWindowModality(Qt.WindowModal)
+        self._topo_progress.setMinimumDuration(0)
+
+        class TopoThread(QThread):
+            finished_signal = pyqtSignal(object)
+            log_signal = pyqtSignal(str)
+
+            def __init__(self, results):
+                super().__init__()
+                self.results = results
+
+            def run(self):
+                try:
+                    from topology_discovery import discover_topology
+                    topo = discover_topology(
+                        self.results,
+                        progress_callback=lambda p, c, t, m: self.log_signal.emit(m)
+                    )
+                    self.finished_signal.emit(topo)
+                except Exception as e:
+                    self.finished_signal.emit(None)
+
+        def on_finished(topo):
+            self._topo_progress.close()
+            dlg = TopologyDialog(self.all_results, gw_ip, self.dark_mode, self, topology=topo)
+            dlg.exec_()
+
+        self._topo_thread = TopoThread(self.all_results)
+        self._topo_thread.log_signal.connect(lambda m: self._topo_progress.setLabelText(m))
+        self._topo_thread.finished_signal.connect(on_finished)
+        self._topo_progress.canceled.connect(lambda: None)  # 跳过 = 快进到显示
+        self._topo_thread.start()
+        self._topo_progress.exec_()  # 模态等待（跳过按钮关闭对话框，但线程继续）
 
     # --- 右键菜单 ---
 
@@ -2175,6 +2320,64 @@ class MainWindow(TreeMixin, QMainWindow):
                  "<li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>")
             + "</ul>" + tr("<p style='color: #94A3B8;'>基于 PyQt5 开发</p>")
         ))
+
+    def _update_oui_db(self):
+        """从 IEEE 官网下载最新 OUI 数据库并重建 oui.db。"""
+        reply = QMessageBox.question(
+            self, tr("检查 OUI 更新"),
+            tr("将从 IEEE 官网下载最新的 MAC 厂商数据库（约 2MB），\n"
+               "并重建本地 OUI 数据库。是否继续？"),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._oui_progress = QProgressDialog(
+            tr("正在更新 OUI 数据库..."), tr("取消"), 0, 100, self
+        )
+        self._oui_progress.setWindowTitle(tr("OUI 更新"))
+        self._oui_progress.setWindowModality(Qt.WindowModal)
+        self._oui_progress.setMinimumDuration(0)
+        self._oui_progress.canceled.connect(self._oui_cancel_update)
+        self._oui_cancelled = False
+
+        from ui_threads import OuiUpdateThread
+        self._oui_thread = OuiUpdateThread()
+        self._oui_thread.log_signal.connect(self._oui_update_log)
+        self._oui_thread.progress_signal.connect(self._oui_progress.setValue)
+        self._oui_thread.finished_signal.connect(self._oui_update_finished)
+        self._oui_thread.start()
+
+    def _oui_cancel_update(self):
+        self._oui_cancelled = True
+        if hasattr(self, '_oui_thread') and self._oui_thread.isRunning():
+            self._oui_thread.terminate()
+            self._oui_thread.wait(2000)
+
+    def _oui_update_log(self, msg: str):
+        if hasattr(self, '_oui_progress') and self._oui_progress.isVisible():
+            self._oui_progress.setLabelText(msg)
+
+    def _oui_update_finished(self, result: dict):
+        self._oui_progress.close()
+        if self._oui_cancelled:
+            return
+
+        if result.get("success"):
+            # 重新加载数据库连接
+            from oui_database import reload_db
+            reload_db()
+            QMessageBox.information(
+                self, tr("OUI 更新"),
+                tr("OUI 数据库更新成功！\n\n")
+                + f"共 {result['count']:,} 条记录\n"
+                + f"保存至: {result['path']}"
+            )
+        else:
+            QMessageBox.warning(
+                self, tr("OUI 更新失败"),
+                tr("更新 OUI 数据库时出错：\n") + result.get("error", tr("未知错误"))
+            )
 
     def closeEvent(self, event):
         if self.scan_thread and self.scan_thread.isRunning():

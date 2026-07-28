@@ -27,12 +27,18 @@ def scan_port(ip: str, port: int, timeout: float = 0.5) -> bool:
 
 def scan_shares(ip: str, timeout: float = 1.5) -> List[str]:
     """
-    通过 `net view \\<ip>` 枚举目标的 SMB 共享文件夹，返回共享名列表。
-    仅 Windows 可用；非 Windows 或探测失败返回空列表。
-    过滤 ADMIN$/IPC$/PRINT$ 及 X$ 盘符类系统隐藏共享，仅保留用户共享。
+    枚举目标的 SMB 共享文件夹，返回共享名列表。
+    Windows: net view。Linux/macOS: smbclient。
+    过滤 ADMIN$/IPC$/PRINT$ 及 X$ 盘符类系统隐藏共享。
     """
-    if platform.system() != tr("Windows"):
-        return []
+    if platform.system() == "Windows":
+        return _scan_shares_windows(ip, timeout)
+    else:
+        return _scan_shares_unix(ip, timeout)
+
+
+def _scan_shares_windows(ip: str, timeout: float) -> List[str]:
+    """Windows: net view"""
     try:
         output = _run_cmd(["net", "view", f"\\\\{ip}"], timeout=timeout)
         shares = []
@@ -40,32 +46,66 @@ def scan_shares(ip: str, timeout: float = 1.5) -> List[str]:
             s = line.strip()
             if not s:
                 continue
-            # 跳过表头 / 分隔线 / 成功提示 / 错误提示
             if ("----" in s
-                    or s.startswith(tr("共享名")) or s.startswith("Share name")
-                    or s.startswith(tr("命令成功")) or "successfully" in s.lower()
-                    or tr("找不到") in s or tr("找不到") in s or tr("系统错误") in s
+                    or s.startswith("共享名") or s.startswith("Share name")
+                    or s.startswith("命令成功") or "successfully" in s.lower()
+                    or "系统错误" in s
                     or "System error" in s or "The command" in s):
                 continue
-            # 共享行首列为共享名，次列为类型 (Disk/Print/IPC/磁盘/打印/设备)
             m = re.match(
-                tr(r"^(\S+)\s+(Disk|Print|IPC|Device|磁盘|打印|设备)"), s, re.IGNORECASE
+                r"^(\S+)\s+(Disk|Print|IPC|Device|磁盘|打印|设备)", s, re.IGNORECASE
             )
             if not m:
                 continue
             name = m.group(1).strip()
             if not name:
                 continue
-            up = name.upper()
-            if up in _SYSTEM_SHARES:
-                continue
-            # X$ 盘符类系统隐藏共享（C$/D$/E$ ...）
-            if len(name) == 2 and name[1] == "$" and name[0].isalpha():
+            if _is_system_share(name):
                 continue
             shares.append(name)
         return shares
     except Exception:
         return []
+
+
+def _scan_shares_unix(ip: str, timeout: float) -> List[str]:
+    """Linux/macOS: smbclient -L（需安装 samba-client）"""
+    try:
+        output = _run_cmd(["smbclient", "-L", f"//{ip}", "-N", "-g"], timeout=timeout)
+        return _parse_smbclient_output(output)
+    except Exception:
+        pass
+    try:
+        output = _run_cmd(["smbclient", "-L", f"//{ip}", "-U", "%", "-g"], timeout=timeout)
+        return _parse_smbclient_output(output)
+    except Exception:
+        pass
+    return []
+
+
+def _parse_smbclient_output(output: str) -> List[str]:
+    """解析 smbclient -L 的 grepable (-g) 输出：Disk|share_name|description"""
+    shares = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("Disk|"):
+            continue
+        parts = line.split("|")
+        if len(parts) >= 2:
+            name = parts[1].strip()
+            if name and not _is_system_share(name):
+                shares.append(name)
+    return shares
+
+
+def _is_system_share(name: str) -> bool:
+    """判断是否为系统隐藏共享。"""
+    up = name.upper()
+    if up in _SYSTEM_SHARES:
+        return True
+    if len(name) == 2 and name[1] == "$" and name[0].isalpha():
+        return True
+    return False
 
 
 def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,

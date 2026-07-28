@@ -329,7 +329,7 @@ class NetworkScanner:
                         )
 
             # ── Phase 2: ARP 主动探测（仅本机直连网段）──
-            # 发现“禁 Ping 但在线”的静默主机。SendARP 不依赖 ICMP，
+            # 发现"禁 Ping 但在线"的静默主机。SendARP 不依赖 ICMP，
             # 命中即视为在线，与 ping 命中的设备同样进入 enrich 流水线。
             if not self._stop_flag:
                 local_subnets = get_local_subnets()

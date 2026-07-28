@@ -178,3 +178,20 @@ class SwitchMapThread(QThread):
             from switch_mapper import SwitchInfo
             info = SwitchInfo(ip=self.switch_ip, error=f"映射异常: {e}")
         self.finished_signal.emit(info)
+
+
+class OuiUpdateThread(QThread):
+    """OUI 数据库在线更新线程。"""
+    log_signal = pyqtSignal(str)           # 进度消息
+    progress_signal = pyqtSignal(int)      # 百分比 0-100
+    finished_signal = pyqtSignal(object)   # dict: {success, count, path, error}
+
+    def run(self):
+        from oui_updater import update_oui_db
+
+        def _progress(stage: str, percent: int, message: str):
+            self.log_signal.emit(message)
+            self.progress_signal.emit(percent)
+
+        result = update_oui_db(progress_callback=_progress)
+        self.finished_signal.emit(result)

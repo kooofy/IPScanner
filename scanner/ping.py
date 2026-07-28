@@ -7,18 +7,22 @@ from typing import Dict, List, Optional, Tuple
 
 from .constants import _LOCAL_MAC_CACHE
 from .util import _run_cmd
-from i18n import tr
+
+_IS_WINDOWS = platform.system() == "Windows"
+_IS_LINUX = platform.system() == "Linux"
+_IS_MAC = platform.system() == "Darwin"
 
 
 def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
     """
     Ping 单个 IP，返回 (是否在线, 响应时间ms, TTL)。
-    Windows 使用系统 ping 命令。
     TTL 用于 OS 推测（Windows≈128 / Linux·macOS·BSD≈64 / 部分网络设备≈255）。
     """
-    is_windows = platform.system() == tr("Windows")
-    if is_windows:
+    if _IS_WINDOWS:
         cmd = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
+    elif _IS_MAC:
+        # macOS: -c 1 -W timeout_ms (ms)
+        cmd = ["ping", "-c", "1", "-W", str(max(1, timeout_ms)), ip]
     else:
         cmd = ["ping", "-c", "1", "-W", str(max(1, timeout_ms // 1000)), ip]
 
@@ -26,14 +30,14 @@ def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
         output = _run_cmd(cmd, timeout=timeout_ms / 1000 + 2)
 
         # Windows: "来自 192.168.1.1 的回复: 字节=32 时间=1ms TTL=64"
-        # Linux:   "64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=0.123 ms"
+        # Linux/macOS: "64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=0.123 ms"
         ttl = 0
         ttl_match = re.search(r"TTL[=:](\d+)", output, re.IGNORECASE)
         if ttl_match:
             ttl = int(ttl_match.group(1))
         if "TTL=" in output or "ttl=" in output:
             # 提取响应时间
-            time_match = re.search(tr(r"时间[=:](\d+)\s*ms"), output)
+            time_match = re.search(r"时间[=:](\d+)\s*ms", output)
             if not time_match:
                 time_match = re.search(r"time[=:](\d+\.?\d*)\s*ms", output)
             if not time_match:
@@ -48,54 +52,58 @@ def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
 def get_local_mac_map() -> Dict[str, str]:
     """
     获取本机所有网卡的 {ip: mac} 映射
-    Windows 下使用 ipconfig /all，Linux 下使用 ifconfig/ip addr
+    Windows 下使用 ipconfig /all，Linux/macOS 下使用 ip addr。
     """
     mac_map = {}
-    is_windows = platform.system() == tr("Windows")
-    
+
     try:
-        if is_windows:
+        if _IS_WINDOWS:
             output = _run_cmd(["ipconfig", "/all"], timeout=10)
-            # 解析 ipconfig /all 输出
             current_mac = None
             for line in output.splitlines():
                 line = line.strip()
                 # 匹配物理地址行
-                mac_match = re.search(tr(r"物理地址[ .]+: ([0-9a-fA-F\-]{17})"), line)
+                mac_match = re.search(r"物理地址[ .]+: ([0-9a-fA-F\-]{17})", line)
                 if not mac_match:
                     mac_match = re.search(r"Physical Address[ .]+: ([0-9a-fA-F\-]{17})", line)
                 if mac_match:
                     current_mac = mac_match.group(1).replace("-", ":").lower()
                     continue
                 # 匹配 IPv4 地址行
-                ip_match = re.search(tr(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)"), line)
+                ip_match = re.search(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
                 if not ip_match:
                     ip_match = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
                 if ip_match and current_mac:
-                    ip = ip_match.group(1)
-                    mac_map[ip] = current_mac
+                    mac_map[ip_match.group(1)] = current_mac
         else:
-            # Linux: 使用 ip addr
+            # Linux / macOS: 使用 ip addr（macOS 也支持 ip 命令）
             try:
                 output = _run_cmd(["ip", "addr"], timeout=10)
-                current_mac = None
-                for line in output.splitlines():
-                    line = line.strip()
-                    if "link/ether" in line:
-                        mac_match = re.search(r"link/ether ([0-9a-fA-F:]{17})", line)
-                        if mac_match:
-                            current_mac = mac_match.group(1).lower()
-                    elif "inet " in line and current_mac:
-                        ip_match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
-                        if ip_match:
-                            ip = ip_match.group(1)
-                            if not ip.startswith("127."):
-                                mac_map[ip] = current_mac
             except Exception:
-                pass
+                # macOS 回退到 ifconfig
+                try:
+                    output = _run_cmd(["ifconfig"], timeout=10)
+                except Exception:
+                    return mac_map
+
+            current_mac = None
+            for line in output.splitlines():
+                line = line.strip()
+                # MAC: "link/ether aa:bb:cc:dd:ee:ff" (ip addr) 或 "ether aa:bb:cc:dd:ee:ff" (ifconfig)
+                mac_match = re.search(r"(?:link/)?ether\s+([0-9a-fA-F:]{17})", line)
+                if mac_match:
+                    current_mac = mac_match.group(1).lower()
+                    continue
+                # IP: "inet 192.168.1.1/24" (ip addr) 或 "inet 192.168.1.1 netmask ..." (ifconfig)
+                if current_mac and "inet " in line:
+                    ip_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", line)
+                    if ip_match:
+                        ip = ip_match.group(1)
+                        if not ip.startswith("127."):
+                            mac_map[ip] = current_mac
     except Exception:
         pass
-    
+
     return mac_map
 
 
@@ -109,28 +117,32 @@ def get_local_mac_for_ip(ip: str) -> str:
 
 def arp_ping(ip: str) -> str:
     """
-    通过 Windows SendARP 主动探测指定 IP 的 MAC 地址（ARP 主动探测）。
-
-    与系统 ping 不同，SendARP 不依赖目标主机回应 ICMP，因此能发现
-    “禁 Ping 但在线”的主机，补齐同网段静默主机的发现能力。
-    无需管理员权限（走 iphlpapi 的 SendARP，非原始套接字）。
-    命中返回 '' 分隔的小写 MAC，未命中/不支持返回空串。
+    主动 ARP 探测指定 IP 的 MAC 地址。
+    
+    Windows: 使用 SendARP API (iphlpapi.dll)，零管理员权限。
+    Linux/macOS: 使用 arping 命令（需安装 iputils-arping 或 arping）。
+    命中返回小写 MAC (aa:bb:...)，未命中/不支持返回空串。
     """
-    if platform.system() != tr("Windows"):
-        return ""
+    if _IS_WINDOWS:
+        return _arp_ping_windows(ip)
+    else:
+        return _arp_ping_unix(ip)
+
+
+def _arp_ping_windows(ip: str) -> str:
+    """Windows SendARP 主动 ARP 探测。"""
     try:
         ws2 = ctypes.windll.ws2_32
         iphlp = ctypes.windll.iphlpapi
-        # 设置 argtypes/restype 避免 ctypes 默认按 int 解析导致高位截断
         ws2.inet_addr.argtypes = [ctypes.c_char_p]
         ws2.inet_addr.restype = ctypes.c_uint32
         iphlp.SendARP.argtypes = [
-            ctypes.c_uint32,                       # DestIP (网络字节序)
-            ctypes.c_uint32,                       # SrcIP
-            ctypes.POINTER(ctypes.c_ubyte * 6),    # pMacAddr
-            ctypes.POINTER(ctypes.c_ulong),        # PhyAddrLen
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_ubyte * 6),
+            ctypes.POINTER(ctypes.c_ulong),
         ]
-        iphlp.SendARP.restype = ctypes.c_uint32    # DWORD 返回码
+        iphlp.SendARP.restype = ctypes.c_uint32
 
         dest = ws2.inet_addr(ip.encode("ascii"))
         src = ws2.inet_addr(b"0.0.0.0")
@@ -144,53 +156,127 @@ def arp_ping(ip: str) -> str:
     return ""
 
 
+def _arp_ping_unix(ip: str) -> str:
+    """Linux/macOS 通过 arping 命令主动 ARP 探测。"""
+    try:
+        # arping: -c 1 = 发一次, -w 1 = 1 秒超时
+        output = _run_cmd(["arping", "-c", "1", "-w", "1", ip], timeout=3)
+        # 输出: "Unicast reply from 192.168.1.1 [aa:bb:cc:dd:ee:ff] 0.5ms"
+        m = re.search(r"\[([0-9a-fA-F:]{17})\]", output)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+
+    # 回退: 尝试用 arp -n 读取系统 ARP 表 (Linux/macOS)
+    try:
+        output = _run_cmd(["arp", "-n", ip], timeout=3)
+        m = re.search(r"([0-9a-fA-F:]{17})", output)
+        if m and ip in output:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    return ""
+
+
 def get_local_subnets() -> List:
     """
     返回本机所有直连网段 (ipaddress.IPv4Network 列表)。
-    仅 Windows 通过 ipconfig 解析 IPv4 + 子网掩码；非 Windows 返回空列表。
-    用于约束 ARP 主动探测范围（只对同网段离线 IP 探测，避免路由范围浪费时间）。
+    用于约束 ARP 主动探测范围（只对同网段离线 IP 探测，避免浪费时间）。
+    Windows: 解析 ipconfig 输出。
+    Linux/macOS: 解析 ip addr show 输出。
     """
     nets = []
-    if platform.system() != tr("Windows"):
-        return nets
     try:
-        output = _run_cmd(["ipconfig"], timeout=10)
-        cur_ip = None
-        for line in output.splitlines():
-            line = line.strip()
-            m = re.search(tr(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)"), line)
-            if not m:
-                m = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
-            if m:
-                cur_ip = m.group(1)
-                continue
-            sm = re.search(tr(r"子网掩码[ .]+: (\d+\.\d+\.\d+\.\d+)"), line)
-            if not sm:
-                sm = re.search(r"Subnet Mask[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
-            if sm and cur_ip:
+        if _IS_WINDOWS:
+            output = _run_cmd(["ipconfig"], timeout=10)
+            cur_ip = None
+            for line in output.splitlines():
+                line = line.strip()
+                m = re.search(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                if not m:
+                    m = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                if m:
+                    cur_ip = m.group(1)
+                    continue
+                sm = re.search(r"子网掩码[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                if not sm:
+                    sm = re.search(r"Subnet Mask[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
+                if sm and cur_ip:
+                    try:
+                        net = ipaddress.ip_network(f"{cur_ip}/{sm.group(1)}", strict=False)
+                        if net not in nets and not _is_virtual_subnet(str(net)):
+                            nets.append(net)
+                    except Exception:
+                        pass
+                    cur_ip = None
+        else:
+            # Linux / macOS: 解析 ip addr show
+            try:
+                output = _run_cmd(["ip", "addr", "show"], timeout=10)
+            except Exception:
+                output = _run_cmd(["ifconfig"], timeout=10)
+
+            for line in output.splitlines():
+                line = line.strip()
+                # "inet 192.168.1.1/24 brd 192.168.1.255 scope global ..."
+                m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+                if not m:
+                    # ifconfig style: "inet 192.168.1.1 netmask 255.255.255.0"
+                    m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)\s+netmask\s+(\d+\.\d+\.\d+\.\d+)", line)
+                    if m:
+                        ip_str, mask_str = m.group(1), m.group(2)
+                        try:
+                            prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask_str}").prefixlen
+                            net = ipaddress.ip_network(f"{ip_str}/{prefix}", strict=False)
+                            if ip_str not in ("127.0.0.1",) and not _is_virtual_subnet(str(net)):
+                                if net not in nets:
+                                    nets.append(net)
+                        except Exception:
+                            pass
+                    continue
+                ip_str, prefix_str = m.group(1), m.group(2)
+                if ip_str.startswith("127."):
+                    continue
                 try:
-                    net = ipaddress.ip_network(f"{cur_ip}/{sm.group(1)}", strict=False)
-                    if net not in nets:
+                    net = ipaddress.ip_network(f"{ip_str}/{prefix_str}", strict=False)
+                    if not _is_virtual_subnet(str(net)) and net not in nets:
                         nets.append(net)
                 except Exception:
                     pass
-                cur_ip = None
     except Exception:
         pass
     return nets
 
 
+def _is_virtual_subnet(net_str: str) -> bool:
+    """排除常见虚拟/容器网卡网段（Docker、虚拟化、链路本地等）。"""
+    virtual_prefixes = (
+        "172.17.", "172.18.", "172.19.",  # Docker 默认网桥
+        "169.254.",                         # 链路本地 (APIPA)
+    )
+    net_str_lower = net_str.lower()
+    for p in virtual_prefixes:
+        if net_str_lower.startswith(p):
+            return True
+    # 排除 docker/veth/br- 接口网段（CIDR 级）
+    virtual_names = ("docker", "veth", "br-", "virbr", "vboxnet", "vmnet")
+    if any(n in net_str_lower for n in virtual_names):
+        return True
+    return False
+
+
 def get_mac_for_ip(ip: str, arp_cache: Optional[Dict[str, str]] = None) -> str:
-    """获取指定 IP 的 MAC 地址"""
+    """获取指定 IP 的 MAC 地址。跨平台：arp 命令。"""
     # 先检查是否是本机IP
     local_mac = get_local_mac_for_ip(ip)
     if local_mac:
         return local_mac
-    
+
     if arp_cache and ip in arp_cache:
         return arp_cache[ip]
 
-    # 单独查询
+    # ARP 表查询 (Windows/Linux/macOS 通用)
     try:
         output = _run_cmd(["arp", "-a", ip], timeout=5)
         for line in output.splitlines():
@@ -199,4 +285,18 @@ def get_mac_for_ip(ip: str, arp_cache: Optional[Dict[str, str]] = None) -> str:
                 return match.group(1).replace("-", ":").lower()
     except Exception:
         pass
+
+    # Linux/macOS: 尝试读取 /proc/net/arp
+    if not _IS_WINDOWS:
+        try:
+            with open("/proc/net/arp", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[0] == ip:
+                        mac = parts[3]
+                        if mac != "00:00:00:00:00:00":
+                            return mac.lower()
+        except Exception:
+            pass
+
     return ""

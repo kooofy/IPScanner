@@ -38,20 +38,28 @@ def resolve_hostname(ip: str, timeout: float = 1.0) -> str:
 
 
 def get_netbios_name(ip: str, timeout: float = 2.0) -> str:
-    """通过 nbtstat 获取 NetBIOS 名称 (Windows)"""
-    if platform.system() != tr("Windows"):
-        return ""
+    """获取 NetBIOS 名称。
+    Windows: nbtstat -A。Linux/macOS: nmblookup（samba-common）。
+    均不可用时返回空串。
+    """
+    is_win = platform.system() == "Windows"
     try:
-        output = _run_cmd(["nbtstat", "-A", ip], timeout=timeout)
+        if is_win:
+            output = _run_cmd(["nbtstat", "-A", ip], timeout=timeout)
+        else:
+            # Linux/macOS: nmblookup -A (samba-common 包)
+            output = _run_cmd(["nmblookup", "-A", ip], timeout=timeout)
+
         for line in output.splitlines():
             stripped = line.strip()
             if "<00>" not in stripped:
                 continue
-            if re.search(tr(r"GROUP|组"), stripped, re.IGNORECASE):
+            if re.search(r"GROUP|组", stripped, re.IGNORECASE):
                 continue
             m = re.match(r"^(\S+)\s+<00>", stripped)
             if m:
                 name = m.group(1)
+                # nmblookup 输出格式: "COMPUTERNAME  <00> - B <ACTIVE>"
                 if not name.startswith("IS~"):
                     return name
     except Exception:

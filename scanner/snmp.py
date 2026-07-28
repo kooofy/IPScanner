@@ -5,6 +5,31 @@ import socket
 
 from .constants import _SNMP_DEFAULT_COMMUNITIES, _SNMP_GET_OIDS
 
+# ── LLDP (Link Layer Discovery Protocol) OIDs ──
+# lldpRemTable: 1.0.8802.1.1.2.1.4.1
+_LLDP_REM_BASE = "1.0.8802.1.1.2.1.4.1.1"
+_LLDP_REM_LOCAL_PORT = f"{_LLDP_REM_BASE}.2"       # local port number (ifIndex)
+_LLDP_REM_CHASSIS_ID_SUBTYPE = f"{_LLDP_REM_BASE}.4"
+_LLDP_REM_CHASSIS_ID = f"{_LLDP_REM_BASE}.5"       # neighbor chassis (MAC or name)
+_LLDP_REM_PORT_ID_SUBTYPE = f"{_LLDP_REM_BASE}.6"
+_LLDP_REM_PORT_ID = f"{_LLDP_REM_BASE}.7"           # neighbor port description
+_LLDP_REM_PORT_DESC = f"{_LLDP_REM_BASE}.8"         # local port description
+_LLDP_REM_SYS_NAME = f"{_LLDP_REM_BASE}.9"          # neighbor system name
+_LLDP_REM_SYS_DESC = f"{_LLDP_REM_BASE}.10"         # neighbor system description
+
+# ── CDP (Cisco Discovery Protocol) OIDs ──
+# cdpCacheTable: 1.3.6.1.4.1.9.9.23.1.2.1.1
+_CDP_CACHE_BASE = "1.3.6.1.4.1.9.9.23.1.2.1.1"
+_CDP_CACHE_IFINDEX = f"{_CDP_CACHE_BASE}.3"         # local ifIndex
+_CDP_CACHE_ADDRESS = f"{_CDP_CACHE_BASE}.4"         # neighbor IP
+_CDP_CACHE_DEVICE_ID = f"{_CDP_CACHE_BASE}.6"       # neighbor hostname
+_CDP_CACHE_DEVICE_PORT = f"{_CDP_CACHE_BASE}.7"     # neighbor port
+_CDP_CACHE_PLATFORM = f"{_CDP_CACHE_BASE}.8"        # neighbor platform
+
+# ── Bridge MIB (for port name lookup) ──
+_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"                  # ifDescr (port name)
+_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"                # ifName (abbreviated port name)
+
 
 def _ber_len(length: int) -> bytes:
     """BER 长度字段编码 (短形式 < 128，否则长形式)。"""
