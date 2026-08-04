@@ -9,13 +9,14 @@ MAC 地址库 (持久化)
 - 导出为 Excel
 - 重启后自动加载 (数据库文件默认 mac_library.db)
 """
+import contextlib
 import os
-import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from app_paths import data_dir
 from i18n import tr
 
+import db_util
 from excel_handler import (
     normalize_mac,
     detect_columns,
@@ -26,7 +27,7 @@ from excel_handler import (
 
 DEFAULT_DB = os.path.join(data_dir(), "mac_library.db")
 
-# 基础表结构 + 非唯一索引；部分唯一索引在 _init_db 里于去重后创建
+# 基礎表结构 + 非唯一索引；部分唯一索引在 _init_db 里于去重后创建
 _SCHEMA_BASE = """
 CREATE TABLE IF NOT EXISTS devices (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,16 +52,17 @@ class MacLibrary:
 
     def __init__(self, db_path: str = DEFAULT_DB):
         self.db_path = db_path
-        self._init_db()
+        with self._conn():  # 触发建表
+            pass
 
     # ---------- 底层 ----------
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @contextlib.contextmanager
+    def _conn(self):
+        """复用进程级单例连接（按 db_path 缓存，线程安全）。"""
+        with db_util.connection(self.db_path, init_fn=self._init_db) as c:
+            yield c
 
-    def _init_db(self):
-        conn = self._connect()
+    def _init_db(self, conn):
         # 1) 建表与基础索引
         conn.executescript(_SCHEMA_BASE)
         # 2) 对已有非空 MAC 去重（保留最大 id 即最后写入一条），否则部分唯一索引会创建失败
@@ -80,7 +82,6 @@ class MacLibrary:
         except Exception:
             pass
         conn.commit()
-        conn.close()
 
     @staticmethod
     def _norm_mac(mac: str) -> str:
@@ -91,30 +92,26 @@ class MacLibrary:
             remark="", vendor="", source_file="") -> int:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         mac = self._norm_mac(mac)
-        conn = self._connect()
-        # 非空 MAC 已存在 → 整行更新（部分唯一索引保护，避免 IntegrityError）
-        if mac:
-            cur = conn.execute("SELECT id FROM devices WHERE mac=?", (mac,)).fetchone()
-            if cur:
-                conn.execute(
-                    "UPDATE devices SET ip=?, device_type=?, location=?, user=?, "
-                    "remark=?, vendor=?, source_file=?, updated_at=? WHERE id=?",
-                    (ip, device_type, location, user, remark, vendor, source_file, now, cur[0]),
-                )
-                conn.commit()
-                did = cur[0]
-                conn.close()
-                return did
-        cur = conn.execute(
-            "INSERT INTO devices "
-            "(ip, mac, device_type, location, user, remark, vendor, source_file, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (ip, mac, device_type, location, user, remark, vendor, source_file, now, now),
-        )
-        conn.commit()
-        did = cur.lastrowid
-        conn.close()
-        return did
+        with self._conn() as conn:
+            # 非空 MAC 已存在 → 整行更新（部分唯一索引保护，避免 IntegrityError）
+            if mac:
+                cur = conn.execute("SELECT id FROM devices WHERE mac=?", (mac,)).fetchone()
+                if cur:
+                    conn.execute(
+                        "UPDATE devices SET ip=?, device_type=?, location=?, user=?, "
+                        "remark=?, vendor=?, source_file=?, updated_at=? WHERE id=?",
+                        (ip, device_type, location, user, remark, vendor, source_file, now, cur[0]),
+                    )
+                    conn.commit()
+                    return cur[0]
+            cur = conn.execute(
+                "INSERT INTO devices "
+                "(ip, mac, device_type, location, user, remark, vendor, source_file, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ip, mac, device_type, location, user, remark, vendor, source_file, now, now),
+            )
+            conn.commit()
+            return cur.lastrowid
 
     _EDITABLE = {"ip", "mac", "device_type", "location", "user", "remark", "vendor", "source_file"}
 
@@ -130,67 +127,58 @@ class MacLibrary:
         sets.append("updated_at=?")
         vals.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         vals.append(device_id)
-        conn = self._connect()
-        conn.execute(f"UPDATE devices SET {', '.join(sets)} WHERE id=?", vals)
-        conn.commit()
-        conn.close()
+        with self._conn() as conn:
+            conn.execute(f"UPDATE devices SET {', '.join(sets)} WHERE id=?", vals)
+            conn.commit()
 
     def delete(self, device_id: int):
-        conn = self._connect()
-        conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
-        conn.commit()
-        conn.close()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+            conn.commit()
 
     # ---------- 查询 ----------
     def get_all(self) -> List[dict]:
-        conn = self._connect()
-        rows = conn.execute("SELECT * FROM devices ORDER BY id").fetchall()
-        conn.close()
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM devices ORDER BY id").fetchall()
         return [dict(r) for r in rows]
 
     def get_by_id(self, device_id: int) -> Optional[dict]:
-        conn = self._connect()
-        r = conn.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
-        conn.close()
+        with self._conn() as conn:
+            r = conn.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
         return dict(r) if r else None
 
     def search(self, query: str) -> List[dict]:
         q = f"%{query.strip()}%"
-        conn = self._connect()
-        rows = conn.execute(
-            "SELECT * FROM devices WHERE ip LIKE ? OR mac LIKE ? OR device_type LIKE ? "
-            "OR location LIKE ? OR user LIKE ? OR remark LIKE ? OR vendor LIKE ? "
-            "ORDER BY id",
-            (q, q, q, q, q, q, q),
-        ).fetchall()
-        conn.close()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM devices WHERE ip LIKE ? OR mac LIKE ? OR device_type LIKE ? "
+                "OR location LIKE ? OR user LIKE ? OR remark LIKE ? OR vendor LIKE ? "
+                "ORDER BY id",
+                (q, q, q, q, q, q, q),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def count(self) -> int:
-        conn = self._connect()
-        c = conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
-        conn.close()
+        with self._conn() as conn:
+            c = conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
         return c
 
     def source_files(self) -> List[str]:
-        conn = self._connect()
-        rows = conn.execute(
-            "SELECT DISTINCT source_file FROM devices WHERE source_file != ''"
-        ).fetchall()
-        conn.close()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT source_file FROM devices WHERE source_file != ''"
+            ).fetchall()
         return [r["source_file"] for r in rows]
 
     def clear(self):
-        conn = self._connect()
-        conn.execute("DELETE FROM devices")
-        conn.commit()
-        conn.close()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM devices")
+            conn.commit()
 
     # ---------- 匹配 ----------
     def match(self, ip: str, mac: str = "") -> Optional[dict]:
         """优先 IP 精确匹配，其次 MAC 匹配。返回设备 dict 或 None。"""
-        conn = self._connect()
-        try:
+        with self._conn() as conn:
             if ip:
                 r = conn.execute("SELECT * FROM devices WHERE ip=?", (ip.strip(),)).fetchone()
                 if r:
@@ -200,8 +188,6 @@ class MacLibrary:
                 r = conn.execute("SELECT * FROM devices WHERE mac=?", (mac_norm,)).fetchone()
                 if r:
                     return dict(r)
-        finally:
-            conn.close()
         return None
 
     def is_loaded(self) -> bool:

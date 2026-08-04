@@ -93,29 +93,32 @@ def _find_switches(results) -> List:
     return switches
 
 
-def _discover_lldp_neighbors(switch_ip: str, community: str = "public",
+def _discover_lldp_neighbors(switch_ip: str, communities=None,
                               timeout: float = 1.0) -> List[dict]:
-    """对一台交换机执行 LLDP 邻居发现，返回邻居列表。"""
+    """对一台交换机执行 LLDP 邻居发现。自动尝试多个 community 直到成功。"""
     _init_oids()
+    if communities is None:
+        communities = _default_communities()
+
+    for community in communities:
+        rem_entries = snmp_walk(switch_ip, _LLDP_REM_LOCAL_PORT + ".",
+                                 community=community, timeout=timeout, max_iterations=500)
+        if rem_entries:
+            return _parse_lldp_entries(rem_entries)
+    return []
+
+
+def _parse_lldp_entries(rem_entries: dict) -> List[dict]:
+    """解析 LLDP remTable walk 结果为邻居列表。"""
     neighbors = []
-
-    # Walk lldpRemTable
-    rem_entries = snmp_walk(switch_ip, _LLDP_REM_LOCAL_PORT + ".",
-                             community=community, timeout=timeout, max_iterations=500)
-    if not rem_entries:
-        return neighbors
-
-    # 按 local port 分组
     port_neighbors: Dict[str, dict] = {}
     for oid, (vbytes, vtag) in rem_entries.items():
-        # OID 格式: 1.0.8802.1.1.2.1.4.1.1.X.local_port.remote_index
         parts = oid.split(".")
         if len(parts) < 2:
             continue
         local_port = parts[-2]
         entry = port_neighbors.setdefault(local_port, {"local_port": local_port})
 
-        # Determine column from OID
         oid_prefix = ".".join(parts[:-2])
         if oid_prefix == _LLDP_REM_CHASSIS_ID:
             entry["chassis_id"] = _bytes_to_str(vbytes, vtag)
@@ -139,17 +142,24 @@ def _discover_lldp_neighbors(switch_ip: str, community: str = "public",
     return neighbors
 
 
-def _discover_cdp_neighbors(switch_ip: str, community: str = "public",
+def _discover_cdp_neighbors(switch_ip: str, communities=None,
                              timeout: float = 1.0) -> List[dict]:
-    """对一台 Cisco 交换机执行 CDP 邻居发现。"""
+    """对一台 Cisco 交换机执行 CDP 邻居发现。自动尝试多个 community。"""
     _init_oids()
+    if communities is None:
+        communities = _default_communities()
+
+    for community in communities:
+        rem_entries = snmp_walk(switch_ip, _CDP_CACHE_DEVICE_ID + ".",
+                                 community=community, timeout=timeout, max_iterations=500)
+        if rem_entries:
+            return _parse_cdp_entries(rem_entries)
+    return []
+
+
+def _parse_cdp_entries(rem_entries: dict) -> List[dict]:
+    """解析 CDP cacheTable walk 结果为邻居列表。"""
     neighbors = []
-
-    rem_entries = snmp_walk(switch_ip, _CDP_CACHE_DEVICE_ID + ".",
-                             community=community, timeout=timeout, max_iterations=500)
-    if not rem_entries:
-        return neighbors
-
     port_data: Dict[str, dict] = {}
     for oid, (vbytes, vtag) in rem_entries.items():
         parts = oid.split(".")
@@ -184,6 +194,11 @@ def _discover_cdp_neighbors(switch_ip: str, community: str = "public",
         })
 
     return neighbors
+
+
+def _default_communities() -> List[str]:
+    """返回默认 SNMP community 尝试列表。"""
+    return ["public", "private", ""]
 
 
 def discover_topology(results, progress_callback=None) -> Topology:
@@ -229,10 +244,9 @@ def discover_topology(results, progress_callback=None) -> Topology:
             progress_callback("lldp", idx, len(switches),
                               f"LLDP 发现: {sw.ip} ({sw.hostname or sw.ip})")
 
-        community = "public"
-        neighbors = _discover_lldp_neighbors(sw.ip, community)
+        neighbors = _discover_lldp_neighbors(sw.ip)
         if not neighbors:
-            neighbors = _discover_cdp_neighbors(sw.ip, community)
+            neighbors = _discover_cdp_neighbors(sw.ip)
 
         all_neighbors[sw.ip] = neighbors
 
@@ -296,10 +310,10 @@ def _match_neighbor(remote_id: str, nb: dict, results, node_map: dict) -> Option
                 clean_mac = r.mac.replace(":", "").lower()
                 if clean_mac == clean_id:
                     return r.ip
-            # 也匹配末尾 12 hex digits (有些厂商只给最后 6 字节)
-            if len(clean_id) >= 12 and len(clean_mac) >= 12:
-                if clean_mac[-12:] == clean_id[-12:]:
-                    return r.ip
+                # 也匹配末尾 12 hex digits (有些厂商只给最后 6 字节)
+                if len(clean_id) >= 12 and len(clean_mac) >= 12:
+                    if clean_mac[-12:] == clean_id[-12:]:
+                        return r.ip
 
     # 方法3: 用邻居系统名匹配
     remote_name = nb.get("remote_name", "").lower()

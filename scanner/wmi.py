@@ -72,7 +72,7 @@ def _flatten(raw: dict) -> dict:
     cs = raw.get("ComputerSystem") or {}
     bios = raw.get("BIOS") or {}
     os_ = raw.get("OS") or {}
-    cpu = raw.get(tr("CPU")) or {}
+    cpu = raw.get("CPU") or {}
 
     # Win32_ComputerSystem 在某些版本返回的是单行对象（dict），但 PowerShell
     # Select-Object 在单结果时仍是对象；ConvertTo-Json 默认对单元素数组会拆成对象，

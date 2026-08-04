@@ -1,0 +1,768 @@
+# -*- coding: utf-8 -*-
+"""扫描相关操作混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
+import sys
+import re
+import socket
+import subprocess
+from PyQt5.QtWidgets import (
+    QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QComboBox, QMessageBox
+)
+from PyQt5.QtCore import Qt
+from scanner import (
+    ScanResult, parse_ip_range, PROTOCOL_PORTS, get_ports_for_level,
+    SCAN_LEVEL_LABELS, merge_wmi, merge_netbios
+)
+import audit_log
+import ui_logic
+import history_store
+from ui_threads import ScanThread, MdnsThread, WmiThread, NetbiosThread
+from ui_dialogs import (
+    WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog,
+    ChangeReportDialog
+)
+from conflict_detector import (
+    detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING
+)
+from change_detector import detect_changes, get_change_summary
+from i18n import tr
+
+class ScanMixin:
+    def _open_scan_settings(self):
+        """弹出扫描设置对话框（超时 / 线程），由「扫描 > 扫描设置...」触发。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("扫描设置"))
+        dlg.setMinimumWidth(240)
+        _layout = QFormLayout(dlg)
+        _to = QSpinBox(); _to.setRange(100, 5000); _to.setSingleStep(100)
+        _to.setValue(self.timeout_spin.value())
+        _th = QSpinBox(); _th.setRange(1, 500); _th.setSingleStep(10)
+        _th.setValue(self.threads_spin.value())
+        _layout.addRow(tr("超时 (ms):"), _to)
+        _layout.addRow(tr("线程数:"), _th)
+        _mode = QComboBox()
+        _mode.addItems([tr("TCP 全连接"), tr("TCP SYN 半开"), tr("UDP 探测")])
+        _mode_map = {tr("TCP 全连接"): "connect", tr("TCP SYN 半开"): "syn", tr("UDP 探测"): "udp"}
+        _mode.setCurrentText(
+            {v: k for k, v in _mode_map.items()}.get(self.tcp_scan_mode, tr("TCP 全连接"))
+        )
+        _layout.addRow(tr("端口探测方式:"), _mode)
+        _btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        _btns.accepted.connect(dlg.accept)
+        _btns.rejected.connect(dlg.reject)
+        _layout.addRow(_btns)
+        if dlg.exec_() == QDialog.Accepted:
+            _old_to = self.timeout_spin.value()
+            _old_th = self.threads_spin.value()
+            _old_mode = self.tcp_scan_mode
+            self.timeout_spin.setValue(_to.value())
+            self.threads_spin.setValue(_th.value())
+            self.tcp_scan_mode = _mode_map[_mode.currentText()]
+            self._sync_tcp_mode_menu()
+            self._save_settings()
+            # 审计：记录设置变更
+            _changes = []
+            if _old_to != _to.value():
+                _changes.append(f"超时 {_old_to}→{_to.value()}ms")
+            if _old_th != _th.value():
+                _changes.append(f"线程 {_old_th}→{_th.value()}")
+            if _old_mode != self.tcp_scan_mode:
+                _changes.append(f"探测方式 {_old_mode}→{self.tcp_scan_mode}")
+            self._audit(
+                audit_log.CAT_SYSTEM, tr("修改扫描设置"),
+                " · ".join(_changes) if _changes else tr("无变化"),
+            )
+
+    # --- IP 范围管理 ---
+
+    def _auto_detect_subnet(self):
+        """自动检测本机网段并填入"""
+        import socket as sock
+        try:
+            hostname = sock.gethostname()
+            local_ip = sock.gethostbyname(hostname)
+            parts = local_ip.split(".")
+            if len(parts) == 4:
+                subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+                self.range_input.setText(subnet)
+                self.range_input.selectAll()
+        except Exception:
+            pass
+
+    def _get_default_local_ip(self):
+        """获取本机默认出口 IPv4 地址（非 127.0.0.1）。"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return None
+
+    def _get_local_subnet(self):
+        """获取本机真实子网（含前缀长度），失败回退到 /24。"""
+        import platform as _plat
+        if _plat.system() == "Windows":
+            return self._get_local_subnet_windows()
+        else:
+            return self._get_local_subnet_unix()
+
+    def _get_local_subnet_windows(self):
+        """Windows: 解析 ipconfig 输出。"""
+        try:
+            out = subprocess.check_output(
+                ["ipconfig"], encoding="gbk", errors="ignore",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            out = ""
+        ips = re.findall(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)", out)
+        masks = re.findall(r"子网掩码[\.:\s]+([\d.]+)", out)
+        default_ip = self._get_default_local_ip()
+        if ips and masks and len(ips) == len(masks):
+            if default_ip:
+                for ip, mask in zip(ips, masks):
+                    if ip == default_ip:
+                        net, prefix = self._ip_mask_to_subnet(ip, mask)
+                        if net:
+                            return f"{net}/{prefix}"
+            for ip, mask in zip(ips, masks):
+                if ip.startswith("127.") or self._is_virtual_adapter_ip(ip):
+                    continue
+                net, prefix = self._ip_mask_to_subnet(ip, mask)
+                if net:
+                    return f"{net}/{prefix}"
+        if default_ip:
+            parts = default_ip.split(".")
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        return None
+
+    def _get_local_subnet_unix(self):
+        """Linux/macOS: 解析 ip addr / ip route 输出。"""
+        try:
+            out = subprocess.check_output(["ip", "route", "show", "default"], timeout=5).decode()
+        except Exception:
+            try:
+                out = subprocess.check_output(["ip", "addr", "show"], timeout=5).decode()
+            except Exception:
+                out = ""
+
+        # 优先取默认路由的源 IP 和接口
+        m = re.search(r"src\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if m:
+            default_ip = m.group(1)
+            # 从 ip addr 中找对应接口的前缀长度
+            try:
+                addr_out = subprocess.check_output(["ip", "addr", "show"], timeout=5).decode()
+                # 找包含此 IP 的行: "inet 192.168.1.1/24"
+                for line in addr_out.splitlines():
+                    if default_ip in line:
+                        pm = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+                        if pm:
+                            return f"{pm.group(1)}/{pm.group(2)}"
+            except Exception:
+                pass
+            parts = default_ip.split(".")
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+
+        # 回退：从 ip addr 取第一个非回环接口
+        try:
+            addr_out = subprocess.check_output(["ip", "addr", "show"], timeout=5).decode()
+        except Exception:
+            addr_out = out
+        for line in addr_out.splitlines():
+            pm = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+            if pm and not pm.group(1).startswith("127."):
+                return f"{pm.group(1)}/{pm.group(2)}"
+
+        # 最后回退
+        default_ip = self._get_default_local_ip()
+        if default_ip:
+            parts = default_ip.split(".")
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        return None
+
+    @staticmethod
+    def _ip_mask_to_subnet(ip: str, mask: str):
+        """由 IPv4 与子网掩码计算网段地址与前缀长度，失败返回 (None, 0)。"""
+        return ui_logic.ip_mask_to_subnet(ip, mask)
+
+    @staticmethod
+    def _is_virtual_adapter_ip(ip: str) -> bool:
+        """粗略判断是否为虚拟/容器网卡使用的私有网段（VirtualBox/Docker/链路本地等）。"""
+        return ui_logic.is_virtual_adapter_ip(ip)
+
+    def _get_c_class_subnet(self):
+        """获取本机 IP 的 C 类子网 /24。"""
+        ip = self._get_default_local_ip()
+        if ip:
+            parts = ip.split(".")
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        return None
+
+    def _scan_local_subnet(self):
+        """扫描本机所在子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
+        subnet = self._get_local_subnet()
+        if subnet:
+            self._fill_subnet_range(subnet)
+        else:
+            QMessageBox.warning(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
+
+    def _scan_c_class_subnet(self):
+        """扫描 C 类子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
+        subnet = self._get_c_class_subnet()
+        if subnet:
+            self._fill_subnet_range(subnet)
+        else:
+            QMessageBox.warning(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
+
+    def _fill_subnet_range(self, subnet: str):
+        """将网段填入范围输入框并静默加入待扫列表（不弹重复提示、不自动扫描）。
+
+        仿 Advanced IP Scanner：点击快捷按钮只是把 IP 范围放进输入框，
+        用户确认后再点"扫描"按钮才开始。
+        """
+        self.range_input.setText(subnet)
+        # 若尚未在列表中则静默添加；已存在则不重复添加、不弹窗
+        if subnet not in self.ip_range_items and parse_ip_range(subnet):
+            self.ip_range_items.append(subnet)
+            self._update_range_list()
+        self.range_input.setFocus()
+
+
+    def _add_ip_range(self):
+        text = self.range_input.text().strip()
+        if not text:
+            return
+
+        # 一行内支持逗号 / 空格 / 换行 / 分号 / 制表符分隔多个网段 (类 Advanced IP Scanner)
+        tokens = [t.strip() for t in re.split(r"[\s,;]+", text) if t.strip()]
+
+        added, dup = 0, 0
+        invalid = []
+        added_tokens = []
+        for tok in tokens:
+            if not parse_ip_range(tok):
+                invalid.append(tok)
+                continue
+            if tok in self.ip_range_items:
+                dup += 1
+                continue
+            self.ip_range_items.append(tok)
+            added_tokens.append(tok)
+            added += 1
+
+        if added > 0:
+            self._update_range_list()
+            self.range_input.clear()
+            self.range_input.setFocus()
+            # 审计：记录添加网段
+            self._audit(audit_log.CAT_RANGE, tr("添加网段"), ", ".join(added_tokens))
+
+        if added == 0:
+            # 全部无效或全部重复，未新增任何网段
+            if invalid:
+                QMessageBox.warning(
+                    self, tr("格式错误"),
+                    tr("以下项无法解析:\n  ") + "\n  ".join(invalid) +
+                    tr("\n\n支持格式 (可一行多个, 用逗号/空格/换行分隔):\n") + "  192.168.1.0/24\n  192.168.1.1-254\n  192.168.1.1"
+                )
+            elif dup:
+                QMessageBox.information(self, tr("提示"), tr("这些网段都已添加过了"))
+            return
+
+        # 有成功添加时，仅对"重复 / 无效"做补充提示，避免无效输入被静默吞掉
+        if dup or invalid:
+            msg = []
+            if dup:
+                msg.append(f"已跳过 {dup} 个重复网段")
+            if invalid:
+                msg.append(tr("以下项无法解析, 已忽略:\n  ") + "\n  ".join(invalid))
+            QMessageBox.information(self, tr("提示"), "\n".join(msg))
+
+    def _clear_ranges(self):
+        if self.ip_range_items:
+            self._audit(audit_log.CAT_RANGE, tr("清空网段"), f"移除 {len(self.ip_range_items)} 个网段")
+        self.ip_range_items.clear()
+        self._update_range_list()
+
+    def _start_scan(self):
+        if not self.ip_range_items:
+            text = self.range_input.text().strip()
+            if text:
+                self._add_ip_range()
+            if not self.ip_range_items:
+                QMessageBox.warning(self, tr("提示"), tr("请先添加至少一个 IP 范围"))
+                return
+
+        self.scan_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.act_export.setEnabled(False)
+        self.act_clear.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.table.setSortingEnabled(False)
+        self.table.clear()
+        self._ip_item_map.clear()
+
+        self.scan_thread = ScanThread(
+            self.ip_range_items,
+            timeout_ms=self.timeout_spin.value(),
+            max_threads=self.threads_spin.value(),
+            scan_ports=self.port_scan_check.isChecked(),
+            protocols=self.selected_protocols,
+            tcp_scan_mode=self.tcp_scan_mode,
+            mdns_discovery=self.mdns_check.isChecked(),
+            ports=get_ports_for_level(self.scan_level) if self.port_scan_check.isChecked() else None,
+        )
+        # 启动即持久化当前扫描参数与网段 (P2-2)
+        self._save_settings()
+        self.scan_thread.progress.connect(self._on_scan_progress, Qt.QueuedConnection)
+        self.scan_thread.result_ready.connect(self._on_scan_result, Qt.QueuedConnection)
+        self.scan_thread.finished_signal.connect(self._on_scan_finished, Qt.QueuedConnection)
+        self.scan_thread.log_signal.connect(lambda msg: self.status_bar.showMessage(msg), Qt.QueuedConnection)
+        # 审计：记录扫描开始
+        total_ips = sum(len(parse_ip_range(r)) for r in self.ip_range_items)
+        self._audit(
+            audit_log.CAT_SCAN, tr("开始扫描"),
+            f"范围: {', '.join(self.ip_range_items)} ({total_ips} 个IP) | "
+            f"超时 {self.timeout_spin.value()}ms · 线程 {self.threads_spin.value()} · "
+            f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}"
+            f"{tr(' · 级别 ') + SCAN_LEVEL_LABELS.get(self.scan_level, self.scan_level) if self.port_scan_check.isChecked() else ''}",
+        )
+        self.scan_thread.start()
+
+    def _stop_scan(self):
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.stop()
+            self.status_bar.showMessage(tr("正在停止扫描..."))
+            self._audit(audit_log.CAT_SCAN, tr("停止扫描"), tr("用户手动中止扫描"))
+            self.scan_thread.wait(3000)
+
+    def _toggle_protocol(self, proto, checked):
+        """菜单勾选/取消协议，实时更新 selected_protocols 并提示。"""
+        if checked:
+            if proto not in self.selected_protocols:
+                self.selected_protocols.append(proto)
+        else:
+            if proto in self.selected_protocols:
+                self.selected_protocols.remove(proto)
+        self.status_bar.showMessage(
+            f"已选择协议: {', '.join(self.selected_protocols) if self.selected_protocols else tr('无')}"
+        )
+
+    def _set_tcp_mode(self, mode: str):
+        """切换端口探测方式（全连接 / SYN 半开 / UDP）并持久化。"""
+        self.tcp_scan_mode = mode
+        self._sync_tcp_mode_menu()
+        self._save_settings()
+        _label = {"connect": tr("TCP 全连接"), "syn": tr("TCP SYN 半开"), "udp": tr("UDP 探测")}.get(mode, mode)
+        _tip = ""
+        if mode in ("syn", "udp"):
+            _tip = tr("（需管理员权限；Windows 还需 Npcap，否则自动回退全连接）")
+        self.status_bar.showMessage(f"端口探测方式: {_label}{_tip}")
+
+    def _sync_tcp_mode_menu(self):
+        """同步"端口探测方式"子菜单的勾选态到当前 tcp_scan_mode。"""
+        for _a in self.tcp_mode_group.actions():
+            _a.setChecked(_a.data() == self.tcp_scan_mode)
+
+    def _set_scan_level(self, level: str):
+        """切换扫描级别（快速/标准/全端口）并持久化，决定端口探测范围。"""
+        if level not in ("quick", "standard", "all"):
+            level = "quick"
+        self.scan_level = level
+        self._sync_scan_level_menu()
+        self._save_settings()
+        _label = SCAN_LEVEL_LABELS.get(level, level)
+        _n = len(get_ports_for_level(level))
+        self.status_bar.showMessage(f"扫描级别: {_label} · 端口数 {_n}")
+
+    def _sync_scan_level_menu(self):
+        """同步"扫描级别"子菜单的勾选态到当前 scan_level。"""
+        for _a in self.scan_level_group.actions():
+            _a.setChecked(_a.data() == self.scan_level)
+
+    def _on_scan_progress(self, current, total, ip):
+        pct = int(current / total * 100) if total > 0 else 0
+        self.progress_bar.setValue(pct)
+        self.status_bar.showMessage(f"扫描中 [{current}/{total}] {ip} ...")
+
+    def _on_scan_result(self, result: ScanResult):
+        # 地址库匹配放在主线程执行 (SQLite 连接不能跨线程使用)
+        if self.library and self.library.is_loaded():
+            try:
+                match = self.library.match(result.ip, result.mac)
+                if match:
+                    result.device_type = match.get("device_type", "")
+                    result.location = match.get("location", "")
+                    result.user = match.get("user", "")
+                    result.remark = match.get("remark", "")
+                    result.excel_matched = True
+            except Exception as e:
+                print(tr("地址库匹配出错:"), e)
+        self._upsert_table_row(result)
+
+    def _on_scan_finished(self, results):
+        try:
+            self.all_results = results
+            # 变更检测：在保存新快照前，对比上一次快照
+            self._run_change_detection(silent=True)
+            # 保存历史快照用于对比 (P2-5)
+            self._save_snapshot(results)
+
+            # 先关闭排序，避免批量添加时的性能问题
+            self.table.setSortingEnabled(False)
+
+            # 全量刷新结果行：新设备入表，已有设备同步刷新
+            # （扫描末尾的 mDNS 发现会为已有设备追加服务子项，需重渲染才能显示）
+            for result in results:
+                self._upsert_table_row(result)
+
+            # 应用筛选（默认"仅在线"：扫描完成后隐藏离线终端）
+            self._filter_results()
+
+            # 端口探测方式回退告警（如 SYN/UDP 被系统拒绝后回退全连接）
+            _warns = getattr(self.scan_thread.scanner, "warnings", []) if self.scan_thread else []
+            if _warns:
+                self.status_bar.showMessage("；".join(_warns))
+                for _w in _warns:
+                    print("[WARN]", _w)
+
+            # 恢复排序
+            self.table.setSortingEnabled(True)
+
+            self.scan_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.act_export.setEnabled(True)
+            self.act_clear.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            self._update_stats()
+            # 审计：记录扫描完成
+            _st = ui_logic.count_scan_status(results)
+            self._audit(
+                audit_log.CAT_SCAN, tr("扫描完成"),
+                f"共 {_st['total']} 个IP · 在线 {_st['online']} · 离线 {_st['offline']} · "
+                f"未知 {_st['unknown']}",
+            )
+            # 扫描完成后自动执行冲突检测（静默，仅更新标记和状态栏）
+            self._run_conflict_detection(silent=True)
+            self.status_bar.showMessage(tr("扫描完成"))
+        except Exception as e:
+            sys.stderr.write(f"[ERR] _on_scan_finished 异常: {e}\n")
+            import traceback
+            traceback.print_exc()
+            self.scan_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.act_export.setEnabled(True)
+            self.act_clear.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            self.status_bar.showMessage(f"扫描异常: {e}")
+
+    def _run_conflict_detection(self, silent=False):
+        """执行 IP 冲突检测。
+
+        Args:
+            silent: True 时仅更新树视图标记和状态栏，不弹对话框（扫描后自动调用）；
+                    False 时弹出冲突报告对话框（菜单手动触发）。
+        """
+        if not self.all_results:
+            if not silent:
+                QMessageBox.information(self, tr("冲突检测"), tr("暂无扫描结果，请先执行扫描。"))
+            return
+
+        library = self.library if self.library.is_loaded() else None
+        self._conflicts = detect_conflicts(self.all_results, library)
+        self._conflict_ips = get_conflict_ips(self._conflicts)
+
+        # 刷新树视图中所有行的冲突标记
+        self._refresh_conflict_marks()
+
+        # 更新统计栏
+        self._update_stats()
+
+        # 审计：记录冲突检测结果
+        _cf = ui_logic.count_conflicts(self._conflicts)
+        self._audit(
+            audit_log.CAT_CONFLICT, tr("冲突检测"),
+            f"严重 {_cf['high']} · 警告 {_cf['warning']} · 提示 {_cf['info']}"
+            + (tr("（未发现冲突）") if not self._conflicts else ""),
+        )
+
+        if silent:
+            # 静默模式：仅在状态栏提示冲突数量
+            high = sum(1 for c in self._conflicts if c.severity == SEVERITY_HIGH)
+            warn = sum(1 for c in self._conflicts if c.severity == SEVERITY_WARNING)
+            if high or warn:
+                parts = []
+                if high:
+                    parts.append(f"{high} 严重")
+                if warn:
+                    parts.append(f"{warn} 警告")
+                self.status_bar.showMessage(f"冲突检测完成：{' · '.join(parts)}（菜单 → 扫描 → 冲突检测 查看详情）")
+            return
+
+        # 手动触发：弹出报告对话框
+        if not self._conflicts:
+            QMessageBox.information(self, tr("冲突检测"), tr("未检测到任何冲突，网络状态良好。"))
+            return
+        dlg = ConflictReportDialog(self._conflicts, parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _run_change_detection(self, silent=False):
+        """执行资产变更检测：对比当前扫描结果与上一次快照。
+
+        Args:
+            silent: True 时仅更新状态栏（扫描后自动调用）；
+                    False 时弹出变更报告对话框（菜单手动触发）。
+        """
+        if not self.all_results:
+            if not silent:
+                QMessageBox.information(self, tr("变更检测"), tr("暂无扫描结果，请先执行扫描。"))
+            return
+
+        # 加载最近一次快照作为"上次"基准
+        try:
+            snapshots = history_store.list_snapshots(self.history_db)
+            if not snapshots:
+                self._changes = []
+                if not silent:
+                    QMessageBox.information(self, tr("变更检测"), tr("没有历史快照可供对比（首次扫描）。"))
+                return
+            last_snap = history_store.get_snapshot(snapshots[-1]["id"], self.history_db)
+            prev_devices = last_snap["devices"] if last_snap else []
+        except Exception:
+            prev_devices = []
+
+        if not prev_devices:
+            self._changes = []
+            if not silent:
+                QMessageBox.information(self, tr("变更检测"), tr("上次快照为空，无法对比。"))
+            return
+
+        self._changes = detect_changes(self.all_results, prev_devices)
+
+        # 审计：记录变更检测
+        summary = get_change_summary(self._changes)
+        self._audit(audit_log.CAT_SCAN, tr("变更检测"), summary)
+
+        if silent:
+            # 静默模式：有严重/警告变更时在状态栏提示
+            high = sum(1 for c in self._changes if c.severity == "high")
+            warn = sum(1 for c in self._changes if c.severity == "warning")
+            if high or warn:
+                parts = []
+                if high:
+                    parts.append(f"{high} 严重")
+                if warn:
+                    parts.append(f"{warn} 警告")
+                self.status_bar.showMessage(
+                    f"资产变更：{' · '.join(parts)}（菜单 → 扫描 → 变更检测 查看详情）"
+                )
+            return
+
+        # 手动触发：弹出报告对话框
+        if not self._changes:
+            QMessageBox.information(self, tr("变更检测"), tr("与上次扫描相比无任何变更，网络状态稳定。"))
+            return
+        dlg = ChangeReportDialog(self._changes, parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+
+    def _show_subnet_utilization(self):
+        """弹出子网利用率对话框。"""
+        if not self.all_results:
+            QMessageBox.information(self, tr("子网利用率"), tr("暂无扫描结果，请先执行扫描。"))
+            return
+        dlg = SubnetUtilizationDialog(self.all_results, parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _run_mdns_discovery(self):
+        """独立触发 mDNS/DNS-SD 组播发现（不依赖扫描），发现结果合并到树与 all_results。"""
+        if self.mdns_thread and self.mdns_thread.isRunning():
+            self.status_bar.showMessage(tr("mDNS 发现进行中..."))
+            return
+        self.mdns_thread = MdnsThread(timeout=2.5)
+        self.mdns_thread.log_signal.connect(
+            lambda m: self.status_bar.showMessage(m), Qt.QueuedConnection
+        )
+        self.mdns_thread.finished_signal.connect(
+            self._on_mdns_finished, Qt.QueuedConnection
+        )
+        self.mdns_thread.start()
+
+    def _on_mdns_finished(self, mdns_map: dict):
+        """处理 mDNS 发现结果：合并到结果树与 all_results（去重）。"""
+        try:
+            self.table.setSortingEnabled(False)
+            added = 0
+            for ip, info in mdns_map.items():
+                names = sorted(info.get("names", set()))
+                services = sorted(info.get("services", set()))
+                host = names[0].rstrip(".") if names else ""
+                existing = next((r for r in self.all_results if r.ip == ip), None)
+                if existing is None:
+                    r = ScanResult(ip=ip, status="online",
+                                   discovery_method="mdns", hostname=host)
+                    self.all_results.append(r)
+                else:
+                    r = existing
+                    r.status = "online"
+                    if not r.discovery_method:
+                        r.discovery_method = "mdns"
+                    if not r.hostname and host:
+                        r.hostname = host
+                if services and tr("mDNS") not in r.services:
+                    r.services.append(tr("mDNS"))
+                    r.service_details.append({
+                        "proto": tr("mDNS"), "port": 0, "banner": ", ".join(services)
+                    })
+                self._upsert_table_row(r)
+                added += 1
+            self._filter_results()
+            self.table.setSortingEnabled(True)
+            self._update_stats()
+            if added:
+                self.status_bar.showMessage(f"mDNS 发现 {added} 个设备（已合并到结果）")
+                self.act_export.setEnabled(True)
+            else:
+                self.status_bar.showMessage(
+                    tr("mDNS 未发现新设备（可能网内无 mDNS 设备 / 组播端口被占用）")
+                )
+        except Exception as e:
+            sys.stderr.write(f"[ERR] _on_mdns_finished: {e}\n")
+            self.status_bar.showMessage(f"mDNS 处理异常: {e}")
+
+    # --- WMI 设备识别 ---
+    def _run_wmi_identification(self, targets=None):
+        """对目标 Windows 设备执行 WMI 识别。
+
+        targets: IP 列表；为 None 时对全部在线、疑似 Windows 的设备批量识别。
+        无凭据时弹窗采集；勾选保存则用 DPAPI 加密持久化到 ipscanner.ini。
+        """
+        # 1) 凭据采集（仅当内存中尚无有效凭据）
+        if not self.wmi_creds.has_creds():
+            dlg = WmiCredentialDialog(
+                self, saved_username=self.wmi_creds.username,
+                saved_domain=self.wmi_creds.domain,
+            )
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            user, pwd, domain, save = dlg.get_credentials()
+            if not user or not pwd:
+                QMessageBox.warning(self, tr("WMI 识别"), tr("用户名和密码不能为空"))
+                return
+            self.wmi_creds.set(user, pwd, domain)
+            if save:
+                self.wmi_creds.save_to(self.settings)
+
+        # 2) 确定目标
+        _explicit = targets is not None
+        targets = ui_logic.select_identification_targets(self.all_results, targets, tr("Windows"))
+        if not targets:
+            if not _explicit:
+                QMessageBox.information(
+                    self, tr("WMI 识别"),
+                    tr("没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n" "可先用普通扫描发现设备，再对选中设备执行 WMI 识别。")
+                )
+            else:
+                QMessageBox.information(self, tr("WMI 识别"), tr("所选设备不在线，无法识别。"))
+            return
+
+        # 3) 后台线程逐台识别
+        if self.wmi_thread and self.wmi_thread.isRunning():
+            self.status_bar.showMessage(tr("WMI 识别进行中，请稍候..."))
+            return
+        self.status_bar.showMessage(f"WMI 识别启动：共 {len(targets)} 台设备...")
+        self.wmi_thread = WmiThread(targets, self.wmi_creds)
+        self.wmi_thread.progress_signal.connect(
+            lambda i, t: self.status_bar.showMessage(f"WMI 识别 [{i}/{t}] ...")
+        )
+        self.wmi_thread.result_signal.connect(self._on_wmi_result)
+        self.wmi_thread.finished_signal.connect(self._on_wmi_finished)
+        self.wmi_thread.start()
+
+    def _on_wmi_result(self, ip: str, wmi_dict: dict):
+        """单台设备 WMI 结果回传：合并信息并刷新表格行。"""
+        result = next((r for r in self.all_results if r.ip == ip), None)
+        if result is None:
+            return
+        self._apply_wmi(result, wmi_dict)
+        self._upsert_table_row(result)
+
+    def _on_wmi_finished(self, summary: dict):
+        ok = summary.get("ok", 0)
+        fail = summary.get("fail", 0)
+        total = summary.get("total", 0)
+        msg = ui_logic.format_identify_summary("WMI", ok, fail, total, "权限/防火墙/非 Windows 等")
+        self._audit(
+            audit_log.CAT_DEVICE, tr("WMI 识别"),
+            f"共 {total} 台 · 成功 {ok} · 失败 {fail}",
+        )
+        self.status_bar.showMessage(msg)
+        self._update_stats()
+
+
+    def _apply_wmi(self, result: ScanResult, d: dict):
+        """把 WMI 查询结果合并进 ScanResult，并用权威信息补全设备指纹。"""
+        merge_wmi(result, d)
+
+    # --- NetBIOS 轻量识别（零凭据、不需管理员，作为 WMI 的轻量补充）---
+
+    def _run_netbios_identification(self, targets=None):
+        """对目标设备执行 NetBIOS 轻量识别（UDP/137 NBSTAT，零凭据、不需管理员）。
+
+        targets: IP 列表；为 None 时对全部在线、疑似 Windows 的设备批量识别。
+        无需凭据，直接启动后台线程逐台查询。
+        """
+        _explicit = targets is not None
+        targets = ui_logic.select_identification_targets(self.all_results, targets, tr("Windows"))
+        if not targets:
+            if not _explicit:
+                QMessageBox.information(
+                    self, tr("NetBIOS 识别"),
+                    tr("没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n" "可先扫描发现设备，再对选中设备执行 NetBIOS 识别。")
+                )
+            else:
+                QMessageBox.information(self, tr("NetBIOS 识别"), tr("所选设备不在线，无法识别。"))
+            return
+
+        if self.netbios_thread and self.netbios_thread.isRunning():
+            self.status_bar.showMessage(tr("NetBIOS 识别进行中，请稍候..."))
+            return
+        self.status_bar.showMessage(f"NetBIOS 识别启动：共 {len(targets)} 台设备...")
+        self.netbios_thread = NetbiosThread(targets, timeout=1.5)
+        self.netbios_thread.progress_signal.connect(
+            lambda i, t: self.status_bar.showMessage(f"NetBIOS 识别 [{i}/{t}] ...")
+        )
+        self.netbios_thread.result_signal.connect(self._on_netbios_result)
+        self.netbios_thread.finished_signal.connect(self._on_netbios_finished)
+        self.netbios_thread.start()
+
+    def _on_netbios_result(self, ip: str, d: dict):
+        """单台设备 NetBIOS 结果回传：合并信息并刷新表格行。"""
+        result = next((r for r in self.all_results if r.ip == ip), None)
+        if result is None:
+            return
+        self._apply_netbios(result, d)
+        self._upsert_table_row(result)
+
+    def _on_netbios_finished(self, summary: dict):
+        ok = summary.get("ok", 0)
+        fail = summary.get("fail", 0)
+        total = summary.get("total", 0)
+        msg = ui_logic.format_identify_summary("NetBIOS", ok, fail, total, "防火墙/非 Windows/未开放 137 等")
+        self._audit(
+            audit_log.CAT_DEVICE, tr("NetBIOS 识别"),
+            f"共 {total} 台 · 成功 {ok} · 失败 {fail}",
+        )
+        self.status_bar.showMessage(msg)
+        self._update_stats()
+
+    def _apply_netbios(self, result: ScanResult, d: dict):
+        """把 NetBIOS 查询结果合并进 ScanResult，并用权威信息补全设备指纹。"""
+        merge_netbios(result, d)
+
+
+

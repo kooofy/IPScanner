@@ -5,15 +5,17 @@
 用于操作回溯与安全审计。
 
 - 单表 audit_logs：ts / category / action / detail
-- 支持按分类、关键词查询，保留上限自动裁剪（默认最近 1000 条）
+- 支持按分类，关键词查询，保留上限自动裁剪（默认最近 1000 条）
 
 纯标准库 + sqlite3，无 PyQt 依赖，便于单元测试。
 """
+import contextlib
 import os
-import sqlite3
 import time
 from app_paths import data_dir
 from i18n import tr
+
+import db_util
 
 DB_PATH = os.path.join(data_dir(), "audit_log.db")
 
@@ -34,14 +36,7 @@ CATEGORIES = [
 
 DEFAULT_MAX_KEEP = 1000
 
-
-def _connect(db_path=None):
-    path = db_path or DB_PATH
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    _init_db(conn)
-    return conn
+_PRAGMAS = ("PRAGMA journal_mode=WAL",)
 
 
 def _init_db(conn):
@@ -61,17 +56,22 @@ def _init_db(conn):
     conn.commit()
 
 
+@contextlib.contextmanager
+def _conn(db_path=None):
+    """复用进程级单例连接（按 db_path 缓存，线程安全）。"""
+    path = db_path or DB_PATH
+    with db_util.connection(path, init_fn=_init_db, pragmas=_PRAGMAS) as c:
+        yield c
+
+
 def log_event(category, action, detail="", db_path=None, max_keep=DEFAULT_MAX_KEEP):
     """记录一条审计事件，并按上限裁剪旧记录。"""
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         conn.execute(
             "INSERT INTO audit_logs (ts, category, action, detail) VALUES (?,?,?,?)",
             (time.time(), category, action, detail),
         )
         conn.commit()
-    finally:
-        conn.close()
     prune(max_keep=max_keep, db_path=db_path)
 
 
@@ -81,8 +81,7 @@ def query_logs(category=None, keyword=None, limit=DEFAULT_MAX_KEEP, db_path=None
     - category: 仅该分类（None = 全部）
     - keyword:  在 action / detail / category 中模糊匹配（None = 全部）
     """
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         sql = "SELECT id, ts, category, action, detail FROM audit_logs WHERE 1=1"
         args = []
         if category:
@@ -95,40 +94,31 @@ def query_logs(category=None, keyword=None, limit=DEFAULT_MAX_KEEP, db_path=None
         sql += " ORDER BY ts DESC, id DESC LIMIT ?"
         args.append(limit)
         rows = conn.execute(sql, args).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    return [dict(r) for r in rows]
 
 
 def count_logs(category=None, db_path=None) -> int:
     """统计日志条数（可按分类过滤）。"""
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         if category:
             return conn.execute(
                 "SELECT COUNT(*) AS c FROM audit_logs WHERE category=?", (category,)
             ).fetchone()["c"]
         return conn.execute("SELECT COUNT(*) AS c FROM audit_logs").fetchone()["c"]
-    finally:
-        conn.close()
 
 
 def clear_logs(db_path=None):
     """清空全部审计日志。"""
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         conn.execute("DELETE FROM audit_logs")
         conn.commit()
-    finally:
-        conn.close()
 
 
 def prune(max_keep=DEFAULT_MAX_KEEP, db_path=None):
     """仅保留最近 max_keep 条日志，删除更早的。"""
     if max_keep is None or max_keep <= 0:
         return
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM audit_logs").fetchone()["c"]
         if count > max_keep:
             excess = count - max_keep
@@ -138,5 +128,3 @@ def prune(max_keep=DEFAULT_MAX_KEEP, db_path=None):
                 (excess,),
             )
             conn.commit()
-    finally:
-        conn.close()

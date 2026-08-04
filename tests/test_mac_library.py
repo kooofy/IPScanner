@@ -15,6 +15,10 @@ class TestMacLibrary(unittest.TestCase):
         self.db = os.path.join(self.tmp, "mac_library.db")
         self.lib = MacLibrary(self.db)
 
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
     def test_add_and_get(self):
         self.lib.add(ip="1.1.1.1", mac="AA:BB:CC:DD:EE:FF", device_type="电脑")
         rows = self.lib.get_all()

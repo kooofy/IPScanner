@@ -35,6 +35,8 @@ class TestHistoryQuery(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+        import db_util
+        db_util.close_connection(self.db)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_empty(self):

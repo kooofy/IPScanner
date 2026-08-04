@@ -10,23 +10,17 @@
 
 纯标准库 + sqlite3，无 PyQt 依赖，便于单元测试。
 """
+import contextlib
 import ipaddress
 import os
-import sqlite3
 import time
 from app_paths import data_dir
 
+import db_util
+
 DB_PATH = os.path.join(data_dir(), "scan_history.db")
 
-
-def _connect(db_path=None):
-    path = db_path or DB_PATH
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    _init_db(conn)
-    return conn
+_PRAGMAS = ("PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON")
 
 
 def _init_db(conn):
@@ -60,6 +54,14 @@ def _init_db(conn):
     conn.commit()
 
 
+@contextlib.contextmanager
+def _conn(db_path=None):
+    """复用进程级单例连接（按 db_path 缓存，线程安全）。"""
+    path = db_path or DB_PATH
+    with db_util.connection(path, init_fn=_init_db, pragmas=_PRAGMAS) as c:
+        yield c
+
+
 def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int:
     """保存一条快照（devices 为设备字典列表）。返回新快照 id。
 
@@ -67,8 +69,7 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
     device_class/os_guess/open_ports/location/user/remark（缺字段按空串处理）。
     """
     ts = time.time() if ts is None else ts
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO snapshots (time, device_count, note) VALUES (?,?,?)",
             (ts, len(devices), note),
@@ -89,28 +90,22 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
                 ),
             )
         conn.commit()
-    finally:
-        conn.close()
     prune(max_keep=max_keep, db_path=db_path)
     return sid
 
 
 def list_snapshots(db_path=None) -> list:
     """返回快照元信息列表（id, time, device_count, note），按 id 升序（旧->新）。"""
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         rows = conn.execute(
             "SELECT id, time, device_count, note FROM snapshots ORDER BY id ASC"
         ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_snapshot(snapshot_id, db_path=None) -> dict:
     """返回完整快照 {"time": float, "devices": [...]}；不存在返回 None。"""
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         row = conn.execute(
             "SELECT id, time FROM snapshots WHERE id=?", (snapshot_id,)
         ).fetchone()
@@ -122,9 +117,7 @@ def get_snapshot(snapshot_id, db_path=None) -> dict:
             "ORDER BY id ASC",
             (snapshot_id,),
         ).fetchall()
-        return {"time": row["time"], "devices": [dict(d) for d in devs]}
-    finally:
-        conn.close()
+    return {"time": row["time"], "devices": [dict(d) for d in devs]}
 
 
 def load_all(db_path=None) -> list:
@@ -141,8 +134,7 @@ def prune(max_keep=20, db_path=None):
     """仅保留最近 max_keep 条快照，删除更早的（含其 devices 行）。"""
     if max_keep is None or max_keep <= 0:
         return
-    conn = _connect(db_path)
-    try:
+    with _conn(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM snapshots").fetchone()["c"]
         if count > max_keep:
             excess = count - max_keep
@@ -152,8 +144,6 @@ def prune(max_keep=20, db_path=None):
                 (excess,),
             )
             conn.commit()
-    finally:
-        conn.close()
 
 
 def migrate_from_json(json_path, db_path=None) -> int:

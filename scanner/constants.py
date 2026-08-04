@@ -11,7 +11,7 @@ from i18n import tr
 """
 
 
-_IS_WINDOWS = platform.system() == tr("Windows")
+_IS_WINDOWS = platform.system() == "Windows"
 
 
 _CMD_ENCODING = None

@@ -13,8 +13,15 @@ os.environ.setdefault("QT_NO_DIRECTWRITE", "1")
 os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSettings
 from PyQt5.QtGui import QFont, QIcon, QPixmap
+
+# i18n 必须在 import main_window 之前初始化：main_window → scanner/constants.py、
+# audit_log.py、conflict_detector.py 等模块在顶层调用 tr()，若翻译表未加载，
+# 这些常量会被冻结为恒等（中文），后续 i18n.init() 无法回溯重算。
+import i18n
+_saved_lang = QSettings("ipscanner.ini", QSettings.IniFormat).value("ui/language", "")
+i18n.init(_saved_lang if _saved_lang else None)
 
 from main_window import MainWindow, STYLE_SHEET
 from i18n import tr
@@ -90,12 +97,6 @@ class SafeApp(QApplication):
 # ── 入口 ──────────────────────────────────────────────────────
 
 def main():
-    import i18n
-    # 优先读取用户保存的语言偏好，否则自动检测系统语言
-    from PyQt5.QtCore import QSettings
-    _settings = QSettings("ipscanner.ini", QSettings.IniFormat)
-    _saved_lang = _settings.value("ui/language", "")
-    i18n.init(_saved_lang if _saved_lang else None)
 
     # 高 DPI 必须在 QApplication 实例创建之前设置，否则 Qt 会打印警告
     # 并在某些 Windows 环境导致事件循环里 access violation 闪退。

@@ -258,12 +258,12 @@ def simplify_vendor_name(vendor: str) -> str:
 
 def generate_sqlite_db(oui_dict: dict, output_path: str, use_simple_names: bool = True):
     """
-    ?? SQLite ?????????: oui(prefix TEXT PRIMARY KEY, vendor TEXT NOT NULL)
+    生成 SQLite OUI 数据库: oui(prefix TEXT PRIMARY KEY, vendor TEXT NOT NULL)
 
     Args:
-        oui_dict: OUI ??
-        output_path: ?? .db ????
-        use_simple_names: ???????????
+        oui_dict: OUI 字典
+        output_path: 输出 .db 文件路径
+        use_simple_names: 是否使用简化后的厂商名称
     """
     import sqlite3
 
@@ -291,30 +291,40 @@ def generate_sqlite_db(oui_dict: dict, output_path: str, use_simple_names: bool 
     conn.close()
 
     size_kb = os.path.getsize(output_path) / 1024
-    print(f"??? {output_path}?? {count:,} ??? ({size_kb:.0f} KB)")
+    print(f"已生成 {output_path}，共 {count:,} 条记录 ({size_kb:.0f} KB)")
 
 
 
 
 def main():
-    oui_txt_path = r"C:\Users\Koofy\Desktop\oui.txt"
-    output_path = r"d:\Tools\IPScanner\oui.db"
+    import argparse
+    from app_paths import data_dir
 
-    print(f"???? {oui_txt_path} ...")
-    oui_dict = parse_ieee_oui(oui_txt_path)
-    print(f"?????? {len(oui_dict)} ? OUI ??")
+    default_db = os.path.join(data_dir(), "oui.db")
+    default_txt = os.path.join(data_dir(), "oui.txt")
 
-    # ???10???
-    print("\n?10???:")
-    for i, (oui, vendor) in enumerate(sorted(oui_dict.items())[:10]):
+    parser = argparse.ArgumentParser(description="解析 IEEE oui.txt 并生成 oui.db")
+    parser.add_argument("input", nargs="?", default=default_txt,
+                        help=f"oui.txt 文件路径 (默认: {default_txt})")
+    parser.add_argument("-o", "--output", default=default_db,
+                        help=f"输出 oui.db 路径 (默认: {default_db})")
+    args = parser.parse_args()
+
+    print(f"正在解析 {args.input} ...")
+    oui_dict = parse_ieee_oui(args.input)
+    print(f"已解析到 {len(oui_dict)} 条 OUI 记录")
+
+    # 显示前10条
+    print("\n前10条:")
+    for oui, vendor in sorted(oui_dict.items())[:10]:
         simple = simplify_vendor_name(vendor)
-        print(f"  {oui} -> {vendor} (??: {simple})")
+        print(f"  {oui} -> {vendor} (简化: {simple})")
 
-    # ?? SQLite ?????
-    print(f"\n?????????...")
-    generate_sqlite_db(oui_dict, output_path, use_simple_names=True)
+    # 生成 SQLite 数据库
+    print("\n正在生成 SQLite 数据库...")
+    generate_sqlite_db(oui_dict, args.output, use_simple_names=True)
 
-    print("\n??!")
+    print("\n完成!")
 
 
 

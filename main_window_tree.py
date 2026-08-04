@@ -289,20 +289,6 @@ class TreeMixin:
         return icon
 
 
-    def _service_desc(self, proto: str, ip: str) -> str:
-        proto_upper = proto.upper()
-        port = PROTOCOL_PORTS.get(proto_upper, "")
-        if proto_upper == tr("HTTP"):
-            return f"HTTP服务, 端口 {port} ({ip}:{port})" if port else f"HTTP服务 ({ip})"
-        elif proto_upper == tr("HTTPS"):
-            return f"HTTPS服务, 端口 {port} ({ip}:{port})" if port else f"HTTPS服务 ({ip})"
-        elif proto_upper == tr("FTP"):
-            return f"FTP服务, 端口 {port}" if port else tr("FTP服务")
-        elif proto_upper == tr("RDP"):
-            return f"远程桌面服务, 端口 {port}" if port else tr("远程桌面服务")
-        else:
-            return f"{proto_upper}服务"
-
 
     def _set_item_data(self, item: QTreeWidgetItem, result: ScanResult):
         """设置/更新指定项的所有列内容"""

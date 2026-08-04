@@ -23,6 +23,10 @@ class TestHistoryStore(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.db = os.path.join(self.tmp, "scan_history.db")
 
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
     def _save_two(self):
         history_store.save_snapshot([_dev("1.1.1.1", mac="AA:BB")], ts=1000.0, db_path=self.db)
         history_store.save_snapshot(
