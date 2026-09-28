@@ -160,6 +160,28 @@ python cli.py history --show 12 --format csv -o snapshot12.csv
 
 **语言**：`--lang zh-CN` / `--lang en-US`，默认跟随系统。
 
+**SNMPv3（USM）**
+
+口令**只从环境变量读取**，没有任何接受口令的命令行选项 —— argv 会出现在进程列表
+（`ps` / 任务管理器）里，同机任何用户都能看到。
+
+```bash
+export IPSCANNER_SNMPV3_AUTH_KEY='认证口令'
+export IPSCANNER_SNMPV3_PRIV_KEY='加密口令'
+
+# authPriv：SHA 认证 + AES-128 加密
+python cli.py scan -r 192.168.1.0/24 --snmpv3-user monitor \
+    --snmpv3-auth sha --snmpv3-priv aes
+
+# 用自定义环境变量名，便于在同一台机器上为不同目标准备不同凭据
+python cli.py scan -r 10.0.0.0/24 --snmpv3-user monitor \
+    --snmpv3-auth md5 --snmpv3-auth-env SITE_A_SNMP_KEY
+```
+
+指定 `--snmpv3-user` 会**自动启用** SNMP 协议识别，无需再写 `--protocols SNMP`。
+口令缺失或组合非法（如只给 `--snmpv3-priv` 不给 `--snmpv3-auth`）时，
+会在**扫描开始前**报错并以退出码 `1` 结束，不会白扫一个网段。
+
 ---
 
 ## 项目结构
@@ -335,7 +357,7 @@ python -m ruff check .
 **后续计划**
 
 - [x] SNMP v3（USM 认证与加密）
-- [ ] SNMPv3 的 CLI 参数（`--snmpv3-user` 等；口令需走环境变量，避免出现在进程列表）
+- [x] SNMPv3 的 CLI 参数（`--snmpv3-user` 等；口令走环境变量，避免出现在进程列表）
 - [ ] IPv6 扫描支持
 - [ ] WinRM 走 HTTPS(5986) + 可选的证书校验开关（当前固定 HTTP/5985）
 - [ ] macOS / Linux 的 CI 覆盖

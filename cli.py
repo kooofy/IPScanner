@@ -26,6 +26,20 @@
     python cli.py diff --from 3 --to 4
     python cli.py history --list
     python cli.py history --query --device-class 打印机 --format csv
+
+SNMPv3（USM）
+-------------
+口令**只从环境变量读取**，不接受命令行参数 —— argv 会出现在进程列表
+（``ps`` / 任务管理器）里，等于把凭据广播给同机所有用户。
+
+    export IPSCANNER_SNMPV3_AUTH_KEY='认证口令'
+    export IPSCANNER_SNMPV3_PRIV_KEY='加密口令'
+    python cli.py scan -r 192.168.1.0/24 --snmpv3-user monitor \
+        --snmpv3-auth sha --snmpv3-priv aes
+
+环境变量名可用 ``--snmpv3-auth-env`` / ``--snmpv3-priv-env`` 改名，
+便于在同一台机器上为不同目标准备不同凭据。
+指定 ``--snmpv3-user`` 会**自动启用** SNMP 协议识别，无需再写 ``--protocols SNMP``。
 """
 import argparse
 import csv
@@ -337,6 +351,23 @@ def _run_scan(args):
 
     protocols = _resolve_protocols(args)
 
+    # SNMPv3：口令一律来自环境变量。参数非法要**在扫描开始前**就失败 ——
+    # 否则会白扫一整个网段，才在末尾的日志里看到"密码没配"。
+    snmp_v3_user, snmp_v3_error = _resolve_snmp_v3(args)
+    if snmp_v3_error:
+        log(f"错误: {snmp_v3_error}")
+        return None, None
+    if snmp_v3_user is not None:
+        # 引擎只在协议列表含 SNMP 时才走 SNMP 识别路径。漏了这一步，
+        # 配了 --snmpv3-user 也完全不生效 —— 最难查的"静默无效"。
+        from scanner.constants import SVC_SNMP
+        items = list(protocols or [])
+        if not any(p.upper() == SVC_SNMP for p in items):
+            items.append(SVC_SNMP)
+        protocols = items
+        log(f"SNMPv3 已启用：用户 {snmp_v3_user.username}，"
+            f"安全级别 {snmp_v3_user.security_level()}")
+
     # 与 GUI/引擎一致：先只计数，超限时在构建任何列表之前就拒绝（避免 OOM）。
     # 放在这里而不是等引擎返回空列表，是为了给出精确的原因和干净的退出码。
     total_ips = 0
@@ -378,6 +409,7 @@ def _run_scan(args):
             ports=ports,
             progress_callback=_make_progress(not getattr(args, "quiet", False)),
             library_lookup=_build_library_lookup(getattr(args, "library", False)),
+            snmp_v3_user=snmp_v3_user,
         )
     except KeyboardInterrupt:
         scanner.stop()
@@ -632,6 +664,96 @@ def _db_path(args):
     return getattr(args, "db", None)
 
 
+# ────────────────────────────── SNMPv3（USM） ──────────────────────────────
+
+# 口令存放的环境变量名。**口令绝不走 argv** —— argv 会出现在进程列表
+# （ps / 任务管理器）里，同机任何用户都能看到，等于把凭据广播出去。
+SNMPV3_AUTH_KEY_ENV = "IPSCANNER_SNMPV3_AUTH_KEY"
+SNMPV3_PRIV_KEY_ENV = "IPSCANNER_SNMPV3_PRIV_KEY"
+
+# 命令行上的候选值。"none" 映射回空串（=不启用）。
+# DES 故意保留在候选里：让 scanner.snmp_v3.validate() 给出
+# 「已废弃且标准库无 DES，请改用 AES-128」这条**有理由**的错误，
+# 而不是 argparse 那句不解释原因的 "invalid choice"。
+_AUTH_CHOICES = ("none", "md5", "sha")
+_PRIV_CHOICES = ("none", "aes", "des")
+
+
+def _read_secret_env(name: str) -> str:
+    """从环境变量读取口令；未设置时返回空串（是否合法交给 validate 统一判定）。"""
+    return os.environ.get(name, "") or ""
+
+
+def _resolve_snmp_v3(args):
+    """把命令行参数 + 环境变量组装成 ``SnmpV3User``。
+
+    返回 ``(user, error)``：
+      * ``(None, None)``    —— 未启用 SNMPv3（没给 ``--snmpv3-user``）；
+      * ``(None, "原因")``  —— 参数非法，调用方应报错并返回退出码 1；
+      * ``(user, None)``    —— 组装成功。
+    """
+    from scanner.snmp_v3 import SnmpV3User
+
+    username = getattr(args, "snmpv3_user", None)
+    if not username:
+        return None, None
+
+    auth_raw = (getattr(args, "snmpv3_auth", None) or "none").lower()
+    priv_raw = (getattr(args, "snmpv3_priv", None) or "none").lower()
+    auth_proto = "" if auth_raw == "none" else auth_raw
+    priv_proto = "" if priv_raw == "none" else priv_raw
+
+    auth_env = getattr(args, "snmpv3_auth_env", None) or SNMPV3_AUTH_KEY_ENV
+    priv_env = getattr(args, "snmpv3_priv_env", None) or SNMPV3_PRIV_KEY_ENV
+
+    user = SnmpV3User(
+        username=username,
+        auth_proto=auth_proto,
+        auth_key=_read_secret_env(auth_env),
+        priv_proto=priv_proto,
+        priv_key=_read_secret_env(priv_env),
+    )
+
+    err = user.validate()
+    if err:
+        # 补一句「口令该从哪个变量来」：最常见的失败是变量名拼错或忘了 export，
+        # 只报「必须提供认证密码」的话，用户会去翻命令行而不是翻环境变量。
+        # 但**只有**在「结构本身没问题、纯粹是口令没给」时才补 ——
+        # 否则会把「priv 没配 auth」这种结构性错误也误报成「口令缺失」，指错方向。
+        if priv_proto and not auth_proto:
+            pass          # 结构性错误：priv 必须建立在 auth 之上，与口令无关
+        elif auth_proto and not user.auth_key:
+            err += f"（环境变量 {auth_env} 为空或未设置）"
+        elif priv_proto and not user.priv_key:
+            err += f"（环境变量 {priv_env} 为空或未设置）"
+        return None, err
+    return user, None
+
+
+def _add_snmp_v3_args(parser):
+    """给会发起扫描的子命令（scan / diff）挂上 SNMPv3 参数。
+
+    选项名刻意用 ``--snmpv3-auth-env`` 而不是 ``--snmpv3-auth-key-env``：
+    argparse 默认做**前缀缩写**匹配，``--snmpv3-auth-key`` 会被当成
+    ``--snmpv3-auth-key-env`` 的缩写而**静默接受**，于是用户一个笔误
+    就把真口令写进了 argv（进程列表可见），而且还不生效。
+    改成 ``-env`` 结尾后，``--snmpv3-auth-key`` 不匹配任何选项，
+    会直接报 unrecognized arguments，用户立刻会去重看帮助。
+    """
+    parser.add_argument("--snmpv3-user", metavar="用户名",
+                        help="启用 SNMPv3（USM）并指定用户名")
+    parser.add_argument("--snmpv3-auth", choices=_AUTH_CHOICES, default="none",
+                        help="SNMPv3 认证协议（默认 none；口令从环境变量读取）")
+    parser.add_argument("--snmpv3-priv", choices=_PRIV_CHOICES, default="none",
+                        help="SNMPv3 加密协议（默认 none；须同时启用认证）")
+    parser.add_argument("--snmpv3-auth-env", metavar="变量名",
+                        default=SNMPV3_AUTH_KEY_ENV,
+                        help=f"存放认证口令的环境变量名（默认 {SNMPV3_AUTH_KEY_ENV}）")
+    parser.add_argument("--snmpv3-priv-env", metavar="变量名",
+                        default=SNMPV3_PRIV_KEY_ENV,
+                        help=f"存放加密口令的环境变量名（默认 {SNMPV3_PRIV_KEY_ENV}）")
+
+
 # ────────────────────────────── 参数定义 ──────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -726,6 +848,11 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
     hp.add_argument("-o", "--output", metavar="文件")
     hp.set_defaults(func=cmd_history)
+
+    # scan 与 diff 都会真正发起扫描，因此都需要 SNMPv3 参数。
+    # 放在最后统一挂载，避免两处 add_argument 各写一遍、日后再漂移。
+    for _sub in (sp, dp):
+        _add_snmp_v3_args(_sub)
 
     return p
 
