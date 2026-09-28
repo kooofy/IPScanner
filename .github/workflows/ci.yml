@@ -1,0 +1,115 @@
+name: CI
+
+# 触发条件：向 main 推送、针对 main 的 PR、以及手动触发。
+# 手动触发用于「发版前跑一遍完整流程（含 PyInstaller 打包验证）」。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的连续推送只保留最新一次，避免排队堆积
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 测试 (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    # fail-fast: false —— 需要看到全部版本的失败情况，而不是第一个失败就取消其余
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    env:
+      # 无显示环境：PyQt5 仅 import、不创建真实窗口，必须走 offscreen 平台插件
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 静态检查 (ruff)
+        # 规则集见 pyproject.toml [tool.ruff.lint]，只开 F / E9 正确性规则。
+        # 这类规则拦的是真实缺陷：未定义名（运行期 NameError）、未使用导入/变量。
+        run: python -m ruff check .
+
+      - name: 单元测试
+        run: python run_tests.py
+
+      - name: CLI 冒烟测试
+        # 无头模式是本项目的对外自动化接口，必须保证「装完就能跑」：
+        # 覆盖参数解析、引擎扫描、JSON 输出三条链路。
+        # --no-mdns：CI 里不做组播发现，避免依赖网络环境导致慢/不稳定。
+        run: |
+          python cli.py --version
+          python cli.py scan -r 127.0.0.1/32 --no-ports --no-mdns --format json
+          python cli.py history --list --format json
+
+  build:
+    name: 打包验证 (PyInstaller)
+    runs-on: windows-latest
+    # PR 上不打包：耗时长且与代码正确性无关，只在合入 main / 手动触发时验证
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 构建 GUI 版（onedir）
+        # spec 名固定为 IPScanner.spec，产物名由 version.py 决定 —— 不再需要
+        # 「按 mtime 猜当前该构建哪个 spec」那种脆弱逻辑。
+        run: pyinstaller --noconfirm IPScanner.spec
+
+      - name: 构建 CLI 版（onefile）
+        # CLI 刻意保持单文件：便于计划任务 / SSH / 容器里直接拷一个 exe 就用。
+        run: pyinstaller --noconfirm IPScanner_cli.spec
+
+      - name: 验证 GUI 产物完整
+        # onedir 产物必须同时有 exe 与 _internal/。只断言 exe 存在是不够的 ——
+        # 「依赖没被 COLLECT 进去」这种问题只有检查 _internal 才能发现。
+        # assets\styles\*.qss 由 styles.py 在 import 期读取，读不到会直接抛错；
+        # 断言到具体文件（而不是 assets 目录）才能发现"目录在、文件没进去"。
+        run: |
+          $ver = python -c "import version; print(version.__version__)"
+          $dir = "dist\IPScanner_$ver"
+          foreach ($p in @("$dir\IPScanner_$ver.exe", "$dir\_internal",
+                           "$dir\_internal\i18n", "$dir\_internal\oui.db",
+                           "$dir\_internal\assets\styles\light.qss",
+                           "$dir\_internal\assets\styles\dark.qss")) {
+            if (-not (Test-Path $p)) { throw "GUI 产物缺失: $p" }
+          }
+          Write-Host "GUI 产物 OK: $dir"
+
+      - name: 验证 CLI 产物可独立执行
+        # 打包后的 exe 不依赖源码目录，这一步能真实暴露「模块没被收进去」
+        run: |
+          .\dist\IPScanner_cli.exe --version
+          .\dist\IPScanner_cli.exe scan -r 127.0.0.1/32 --no-ports --no-mdns --format json

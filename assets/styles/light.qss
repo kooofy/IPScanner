@@ -1,0 +1,349 @@
+
+QMainWindow {
+    background-color: #F0F0F0;
+}
+QGroupBox {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    font-weight: bold;
+    color: #333333;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+    margin-top: 8px;
+    padding-top: 14px;
+    background-color: #FFFFFF;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+}
+QPushButton {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 5px 14px;
+    border-radius: 2px;
+    border: 1px solid #ADADAD;
+    background-color: #E1E1E1;
+    color: #333333;
+    min-height: 24px;
+}
+QPushButton:hover {
+    background-color: #D0D0D0;
+    border-color: #0078D7;
+}
+QPushButton:pressed {
+    background-color: #C0C0C0;
+}
+QPushButton#primaryBtn {
+    background-color: #F5F5F5;
+    color: #666666;
+    font-size: 20px;
+    padding: 6px 16px;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#primaryBtn:hover {
+    background-color: #EBEBEB;
+}
+QPushButton#primaryBtn:pressed {
+    background-color: #DCDCDC;
+}
+QPushButton#primaryBtn:disabled {
+    background-color: #FAFAFA;
+    color: #DCDCDC;
+    border-color: #EBEBEB;
+}
+QPushButton#stopBtn {
+    background-color: #F5F5F5;
+    color: #666666;
+    font-weight: bold;
+    font-size: 20px;
+    letter-spacing: 2px;
+    padding: 6px 14px;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#stopBtn:hover {
+    background-color: #EBEBEB;
+}
+QPushButton#stopBtn:pressed {
+    background-color: #DCDCDC;
+}
+QPushButton#stopBtn:disabled {
+    background-color: #FAFAFA;
+    color: #DCDCDC;
+    border-color: #EBEBEB;
+}
+QPushButton#toolBtnGreen {
+    background-color: #E8F5E9;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#toolBtnGreen:hover {
+    background-color: #C8E6C9;
+}
+QPushButton#toolBtnGreen:pressed {
+    background-color: #A5D6A7;
+}
+QPushButton#toolBtnYellow {
+    background-color: #FFF9C4;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+}
+QPushButton#toolBtnYellow:hover {
+    background-color: #FFF59D;
+}
+QPushButton#toolBtnYellow:pressed {
+    background-color: #FFF176;
+}
+QPushButton#dangerBtn {
+    background-color: #E8E8E8;
+    color: #D32F2F;
+    border: 1px solid #D32F2F;
+}
+QPushButton#dangerBtn:hover {
+    background-color: #FFEBEE;
+}
+QPushButton#dangerBtn:disabled {
+    color: #BDBDBD;
+    border-color: #BDBDBD;
+}
+QPushButton#successBtn {
+    background-color: #E8F5E9;
+    color: #2E7D32;
+    border: 1px solid #2E7D32;
+}
+QPushButton#successBtn:hover {
+    background-color: #C8E6C9;
+}
+QLineEdit {
+    font-family: "Consolas", "Microsoft YaHei";
+    font-size: 13px;
+    padding: 4px 8px;
+    border: 1px solid #ABABAB;
+    border-radius: 1px;
+    background-color: #FFFFFF;
+    selection-background-color: #0078D7;
+    min-height: 22px;
+}
+QLineEdit:focus {
+    border: 1px solid #0078D7;
+}
+QComboBox {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 4px 8px;
+    border: 1px solid #ABABAB;
+    border-radius: 1px;
+    background-color: #FFFFFF;
+    min-height: 22px;
+}
+QSpinBox {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 4px 8px;
+    border: 1px solid #ABABAB;
+    border-radius: 1px;
+    background-color: #FFFFFF;
+    min-height: 22px;
+}
+QCheckBox {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    color: #333333;
+}
+QLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    color: #333333;
+}
+QTreeWidget {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    color: #000000;
+    gridline-color: #E8E8E8;
+    background-color: #FFFFFF;
+    alternate-background-color: #F7F7F7;
+    border: 1px solid #CCCCCC;
+    border-radius: 0px;
+    selection-background-color: #CCE8FF;
+    selection-color: #000000;
+    outline: 0;
+}
+QTreeWidget::item {
+    padding: 4px 6px;
+    border: none;
+    min-height: 26px;
+}
+QTreeWidget::item:hover {
+    background-color: #E5F3FF;
+}
+QTreeWidget::item:selected {
+    background-color: #CCE8FF;
+    color: #000000;
+}
+QTreeWidget::branch {
+    width: 16px;
+}
+QHeaderView::section {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    font-weight: bold;
+    color: #000000;
+    background-color: #E8E8E8;
+    border: none;
+    border-right: 1px solid #CCCCCC;
+    border-bottom: 1px solid #CCCCCC;
+    padding: 5px 8px;
+}
+QHeaderView::section:hover {
+    background-color: #D8D8D8;
+}
+QProgressBar {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    border: 1px solid #CCCCCC;
+    border-radius: 1px;
+    background-color: #E8E8E8;
+    text-align: center;
+    color: #333333;
+    height: 20px;
+}
+QProgressBar::chunk {
+    background-color: #0078D7;
+    border-radius: 0px;
+}
+QStatusBar {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #555555;
+    background-color: #F0F0F0;
+    border-top: 1px solid #CCCCCC;
+}
+QListWidget {
+    font-family: "Consolas", "Microsoft YaHei";
+    font-size: 13px;
+    border: 1px solid #CCCCCC;
+    border-radius: 1px;
+    background-color: #FFFFFF;
+    padding: 1px;
+}
+QListWidget::item {
+    padding: 3px 5px;
+    border-radius: 1px;
+}
+QListWidget::item:hover {
+    background-color: #E5F3FF;
+}
+QMenuBar {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 14px;
+    background-color: #F0F0F0;
+    border: none;
+    padding: 2px 0px;
+    spacing: 0px;
+}
+QMenuBar::item {
+    padding: 5px 8px;
+    background-color: transparent;
+    border-radius: 0px;
+    border: none;
+}
+QMenuBar::item:selected {
+    background-color: #D0E8FF;
+    border: none;
+}
+QMenuBar::item:pressed {
+    background-color: #B0D8FF;
+    border: none;
+}
+QMenu {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    border: 1px solid #A0A0A0;
+    background-color: #F5F5F5;
+    padding: 2px 0px;
+    border-radius: 0px;
+}
+QMenu::separator {
+    height: 1px;
+    margin: 3px 6px 3px 32px;
+    background-color: #C8C8C8;
+}
+QMenu::item {
+    padding: 5px 28px 5px 6px;
+    background-color: transparent;
+    min-width: 200px;
+    max-width: 380px;
+    border: none;
+}
+QMenu::icon {
+    background-color: #E0E0E0;
+    border-right: 1px solid #C0C0C0;
+    margin: 0px;
+    padding: 4px 5px;
+    width: 24px;
+    height: 24px;
+}
+QMenu::item:selected {
+    background-color: #0078D7;
+    color: #FFFFFF;
+    border: none;
+}
+QMenu::item:disabled {
+    color: #808080;
+    background-color: transparent;
+}
+QMenu::indicator {
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
+}
+QMenu::right-arrow {
+    width: 14px;
+    height: 14px;
+    padding-right: 6px;
+}
+QScrollBar:vertical {
+    border: none;
+    background: #F0F0F0;
+    width: 12px;
+    border-radius: 0px;
+}
+QScrollBar::handle:vertical {
+    background: #C0C0C0;
+    border-radius: 0px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #A0A0A0;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar:horizontal {
+    border: none;
+    background: #F0F0F0;
+    height: 12px;
+    border-radius: 0px;
+}
+QScrollBar::handle:horizontal {
+    background: #C0C0C0;
+    border-radius: 0px;
+    min-width: 30px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #A0A0A0;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+QToolTip {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    background-color: #FFFFCC;
+    color: #333333;
+    border: 1px solid #999999;
+    padding: 3px 6px;
+}

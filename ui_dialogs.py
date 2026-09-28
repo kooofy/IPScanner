@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """对话框集合：设备编辑、地址库管理、历史对比、网络拓扑、冲突报告、子网利用率、审计日志。"""
 import os
-import json
 import math
 import ipaddress
 from datetime import datetime
@@ -13,19 +12,29 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QFileDialog, QMessageBox, QComboBox, QCheckBox,
     QDateTimeEdit,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
+    QGraphicsRectItem,
     QProgressBar, QSizePolicy,
 )
-from PyQt5.QtGui import QPainter, QBrush, QPen, QColor, QFont
+from PyQt5.QtGui import QPainter, QBrush, QPen, QColor
 
 from excel_handler import normalize_mac
 from mac_library import MacLibrary
 from ui_utils import _compare_snapshots
-from conflict_detector import Conflict, SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
-from change_detector import Change, SEVERITY_HIGH as CHG_HIGH, SEVERITY_WARNING as CHG_WARNING, SEVERITY_INFO as CHG_INFO
+from conflict_detector import SEVERITY_HIGH, SEVERITY_WARNING, SEVERITY_INFO
+from change_detector import SEVERITY_HIGH as CHG_HIGH, SEVERITY_WARNING as CHG_WARNING, SEVERITY_INFO as CHG_INFO
 import history_store
 import audit_log
 from ui_threads import SwitchMapThread
+from scanner.constants import device_class_label
+from scanner.wmi import (TRANSPORT_AUTO, TRANSPORT_DCOM, TRANSPORT_WINRM,
+                         transport_label)
+from scanner.snmp_v3 import (AUTH_NONE, AUTH_MD5, AUTH_SHA, PRIV_NONE, PRIV_AES,
+                             SnmpV3User, auth_label, priv_label,
+                             snmp_v3_get_system)
+from app_logging import get_logger
 from i18n import tr
+
+_log = get_logger(__name__)
 
 
 class DeviceEditDialog(QDialog):
@@ -211,8 +220,9 @@ class MacLibraryDialog(QDialog):
         """安全记录地址库审计日志，异常不影响对话框。"""
         try:
             audit_log.log_event(audit_log.CAT_LIBRARY, action, detail)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 审计失败不能打断地址库编辑操作，但要留痕（审计缺失需可追溯）
+            _log.warning("写入地址库审计日志失败（动作 %s）: %s", action, e)
 
 
 class HistoryCompareDialog(QDialog):
@@ -480,7 +490,8 @@ class HistoryQueryDialog(QDialog):
                 st_item.setForeground(QColor(150, 150, 150))
             st_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(r, 1, st_item)
-            self.table.setItem(r, 2, QTableWidgetItem(d.get("device_class", "") or "—"))
+            self.table.setItem(r, 2, QTableWidgetItem(
+                device_class_label(d.get("device_class", "")) or "—"))
             self.table.setItem(r, 3, QTableWidgetItem(d.get("hostname", "") or "—"))
             self.table.setItem(r, 4, QTableWidgetItem(d.get("mac", "") or "—"))
             self.table.setItem(r, 5, QTableWidgetItem(self._fmt(d.get("first_seen"))))
@@ -746,16 +757,20 @@ class TopologyDialog(QDialog):
 
 
 class WmiCredentialDialog(QDialog):
-    """采集 WMI 识别所需的管理员凭据。
+    """采集 WMI 识别所需的管理员凭据与传输方式。
 
     密码以 QLineEdit(Password) 显示；勾选"保存凭据(加密)"后由调用方用 DPAPI 加密
     存入 ipscanner.ini。本对话框不负责持久化，只回传明文凭据。
+
+    传输方式默认"自动"（先 DCOM，失败再试 WinRM）。若已知目标只开放 WinRM，
+    选"仅 WinRM"可省掉一次必然失败的 DCOM 尝试（反之亦然），从而少等一个超时。
     """
 
-    def __init__(self, parent=None, saved_username: str = "", saved_domain: str = ""):
+    def __init__(self, parent=None, saved_username: str = "", saved_domain: str = "",
+                 saved_transport: str = TRANSPORT_AUTO):
         super().__init__(parent)
         self.setWindowTitle(tr("WMI 设备识别 — 管理员凭据"))
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(400)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         layout = QFormLayout(self)
@@ -773,12 +788,26 @@ class WmiCredentialDialog(QDialog):
         self.domain_edit.setPlaceholderText(tr("域（可选，工作组可留空）"))
         layout.addRow(tr("域:"), self.domain_edit)
 
+        # 传输方式：显示文本经 transport_label() 惰性翻译，
+        # 用户数据（currentData）存语言无关的规范值 auto/dcom/winrm。
+        self.transport_combo = QComboBox()
+        for value in (TRANSPORT_AUTO, TRANSPORT_DCOM, TRANSPORT_WINRM):
+            self.transport_combo.addItem(transport_label(value), value)
+        idx = self.transport_combo.findData(saved_transport)
+        if idx < 0:
+            idx = self.transport_combo.findData(TRANSPORT_AUTO)
+        if idx >= 0:
+            self.transport_combo.setCurrentIndex(idx)
+        layout.addRow(tr("传输方式:"), self.transport_combo)
+
         self.save_check = QCheckBox(tr("保存凭据（DPAPI 加密到本机配置）"))
         layout.addRow(self.save_check)
 
-        hint = QLabel(
-            tr("WMI 识别仅对 Windows 目标有效，需目标开放 DCOM/WMI（通常 135 端口）" "且当前凭据具管理员权限。\n非域环境请填目标本机管理员账号。")
-        )
+        hint = QLabel(tr(
+            "WMI 识别仅对 Windows 目标有效，且当前凭据需具管理员权限。\n"
+            "DCOM 需开放 135 及动态 RPC 端口；WinRM 只需 5985/5986 单端口，跨网段更易通过。\n"
+            "非域环境请填目标本机管理员账号。"
+        ))
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888; font-size: 11px;")
         layout.addRow(hint)
@@ -791,11 +820,165 @@ class WmiCredentialDialog(QDialog):
         layout.addRow(buttons)
 
     def get_credentials(self):
-        """返回 (username, password, domain, save)。"""
+        """返回 (username, password, domain, save, transport)。"""
         return (
             self.user_edit.text().strip(),
             self.pass_edit.text(),
             self.domain_edit.text().strip(),
+            self.save_check.isChecked(),
+            self.transport_combo.currentData() or TRANSPORT_AUTO,
+        )
+
+
+class SnmpV3CredentialDialog(QDialog):
+    """采集 SNMPv3 USM 用户参数（用户名 / 认证 / 加密）。
+
+    v3 相比 v2c 的价值就在于口令不再明文上网：团体字（community）等价于
+    把密码写在信封外面，任何抓包的人都能直接看到。目标支持就该用 v3。
+
+    口令以 QLineEdit(Password) 显示；勾选"保存配置"后由调用方用 DPAPI 加密
+    存入 ipscanner.ini。本对话框不负责持久化，只回传明文口令。
+
+    "测试"按钮会用当前参数对指定 IP 做一次真实 GET，把失败原因（用户名错 /
+    口令错 / 目标没开 SNMP）直接显示出来 —— 比扫完一整段再猜原因快得多。
+    """
+
+    def __init__(self, parent=None, saved=None, saved_target: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(tr("SNMPv3 识别 — USM 用户"))
+        self.setMinimumWidth(440)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        saved = saved or {}
+        layout = QFormLayout(self)
+
+        self.user_edit = QLineEdit(saved.get("username", ""))
+        self.user_edit.setPlaceholderText(tr("如 snmpuser"))
+        layout.addRow(tr("用户名:"), self.user_edit)
+
+        # 协议下拉的显示文本经 auth_label()/priv_label() 惰性翻译，
+        # 用户数据（currentData）存语言无关的规范值，绝不拿译文当依据。
+        self.auth_combo = QComboBox()
+        for value in (AUTH_NONE, AUTH_MD5, AUTH_SHA):
+            self.auth_combo.addItem(auth_label(value), value)
+        self.auth_combo.setCurrentIndex(max(
+            0, self.auth_combo.findData(saved.get("auth_proto", AUTH_NONE))))
+        layout.addRow(tr("认证协议:"), self.auth_combo)
+
+        self.auth_edit = QLineEdit(saved.get("auth_key", ""))
+        self.auth_edit.setEchoMode(QLineEdit.Password)
+        self.auth_edit.setPlaceholderText(tr("认证口令，建议至少 8 位"))
+        layout.addRow(tr("认证密码:"), self.auth_edit)
+
+        self.priv_combo = QComboBox()
+        for value in (PRIV_NONE, PRIV_AES):
+            self.priv_combo.addItem(priv_label(value), value)
+        self.priv_combo.setCurrentIndex(max(
+            0, self.priv_combo.findData(saved.get("priv_proto", PRIV_NONE))))
+        layout.addRow(tr("加密协议:"), self.priv_combo)
+
+        self.priv_edit = QLineEdit(saved.get("priv_key", ""))
+        self.priv_edit.setEchoMode(QLineEdit.Password)
+        self.priv_edit.setPlaceholderText(tr("加密口令（可与认证口令相同）"))
+        layout.addRow(tr("加密密码:"), self.priv_edit)
+
+        # 加密必须建立在认证之上（RFC 3414）；没选认证就直接禁用加密，
+        # 免得用户填完才发现用不上
+        self.auth_combo.currentIndexChanged.connect(self._sync_priv_enabled)
+        self._sync_priv_enabled()
+
+        # ── 测试连接 ──
+        test_row = QHBoxLayout()
+        self.target_edit = QLineEdit(saved_target)
+        self.target_edit.setPlaceholderText(tr("目标 IP，如 192.168.1.1"))
+        test_row.addWidget(self.target_edit, 1)
+        self.test_btn = QPushButton(tr("测试"))
+        self.test_btn.clicked.connect(self._on_test)
+        test_row.addWidget(self.test_btn)
+        layout.addRow(tr("测试目标:"), test_row)
+
+        self.result_label = QLabel("")
+        self.result_label.setWordWrap(True)
+        self.result_label.setStyleSheet("font-size: 11px;")
+        layout.addRow(self.result_label)
+
+        self.save_check = QCheckBox(tr("保存配置（DPAPI 加密口令到本机配置）"))
+        layout.addRow(self.save_check)
+
+        hint = QLabel(tr(
+            "SNMPv3 用用户级认证/加密替代明文团体字，口令不再被中间人直接看到。\n"
+            "认证支持 HMAC-MD5-96 / HMAC-SHA-96；加密仅支持 AES-128（不支持已废弃的 DES）。\n"
+            "口令不足 8 位时部分设备会拒绝本地化密钥，建议至少 8 位。"
+        ))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addRow(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def _sync_priv_enabled(self):
+        """没启用认证就不能启用加密（RFC 3414）。"""
+        auth_on = bool(self.auth_combo.currentData())
+        self.priv_combo.setEnabled(auth_on)
+        self.priv_edit.setEnabled(auth_on)
+        if not auth_on:
+            self.priv_combo.setCurrentIndex(0)
+            self.priv_edit.clear()
+
+    def _current_user(self) -> SnmpV3User:
+        return SnmpV3User(
+            username=self.user_edit.text().strip(),
+            auth_proto=self.auth_combo.currentData() or AUTH_NONE,
+            auth_key=self.auth_edit.text(),
+            priv_proto=self.priv_combo.currentData() or PRIV_NONE,
+            priv_key=self.priv_edit.text(),
+        )
+
+    def _on_test(self):
+        """用当前参数对目标做一次真实 GET，把结论直接显示出来。"""
+        ip = self.target_edit.text().strip()
+        if not ip:
+            self._set_result(tr("请先填写测试目标 IP"), ok=False)
+            return
+        user = self._current_user()
+        err = user.validate()
+        if err:
+            self._set_result(err, ok=False)
+            return
+
+        self.result_label.setText(tr("测试中…"))
+        self.result_label.setStyleSheet("color: #888; font-size: 11px;")
+        # 单次 GET 最长 1.5s；模态对话框里短暂等待可以接受，
+        # 换成线程反而要额外处理"测试还没回来、对话框已被关闭"的竞态
+        self.setCursor(Qt.WaitCursor)
+        try:
+            info = snmp_v3_get_system(ip, user, timeout=1.5)
+        finally:
+            self.unsetCursor()
+
+        if "error" in info:
+            self._set_result(tr("测试失败：%s") % info["error"], ok=False)
+        else:
+            self._set_result(
+                tr("连接成功：%s") % (info.get("sys_name")
+                                     or info.get("sys_descr") or ip), ok=True)
+
+    def _set_result(self, text: str, ok: bool):
+        color = "#16A34A" if ok else "#DC2626"
+        self.result_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self.result_label.setText(text)
+
+    def get_config(self):
+        """返回 (username, auth_proto, auth_key, priv_proto, priv_key, save)。"""
+        return (
+            self.user_edit.text().strip(),
+            self.auth_combo.currentData() or AUTH_NONE,
+            self.auth_edit.text(),
+            self.priv_combo.currentData() or PRIV_NONE,
+            self.priv_edit.text(),
             self.save_check.isChecked(),
         )
 
@@ -1069,7 +1252,8 @@ class SubnetUtilizationDialog(QDialog):
         groups: dict = {}  # subnet_str -> {"ips": set, "online": int, "offline": int, "devices": {}}
         for r in results:
             try:
-                addr = ipaddress.ip_address(r.ip)
+                # ip_network 本身就会对非法 IP 抛 ValueError，无需先做一次
+                # ip_address 校验（该校验结果此前赋给 addr 后从未使用）
                 net = ipaddress.ip_network(f"{r.ip}/24", strict=False)
                 key = str(net)
             except ValueError:
@@ -1081,7 +1265,8 @@ class SubnetUtilizationDialog(QDialog):
             if r.status == "online":
                 g["online"] += 1
                 # 设备类型统计
-                dtype = getattr(r, "device_class", "") or getattr(r, "device_type", "") or tr("未识别")
+                dtype = (device_class_label(getattr(r, "device_class", ""))
+                         or getattr(r, "device_type", "") or tr("未识别"))
                 g["devices"][dtype] = g["devices"].get(dtype, 0) + 1
             else:
                 g["offline"] += 1
@@ -1161,7 +1346,8 @@ class AuditLogDialog(QDialog):
         self.cat_combo = QComboBox()
         self.cat_combo.addItem(tr("全部"), "")
         for cat in audit_log.CATEGORIES:
-            self.cat_combo.addItem(cat, cat)
+            # 显示翻译后的名称，但携带的 data 始终是语言无关的分类代码
+            self.cat_combo.addItem(audit_log.category_label(cat), cat)
         self.cat_combo.setMinimumWidth(110)
         self.cat_combo.currentIndexChanged.connect(self._reload)
         filter_row.addWidget(self.cat_combo)
@@ -1242,7 +1428,7 @@ class AuditLogDialog(QDialog):
             ts_item.setFont(ts_font)
             self.table.setItem(row, 0, ts_item)
 
-            cat_item = QTableWidgetItem(log["category"])
+            cat_item = QTableWidgetItem(audit_log.category_label(log["category"]))
             cat_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 1, cat_item)
 
@@ -1274,11 +1460,13 @@ class SwitchPortDialog(QDialog):
 
     COLS = [tr("MAC 地址"), tr("端口"), "ifIndex", "IP", tr("主机名"), tr("厂商"), tr("设备类型")]
 
-    def __init__(self, scan_results=None, parent=None, dark=False):
+    def __init__(self, scan_results=None, parent=None, dark=False, snmp_v3_user=None):
         super().__init__(parent)
         self.dark = dark
         self.scan_results = scan_results or []
         self._thread = None
+        # SnmpV3User 或 None：非 None 时用 v3 遍历转发表，团体字输入框直接禁用
+        self.snmp_v3_user = snmp_v3_user
         self.setWindowTitle(tr("交换机端口映射"))
         self.setMinimumSize(900, 520)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
@@ -1301,6 +1489,11 @@ class SwitchPortDialog(QDialog):
         self.community_input = QLineEdit("public")
         self.community_input.setMinimumWidth(80)
         self.community_input.setMaximumWidth(120)
+        if self.snmp_v3_user is not None:
+            # 已配置 SNMPv3：团体字不再参与，直接禁用避免用户误以为还要填
+            self.community_input.clear()
+            self.community_input.setEnabled(False)
+            self.community_input.setPlaceholderText(tr("已启用 SNMPv3"))
         top_row.addWidget(self.community_input)
 
         self.btn_start = QPushButton(tr("开始映射"))
@@ -1361,7 +1554,8 @@ class SwitchPortDialog(QDialog):
         self.info_label.setText("")
         self.status_label.setText(tr("正在连接交换机..."))
 
-        self._thread = SwitchMapThread(ip, community)
+        self._thread = SwitchMapThread(ip, community,
+                                       snmp_v3_user=self.snmp_v3_user)
         self._thread.log_signal.connect(self._on_progress)
         self._thread.finished_signal.connect(self._on_finished)
         self._thread.start()
@@ -1411,7 +1605,8 @@ class SwitchPortDialog(QDialog):
 
             self.table.setItem(row, 4, QTableWidgetItem(m.hostname or "—"))
             self.table.setItem(row, 5, QTableWidgetItem(m.vendor or "—"))
-            self.table.setItem(row, 6, QTableWidgetItem(m.device_class or "—"))
+            self.table.setItem(row, 6, QTableWidgetItem(
+                device_class_label(m.device_class) or "—"))
 
         self.status_label.setText(f"完成：{len(info.mappings)} 条映射")
 

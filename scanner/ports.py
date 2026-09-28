@@ -8,9 +8,15 @@ import struct
 import time
 from typing import List, Tuple
 
+from app_logging import get_logger
+
 from .constants import COMMON_PORTS, _SYSTEM_SHARES, _raw_cap_cache, _syn_failed
 from .util import _inet_checksum, _local_ip_for_dst, _run_cmd
 from i18n import tr
+
+# 端口探测是"高频、单点失败很常见"的场景（绝大多数端口本来就是关的，
+# 超时属正常），因此逐端口失败一律 debug；只有整个子系统不可用才 warning。
+_log = get_logger(__name__)
 
 
 def scan_port(ip: str, port: int, timeout: float = 0.5) -> bool:
@@ -70,16 +76,19 @@ def _scan_shares_windows(ip: str, timeout: float) -> List[str]:
 
 def _scan_shares_unix(ip: str, timeout: float) -> List[str]:
     """Linux/macOS: smbclient -L（需安装 samba-client）"""
-    try:
-        output = _run_cmd(["smbclient", "-L", f"//{ip}", "-N", "-g"], timeout=timeout)
-        return _parse_smbclient_output(output)
-    except Exception:
-        pass
-    try:
-        output = _run_cmd(["smbclient", "-L", f"//{ip}", "-U", "%", "-g"], timeout=timeout)
-        return _parse_smbclient_output(output)
-    except Exception:
-        pass
+    # 两种调用方式：先匿名（-N），再空用户名/密码（-U %）。
+    # smbclient 未安装时 _run_cmd 返回空串而非抛错，因此这里除了兜异常，
+    # 还要靠"输出为空"判定失败，并把原因记到 debug 供排查。
+    for _args, _label in ((["-N"], "匿名"), (["-U", "%"], "空凭据")):
+        try:
+            output = _run_cmd(["smbclient", "-L", f"//{ip}"] + _args + ["-g"],
+                              timeout=timeout)
+            if output:
+                return _parse_smbclient_output(output)
+            _log.debug("smbclient %s 枚举无输出 %s（多半未安装 samba-client 或无权限）",
+                       _label, ip)
+        except Exception as e:  # noqa: BLE001
+            _log.debug("smbclient %s 枚举共享失败 %s: %s", _label, ip, e)
     return []
 
 
@@ -145,8 +154,10 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
                     open_ports.append(port)
                     if rtt_callback is not None and elapsed > 0:
                         rtt_callback(elapsed)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                # 单端口探测失败 = 视为关闭。这是端口扫描的常态（绝大多数端口
+                # 本来就是关的），因此只记 debug，避免日志被刷爆。
+                _log.debug("端口探测异常，按关闭处理 %s:%s: %s", ip, port, e)
     return sorted(open_ports)
 
 

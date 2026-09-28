@@ -9,7 +9,10 @@ from ui_utils import _detect_gateway
 import audit_log
 import ui_logic
 import history_store
+from app_logging import get_logger
 from i18n import tr
+
+_log = get_logger(__name__)
 
 class HistoryMixin:
     def _show_audit_log(self):
@@ -21,8 +24,10 @@ class HistoryMixin:
         """安全地记录一条审计日志：任何异常都不应中断主流程。"""
         try:
             audit_log.log_event(category, action, detail)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 审计失败不能反过来打断用户正在做的操作；但丢审计这件事本身
+            # 值得留痕（合规场景下审计缺失是需要追溯的）
+            _log.warning("写入审计日志失败（分类 %s / 动作 %s）: %s", category, action, e)
 
     def _build_snapshot(self, results) -> dict:
         return ui_logic.build_snapshot(results)
@@ -77,7 +82,10 @@ class HistoryMixin:
                         progress_callback=lambda p, c, t, m: self.log_signal.emit(m)
                     )
                     self.finished_signal.emit(topo)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
+                    # 拓扑发现失败不应中断主流程，但必须留痕：此前是静默
+                    # `except Exception:`，出问题只能靠用户口述现象。
+                    _log.warning("拓扑发现失败: %s", e, exc_info=True)
                     self.finished_signal.emit(None)
 
         def on_finished(topo):

@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
-"""通用工具函数：网关探测、快照对比、IP 校验。"""
+"""通用工具函数：网关探测、快照对比、IP 校验与排序键。"""
+import ipaddress
+
 from i18n import tr
+from scanner.constants import device_class_label
+from app_logging import get_logger
+
+_log = get_logger(__name__)
 
 
 def _detect_gateway() -> str:
@@ -10,8 +16,9 @@ def _detect_gateway() -> str:
     local_ip = ""
     try:
         local_ip = sock.gethostbyname(sock.gethostname())
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 解析不到本机主机名很常见（hosts 未登记 / DNS 不可达），下面还有回退
+        _log.debug("解析本机主机名失败，改用网段推测网关: %s", e)
     gw_ip = None
     # Windows 路由表 (0.0.0.0/0 的下一跳)
     try:
@@ -24,8 +31,9 @@ def _detect_gateway() -> str:
                 if _is_valid_ip(cand):
                     gw_ip = cand
                     break
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 非 Windows 平台没有 route 命令，属预期；下面按 .1 推测
+        _log.debug("读取系统路由表失败，改用网段推测网关: %s", e)
     if not gw_ip and local_ip:
         parts = local_ip.split(".")
         if len(parts) == 4:
@@ -42,7 +50,7 @@ def _compare_snapshots(base: dict, target: dict) -> list:
     def _fmt(d):
         parts = [d.get("status", "?"), d.get("hostname") or "—", d.get("mac") or "—"]
         if d.get("device_class"):
-            parts.append(d.get("device_class"))
+            parts.append(device_class_label(d.get("device_class")))
         return " / ".join(str(p) for p in parts)
 
     for ip, td in target_map.items():
@@ -80,3 +88,15 @@ def _compare_snapshots(base: dict, target: dict) -> list:
 def _is_valid_ip(s: str) -> bool:
     parts = s.split(".")
     return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+
+def _ip_to_int(ip: str):
+    """IP 地址转整数排序键；非法地址返回 -1（排最前）。
+
+    使用 ipaddress 解析，IPv4/IPv6 统一为整数，保证与 __lt__ 比较时类型一致
+    （不会出现 int 与 str 混比引发 TypeError）。
+    """
+    try:
+        return int(ipaddress.ip_address(ip))
+    except ValueError:
+        return -1

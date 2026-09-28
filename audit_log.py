@@ -20,19 +20,93 @@ import db_util
 DB_PATH = os.path.join(data_dir(), "audit_log.db")
 
 # ── 事件分类 ──
-CAT_SCAN = tr("扫描")
-CAT_CONFLICT = tr("冲突检测")
-CAT_RANGE = tr("网段")
-CAT_RESULT = tr("结果")
-CAT_LIBRARY = tr("地址库")
-CAT_EXPORT = tr("导出")
-CAT_DEVICE = tr("设备操作")
-CAT_SYSTEM = tr("系统")
+# 存库值一律使用**语言无关的规范代码**（下面的小写字符串）。
+# 旧版本曾把 tr() 的结果直接入库（中文环境写「扫描」、英文环境写「Scan」），
+# 同一个逻辑分类在库里变成两个不同的值，导致按分类筛选和统计失效。
+# 显示时才通过 category_label() 翻译，因此切换语言不会污染历史数据。
+CAT_SCAN = "scan"
+CAT_CONFLICT = "conflict"
+CAT_RANGE = "range"
+CAT_RESULT = "result"
+CAT_LIBRARY = "library"
+CAT_EXPORT = "export"
+CAT_DEVICE = "device"
+CAT_SYSTEM = "system"
 
 CATEGORIES = [
     CAT_SCAN, CAT_CONFLICT, CAT_RANGE, CAT_RESULT,
     CAT_LIBRARY, CAT_EXPORT, CAT_DEVICE, CAT_SYSTEM,
 ]
+
+# 规范代码 -> 翻译原文（显示时再 tr()，切勿在 import 期求值）
+_CATEGORY_TEXT = {
+    CAT_SCAN: "扫描",
+    CAT_CONFLICT: "冲突检测",
+    CAT_RANGE: "网段",
+    CAT_RESULT: "结果",
+    CAT_LIBRARY: "地址库",
+    CAT_EXPORT: "导出",
+    CAT_DEVICE: "设备操作",
+    CAT_SYSTEM: "系统",
+}
+
+# 历史库兼容：旧版本入库的是翻译后的字符串，两种语言都要能识别
+_LEGACY_CATEGORY_MAP = {}
+for _code, _text in _CATEGORY_TEXT.items():
+    _LEGACY_CATEGORY_MAP[_text] = _code          # 中文原文
+    _LEGACY_CATEGORY_MAP[_text.lower()] = _code
+for _code, _text in (
+    (CAT_SCAN, "Scan"), (CAT_CONFLICT, "Conflict"), (CAT_RANGE, "Range"),
+    (CAT_RESULT, "Result"), (CAT_LIBRARY, "Library"), (CAT_EXPORT, "Export"),
+    (CAT_DEVICE, "Device"), (CAT_SYSTEM, "System"),
+):
+    _LEGACY_CATEGORY_MAP[_text] = _code
+    _LEGACY_CATEGORY_MAP[_text.lower()] = _code
+
+
+def category_label(code: str) -> str:
+    """分类代码 -> 当前语言的显示名（惰性翻译，切换语言后立即生效）。
+
+    未知代码原样返回，避免历史数据因代码变更而显示为空。
+    """
+    if not code:
+        return ""
+    text = _CATEGORY_TEXT.get(code)
+    if text is None:
+        return str(code)
+    return tr(text)
+
+
+def normalize_category(value: str) -> str:
+    """把任意（含旧版本翻译后的）分类值归一为规范代码。"""
+    if not value:
+        return ""
+    v = str(value).strip()
+    if v in _CATEGORY_TEXT:            # 已是规范代码
+        return v
+    return _LEGACY_CATEGORY_MAP.get(v, _LEGACY_CATEGORY_MAP.get(v.lower(), v))
+
+
+def _migrate_legacy_categories(conn):
+    """把库里历史遗留的「翻译后分类」就地改写为规范代码（幂等）。"""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT category FROM audit_logs WHERE category <> ''"
+        ).fetchall()
+    except Exception:
+        return 0
+    migrated = 0
+    for row in rows:
+        old = row["category"]
+        new = _LEGACY_CATEGORY_MAP.get(old)
+        if new and new != old:
+            conn.execute(
+                "UPDATE audit_logs SET category=? WHERE category=?", (new, old)
+            )
+            migrated += 1
+    if migrated:
+        conn.commit()
+    return migrated
 
 DEFAULT_MAX_KEEP = 1000
 
@@ -54,6 +128,8 @@ def _init_db(conn):
         """
     )
     conn.commit()
+    _migrate_legacy_categories(conn)
+
 
 
 @contextlib.contextmanager
@@ -78,9 +154,10 @@ def log_event(category, action, detail="", db_path=None, max_keep=DEFAULT_MAX_KE
 def query_logs(category=None, keyword=None, limit=DEFAULT_MAX_KEEP, db_path=None):
     """查询审计日志，按时间倒序（最新在前）返回 dict 列表。
 
-    - category: 仅该分类（None = 全部）
+    - category: 仅该分类（None = 全部）。接受规范代码，也兼容旧版翻译后的值。
     - keyword:  在 action / detail / category 中模糊匹配（None = 全部）
     """
+    category = normalize_category(category)
     with _conn(db_path) as conn:
         sql = "SELECT id, ts, category, action, detail FROM audit_logs WHERE 1=1"
         args = []
@@ -98,7 +175,8 @@ def query_logs(category=None, keyword=None, limit=DEFAULT_MAX_KEEP, db_path=None
 
 
 def count_logs(category=None, db_path=None) -> int:
-    """统计日志条数（可按分类过滤）。"""
+    """统计日志条数（可按分类过滤）。接受规范代码或旧版翻译后的值。"""
+    category = normalize_category(category)
     with _conn(db_path) as conn:
         if category:
             return conn.execute(

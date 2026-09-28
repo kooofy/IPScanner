@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """内置网络工具与远程电源/WoL 混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
+import ipaddress
+import re
 import subprocess
 import shutil
 import getpass
@@ -8,10 +10,94 @@ from PyQt5.QtWidgets import QInputDialog, QMessageBox
 from PyQt5.QtCore import QUrl, QProcess
 from PyQt5.QtGui import QDesktopServices
 import audit_log
+from app_logging import get_logger
 from i18n import tr
+from scanner.constants import SVC_FTP, SVC_HTTP, SVC_HTTPS, SVC_RDP
 from ui_dialogs import SwitchPortDialog
 
+_log = get_logger(__name__)
+
+# ── 目标校验（P0-4：命令注入防护）──────────────────────────────
+# 背景：ping/tracert/telnet/ssh 的目标最终会被拼进 `cmd /k "<cmd>"`（Windows）
+# 或终端模拟器的命令行（Linux/macOS）。若目标里含 `&`、`|`、`;`、`"` 等
+# shell 元字符，用户输入的「目标」就能在宿主上执行任意命令。
+# 对策：只接受 IPv4/IPv6 字面量或纯 ASCII 主机名，白名单之外一律拒绝。
+_SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+_SAFE_USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,62}$")
+
+
+def validate_target(target):
+    """校验网络工具目标，返回 ``(ok, cleaned, reason)``。
+
+    只允许 IP 字面量或主机名。空格、控制字符以及 ``& | ^ < > " ' ` $ ( ) ; % ! * ? ~ = \\``
+    等可能被 cmd.exe / shell 解释的字符全部拒绝，从根本上消除命令注入。
+    """
+    if target is None:
+        return False, "", "目标为空"
+    t = str(target).strip()
+    if not t:
+        return False, "", "目标为空"
+    if len(t) > 253:
+        return False, "", "目标过长（超过 253 个字符）"
+    # 空白与控制字符
+    for ch in t:
+        if ch.isspace() or ord(ch) < 32 or ord(ch) == 127:
+            return False, "", "目标不能包含空白或控制字符"
+    # IP 字面量（IPv6 含冒号，必须先于主机名白名单判断）
+    try:
+        ipaddress.ip_address(t)
+        return True, t, ""
+    except ValueError:
+        # 不是 IP 字面量 → 继续按主机名白名单校验。
+        # 这是**预期内的控制流**而非错误，刻意不记日志（每次校验都会走到这里）。
+        pass
+    # 主机名：白名单字符集，且不能以连字符开头（避免被 ping/ssh 当成选项）
+    if not _SAFE_HOSTNAME_RE.match(t):
+        return False, "", "目标只能包含字母、数字、点、连字符和下划线"
+    if t.endswith(".") or ".." in t:
+        return False, "", "主机名格式不合法"
+    if not re.search(r"[A-Za-z]", t):
+        return False, "", "不是合法的 IP 地址或主机名"
+    return True, t, ""
+
+
+def validate_user(user):
+    """校验 SSH 用户名，返回 ``(ok, cleaned, reason)``。
+
+    用户名同样会被拼进 ``ssh <user>@<target>``，因此禁止空格与 shell 元字符。
+    """
+    if user is None:
+        return False, "", "用户名为空"
+    u = str(user).strip()
+    if not u:
+        return False, "", "用户名为空"
+    if not _SAFE_USER_RE.match(u):
+        return False, "", "用户名只能包含字母、数字、点、连字符和下划线"
+    return True, u, ""
+
+
 class NetworkToolMixin:
+
+    def _validated_target(self, target, title):
+        """校验目标，非法时弹窗 + 审计并返回 None（调用方应直接 return）。"""
+        ok, cleaned, reason = validate_target(target)
+        if ok:
+            return cleaned
+        QMessageBox.warning(
+            self, title,
+            tr("目标地址不合法，已阻止本次操作。")
+            + f"\n\n{tr('目标')}: {target}\n{tr('原因')}: {reason}\n\n"
+            + tr("为安全起见，目标只能是 IP 地址或主机名，\n"
+                 "不允许包含空格、& | ; \" 等特殊字符。")
+        )
+        try:
+            self._audit(audit_log.CAT_DEVICE, tr("网络工具目标被拒绝"),
+                        f"目标 {target} · {reason}")
+        except Exception as e:  # noqa: BLE001
+            # 审计写入失败不能反过来打断"拒绝操作"这个安全动作
+            _log.debug("记录目标被拒审计日志失败: %s", e)
+        return None
+
     def _launch_network_tool(self, tool: str, target: str = None):
         """
         启动内置网络工具。跨平台：Windows/Linux/macOS 自动适配命令。
@@ -29,6 +115,11 @@ class NetworkToolMixin:
                 return
             target = text.strip()
 
+        # P0-4：目标会拼进命令行，必须先校验
+        target = self._validated_target(target, tr("选择目标"))
+        if target is None:
+            return
+
         if tool == "ping":
             cmd = f"ping -t {target}" if _win else f"ping {target}"
         elif tool == "tracert":
@@ -41,6 +132,14 @@ class NetworkToolMixin:
             )
             if not ok or not user.strip():
                 return
+            # P0-4：用户名同样进入命令行
+            ok_user, user, reason = validate_user(user)
+            if not ok_user:
+                QMessageBox.warning(
+                    self, tr("SSH 连接"),
+                    tr("用户名不合法，已阻止本次连接。") + f"\n\n{tr('原因')}: {reason}"
+                )
+                return
             if not shutil.which("ssh"):
                 if _win:
                     msg = tr("系统未安装 OpenSSH 客户端（ssh.exe）。\n"
@@ -49,7 +148,7 @@ class NetworkToolMixin:
                     msg = tr("系统未安装 SSH 客户端。请执行: sudo apt install openssh-client")
                 QMessageBox.warning(self, tr("未找到 ssh"), msg)
                 return
-            cmd = f"ssh {user.strip()}@{target}"
+            cmd = f"ssh {user}@{target}"
         elif tool == "rdp":
             if _win:
                 try:
@@ -113,6 +212,13 @@ class NetworkToolMixin:
             if not ok or not text.strip():
                 return
             target = text.strip()
+
+        # P0-4：目标会作为参数传给 shutdown / ssh，必须先校验
+        target = self._validated_target(
+            target, tr("远程") + (tr("关机") if action == "shutdown" else tr("重启"))
+        )
+        if target is None:
+            return
 
         _verb = tr("关机") if action == "shutdown" else tr("重启")
         reply = QMessageBox.question(
@@ -196,13 +302,21 @@ class NetworkToolMixin:
 
     def _open_service(self, proto, ip):
         """根据协议打开浏览器 / 远程桌面。"""
-        if proto == tr("HTTP"):
+        # P0-4：IP 会被拼进 URL / 传参给 mstsc，做一次防御性校验
+        _ok, _clean, _ = validate_target(ip)
+        if not _ok:
+            return
+        ip = _clean
+        # proto 是语言无关的规范代码（见 scanner/constants.py），
+        # 旧代码用 tr("HTTP") 比较，语言一换就会全部失配。
+        _p = (proto or "").strip().upper()
+        if _p == SVC_HTTP:
             QDesktopServices.openUrl(QUrl(f"http://{ip}"))
-        elif proto == tr("HTTPS"):
+        elif _p == SVC_HTTPS:
             QDesktopServices.openUrl(QUrl(f"https://{ip}"))
-        elif proto == tr("FTP"):
+        elif _p == SVC_FTP:
             QDesktopServices.openUrl(QUrl(f"ftp://{ip}"))
-        elif proto == tr("RDP"):
+        elif _p == SVC_RDP:
             if not QProcess.startDetached("mstsc", [f"/v:{ip}"]):
                 QMessageBox.information(
                     self, tr("远程桌面"),
@@ -238,7 +352,9 @@ class NetworkToolMixin:
         """弹出交换机端口映射对话框。"""
         self._audit(audit_log.CAT_DEVICE, tr("交换机端口映射"), tr("打开端口映射工具"))
         dlg = SwitchPortDialog(
-            scan_results=self.all_results, parent=self, dark=self.dark_mode
+            scan_results=self.all_results, parent=self, dark=self.dark_mode,
+            snmp_v3_user=(self.snmp_v3_creds.to_user()
+                          if self.snmp_v3_creds.has_creds() else None),
         )
         dlg.exec_()
 

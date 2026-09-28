@@ -153,5 +153,53 @@ class TestHistoryQuery(unittest.TestCase):
         self.assertAlmostEqual(rec["last_seen"], 1000.0)
 
 
+class QueryHistoryQueryCountTest(unittest.TestCase):
+    """回归守卫：query_history 不得退化成 N+1 查询。
+
+    旧实现是 `list_snapshots()` 后对每个快照再 `get_snapshot(snap["id"])` ——
+    N 个快照就是 N+1 次查询，且每次都把该快照的整张设备表读回来。默认保留 20 个
+    快照时就是 21 次查询 + 全量读盘。改成单条 JOIN 后，`get_snapshot` 一次都不
+    应该被调用。
+
+    用"是否调用 get_snapshot"而不是"耗时"来断言：耗时在 CI 上不稳定，而调用次数
+    是确定性的，能精确指出退化原因。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "scan_history.db")
+
+    def tearDown(self):
+        import shutil
+        import db_util
+        db_util.close_connection(self.db)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_does_not_call_get_snapshot(self):
+        _save_many([
+            (1000.0 + i, [_dev(f"192.168.1.{i}", device_class="PC")])
+            for i in range(6)
+        ], self.db)
+
+        calls = []
+        orig = history_store.get_snapshot
+
+        def _spy(*a, **kw):
+            calls.append(a)
+            return orig(*a, **kw)
+
+        history_store.get_snapshot = _spy
+        try:
+            res = history_store.query_history(db_path=self.db)
+        finally:
+            history_store.get_snapshot = orig
+
+        self.assertEqual(len(res), 6)
+        self.assertEqual(
+            calls, [],
+            "query_history 又在逐快照调 get_snapshot 了（N+1 回归）",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

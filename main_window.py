@@ -1,23 +1,30 @@
 # -*- coding: utf-8 -*-
 import os
-from app_paths import data_dir, resource_dir
+import app_logging
+from app_paths import data_dir, resource_dir, data_dir_label, data_dir_source
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTreeWidget, QHeaderView,
-    QProgressBar, QMessageBox, QSpinBox, QComboBox, QAction,
-    QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
+    QProgressBar, QMessageBox, QSpinBox, QComboBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QByteArray
 from PyQt5.QtGui import QColor, QIcon, QPixmap, QKeySequence
-from scanner import parse_ip_range, PROTOCOL_PORTS, WmiCredentialStore, SCAN_LEVEL_LABELS
+from scanner import (
+    PROTOCOL_PORTS, WmiCredentialStore, SnmpV3CredentialStore,
+    scan_level_label, service_label,
+    count_ip_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
+)
 from mac_library import MacLibrary
 import history_store
 
-from ui_icons import _build_dark_palette
+from ui_icons import (
+    _build_dark_palette, _gray_icon, _make_tool_icon, _make_pause_icon,
+)
+from version import __version__
 from conflict_detector import SEVERITY_HIGH, SEVERITY_WARNING
 
-from styles import STYLE_SHEET, DARK_STYLE_SHEET, _gray_icon, _make_tool_icon, _make_pause_icon
+from styles import STYLE_SHEET, DARK_STYLE_SHEET
 from main_window_tree import TreeMixin
 from i18n import tr
 from scan_mixin import ScanMixin
@@ -62,6 +69,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.wmi_thread = None
         self.netbios_thread = None
 
+        # SNMPv3 USM 用户：口令同样经 DPAPI 加密落盘；未配置时扫描走 v2c 团体字
+        self.snmp_v3_creds = SnmpV3CredentialStore()
+        self.snmp_v3_creds.load_from(self.settings)
+
         # 扫描历史快照 (SQLite, 存于项目目录；含内部信息，已 gitignore)
         self.history_db = os.path.join(
             data_dir(), "scan_history.db"
@@ -83,6 +94,25 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self._auto_detect_subnet()
         # 载入地址库计数
         self._refresh_library_label()
+
+        # 启动提示（合并为一条状态栏消息）：
+        # 1) 数据目录回退 —— exe 目录不可写（如装在 Program Files）时数据改存用户目录
+        # 2) 旧配置中被丢弃的超限网段
+        _notices = []
+        _src = data_dir_source()
+        if _src in ("user", "temp"):
+            _msg = tr("程序目录不可写，数据已改存：{path}").format(path=data_dir())
+            _notices.append(_msg)
+            app_logging.get_logger(__name__).warning(
+                "程序目录不可写，数据目录回退到 %s (source=%s)", data_dir(), _src
+            )
+        if getattr(self, "_dropped_ranges", 0):
+            _notices.append(
+                tr("已忽略 {n} 个无效或超出规模上限的历史网段").format(
+                    n=self._dropped_ranges)
+            )
+        if _notices:
+            self.status_bar.showMessage(" | ".join(_notices), 15000)
 
         # 应用初始主题（若开启跟随时间自动切换，则先按当前时间决定深/浅色）
         if self.auto_time:
@@ -313,54 +343,65 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
     def _init_menu(self):
         menubar = self.menuBar()
+        menubar.setStyleSheet("")
+        _mi = lambda sp: _gray_icon(self.style().standardIcon(sp))
 
-        # 文件菜单
+        # ── 文件菜单 ──
         file_menu = menubar.addMenu(tr("文件(&F)"))
+        file_menu.setStyleSheet("")
 
         self.act_export = QAction(tr("导出扫描结果"), self)
+        self.act_export.setIcon(_mi(QStyle.SP_DialogSaveButton))
         self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self._export_results)
         file_menu.addAction(self.act_export)
 
         act_print = QAction(tr("打印..."), self)
+        act_print.setIcon(_mi(QStyle.SP_FileDialogContentsView))
         act_print.setShortcut(QKeySequence("Ctrl+P"))
         act_print.triggered.connect(self._print_results)
         file_menu.addAction(act_print)
 
         file_menu.addSeparator()
 
+        act_lib_manage = QAction(tr("管理地址库..."), self)
+        act_lib_manage.setIcon(_mi(QStyle.SP_DirOpenIcon))
+        act_lib_manage.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        act_lib_manage.triggered.connect(self._open_library_manager)
+        file_menu.addAction(act_lib_manage)
+
+        act_lib_import = QAction(tr("导入地址库"), self)
+        act_lib_import.setIcon(_mi(QStyle.SP_ArrowDown))
+        act_lib_import.setShortcut(QKeySequence("Ctrl+I"))
+        act_lib_import.triggered.connect(self._import_excel)
+        file_menu.addAction(act_lib_import)
+
+        act_lib_export = QAction(tr("导出地址库"), self)
+        act_lib_export.setIcon(_mi(QStyle.SP_ArrowUp))
+        act_lib_export.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        act_lib_export.triggered.connect(self._export_library)
+        file_menu.addAction(act_lib_export)
+
+        file_menu.addSeparator()
+
         act_exit = QAction(tr("退出"), self)
+        act_exit.setIcon(_mi(QStyle.SP_DialogCloseButton))
         act_exit.setShortcut(QKeySequence("Alt+F4"))
         act_exit.triggered.connect(self.close)
         file_menu.addAction(act_exit)
 
-        # MAC 地址库菜单
-        lib_menu = menubar.addMenu(tr("地址库(&L)"))
-
-        act_lib_manage = QAction(tr("管理地址库..."), self)
-        act_lib_manage.setShortcut(QKeySequence("Ctrl+Shift+M"))
-        act_lib_manage.triggered.connect(self._open_library_manager)
-        lib_menu.addAction(act_lib_manage)
-
-        act_lib_import = QAction(tr("导入地址库"), self)
-        act_lib_import.setShortcut(QKeySequence("Ctrl+I"))
-        act_lib_import.triggered.connect(self._import_excel)
-        lib_menu.addAction(act_lib_import)
-
-        act_lib_export = QAction(tr("导出地址库"), self)
-        act_lib_export.setShortcut(QKeySequence("Ctrl+Shift+I"))
-        act_lib_export.triggered.connect(self._export_library)
-        lib_menu.addAction(act_lib_export)
-
-        # 扫描菜单
+        # ── 扫描菜单 ──
         scan_menu = menubar.addMenu(tr("扫描(&S)"))
+        scan_menu.setStyleSheet("")
 
         act_scan = QAction(tr("开始扫描"), self)
+        act_scan.setIcon(_mi(QStyle.SP_MediaPlay))
         act_scan.setShortcut(QKeySequence("F5"))
         act_scan.triggered.connect(self._start_scan)
         scan_menu.addAction(act_scan)
 
         act_stop = QAction(tr("停止扫描"), self)
+        act_stop.setIcon(_mi(QStyle.SP_MediaStop))
         act_stop.setShortcut(QKeySequence("Esc"))
         act_stop.triggered.connect(self._stop_scan)
         scan_menu.addAction(act_stop)
@@ -368,35 +409,40 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         scan_menu.addSeparator()
 
         act_add_range = QAction(tr("添加网段"), self)
+        act_add_range.setIcon(_mi(QStyle.SP_FileDialogNewFolder))
         act_add_range.setShortcut(QKeySequence("Ctrl+Shift+R"))
         act_add_range.triggered.connect(self._add_ip_range)
         scan_menu.addAction(act_add_range)
 
         act_clear_ranges = QAction(tr("清空网段"), self)
+        act_clear_ranges.setIcon(_mi(QStyle.SP_TrashIcon))
         act_clear_ranges.setShortcut(QKeySequence("Ctrl+Shift+L"))
         act_clear_ranges.triggered.connect(self._clear_ranges)
         scan_menu.addAction(act_clear_ranges)
 
         self.act_clear = QAction(tr("清空结果"), self)
+        self.act_clear.setIcon(_mi(QStyle.SP_DialogDiscardButton))
         self.act_clear.setShortcut(QKeySequence("Ctrl+Shift+K"))
         self.act_clear.triggered.connect(self._clear_results)
         scan_menu.addAction(self.act_clear)
 
         scan_menu.addSeparator()
 
-        # 发现子菜单：子网扫描 + 独立 mDNS 发现
         discover_sub = scan_menu.addMenu(tr("发现"))
+        discover_sub.setStyleSheet("")
+        discover_sub.setIcon(_mi(QStyle.SP_DriveNetIcon))
         act_scan_local = QAction(tr("扫描本机所在子网"), self)
+        act_scan_local.setIcon(_mi(QStyle.SP_DriveHDIcon))
         act_scan_local.setShortcut(QKeySequence("Ctrl+1"))
         act_scan_local.triggered.connect(self._scan_local_subnet)
         discover_sub.addAction(act_scan_local)
-
         act_scan_c = QAction(tr("扫描 C 类子网"), self)
+        act_scan_c.setIcon(_mi(QStyle.SP_DriveNetIcon))
         act_scan_c.setShortcut(QKeySequence("Ctrl+2"))
         act_scan_c.triggered.connect(self._scan_c_class_subnet)
         discover_sub.addAction(act_scan_c)
-
         act_mdns = QAction(tr("网络 mDNS 发现"), self)
+        act_mdns.setIcon(_mi(QStyle.SP_BrowserReload))
         act_mdns.setShortcut(QKeySequence("Ctrl+3"))
         act_mdns.setToolTip(tr("对当前本地链路做 mDNS/DNS-SD 组播发现，发现打印机/NAS/Apple 设备等"))
         act_mdns.triggered.connect(self._run_mdns_discovery)
@@ -404,16 +450,111 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         scan_menu.addSeparator()
 
-        # 端口扫描：原工具栏复选框，移入菜单
-        scan_menu.addAction(self.port_scan_check)
+        act_shutdown = QAction(tr("远程关机"), self)
+        act_shutdown.setIcon(_mi(QStyle.SP_DialogCancelButton))
+        act_shutdown.setToolTip(tr("向目标发送关机指令 (shutdown /s /m)"))
+        act_shutdown.triggered.connect(lambda: self._remote_power("shutdown"))
+        scan_menu.addAction(act_shutdown)
 
-        # mDNS 设备发现：扫描时默认开启，可关闭
-        scan_menu.addAction(self.mdns_check)
+        act_reboot = QAction(tr("远程重启"), self)
+        act_reboot.setIcon(_mi(QStyle.SP_BrowserReload))
+        act_reboot.setToolTip(tr("向目标发送重启指令 (shutdown /r /m)"))
+        act_reboot.triggered.connect(lambda: self._remote_power("reboot"))
+        scan_menu.addAction(act_reboot)
 
-        # 端口探测方式：全连接 / SYN 半开 / UDP（单选项）
+        # ── 分析菜单 ──
+        analysis_menu = menubar.addMenu(tr("分析(&A)"))
+        analysis_menu.setStyleSheet("")
+
+        act_history = QAction(tr("历史对比..."), self)
+        act_history.setIcon(_mi(QStyle.SP_ArrowBack))
+        act_history.setShortcut(QKeySequence("Ctrl+H"))
+        act_history.triggered.connect(self._open_history_compare)
+        analysis_menu.addAction(act_history)
+
+        act_history_query = QAction(tr("历史检索..."), self)
+        act_history_query.setIcon(_mi(QStyle.SP_FileDialogListView))
+        act_history_query.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        act_history_query.setToolTip(tr("跨快照按类型/网段/首见时间/IP 检索历史设备"))
+        act_history_query.triggered.connect(self._open_history_query)
+        analysis_menu.addAction(act_history_query)
+
+        analysis_menu.addSeparator()
+
+        self.act_conflict = QAction(tr("冲突检测"), self)
+        self.act_conflict.setIcon(_mi(QStyle.SP_MessageBoxWarning))
+        self.act_conflict.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        self.act_conflict.setToolTip(tr("检测 IP/MAC 冲突、未知设备等异常"))
+        self.act_conflict.triggered.connect(self._run_conflict_detection)
+        analysis_menu.addAction(self.act_conflict)
+
+        self.act_change = QAction(tr("变更检测"), self)
+        self.act_change.setIcon(_mi(QStyle.SP_BrowserReload))
+        self.act_change.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        self.act_change.setToolTip(tr("对比上次扫描快照，发现新增/消失/替换/改址等设备变动"))
+        self.act_change.triggered.connect(lambda: self._run_change_detection(silent=False))
+        analysis_menu.addAction(self.act_change)
+
+        analysis_menu.addSeparator()
+
+        act_wmi = QAction(tr("WMI 设备识别 (需管理员)..."), self)
+        act_wmi.setIcon(_mi(QStyle.SP_MessageBoxInformation))
+        act_wmi.setShortcut(QKeySequence("Ctrl+Shift+W"))
+        act_wmi.setToolTip(tr("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据"))
+        act_wmi.triggered.connect(lambda: self._run_wmi_identification())
+        analysis_menu.addAction(act_wmi)
+
+        act_snmpv3 = QAction(tr("SNMPv3 用户配置..."), self)
+        act_snmpv3.setIcon(_mi(QStyle.SP_DriveNetIcon))
+        act_snmpv3.setToolTip(tr("配置 SNMPv3 USM 用户（认证/加密）用于设备识别；未配置时回退到 v2c 团体字"))
+        act_snmpv3.triggered.connect(self._configure_snmp_v3)
+        analysis_menu.addAction(act_snmpv3)
+
+        act_netbios = QAction(tr("NetBIOS 识别（轻量）"), self)
+        act_netbios.setIcon(_mi(QStyle.SP_MessageBoxInformation))
+        act_netbios.setToolTip(tr("零凭据、不需管理员：获取计算机名/工作组/当前用户/MAC（同网段 UDP/137）"))
+        act_netbios.triggered.connect(lambda: self._run_netbios_identification())
+        analysis_menu.addAction(act_netbios)
+
+        act_switch_map = QAction(tr("交换机端口映射..."), self)
+        act_switch_map.setIcon(_mi(QStyle.SP_DriveNetIcon))
+        act_switch_map.setToolTip(tr("通过 SNMP 获取交换机 MAC 转发表，映射 MAC → 物理端口"))
+        act_switch_map.triggered.connect(self._show_switch_port_mapping)
+        analysis_menu.addAction(act_switch_map)
+
+        analysis_menu.addSeparator()
+
+        act_subnet_util = QAction(tr("子网利用率..."), self)
+        act_subnet_util.setIcon(_mi(QStyle.SP_FileDialogDetailedView))
+        act_subnet_util.setShortcut(QKeySequence("Ctrl+U"))
+        act_subnet_util.setToolTip(tr("按 /24 子网聚合，查看各网段在线占比与设备分布"))
+        act_subnet_util.triggered.connect(self._show_subnet_utilization)
+        analysis_menu.addAction(act_subnet_util)
+
+        act_audit_log = QAction(tr("审计日志..."), self)
+        act_audit_log.setIcon(_mi(QStyle.SP_FileDialogContentsView))
+        act_audit_log.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        act_audit_log.setToolTip(tr("查看扫描活动记录（开始/停止/完成、冲突检测等）"))
+        act_audit_log.triggered.connect(self._show_audit_log)
+        analysis_menu.addAction(act_audit_log)
+
+        # ── 设置菜单 ──
+        settings_menu = menubar.addMenu(tr("设置(&O)"))
+        settings_menu.setStyleSheet("")
+
+        self.port_scan_check.setIcon(_mi(QStyle.SP_FileDialogContentsView))
+        settings_menu.addAction(self.port_scan_check)
+
+        self.mdns_check.setIcon(_mi(QStyle.SP_FileDialogInfoView))
+        settings_menu.addAction(self.mdns_check)
+
+        settings_menu.addSeparator()
+
         self.tcp_mode_group = QActionGroup(self)
         self.tcp_mode_group.setExclusive(True)
-        mode_sub = scan_menu.addMenu(tr("端口探测方式"))
+        mode_sub = settings_menu.addMenu(tr("端口探测方式"))
+        mode_sub.setStyleSheet("")
+        mode_sub.setIcon(_mi(QStyle.SP_FileDialogDetailedView))
         for _m, _label in (("connect", tr("TCP 全连接")),
                            ("syn", tr("TCP SYN 半开")),
                            ("udp", tr("UDP 探测"))):
@@ -426,13 +567,14 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             )
             mode_sub.addAction(_a)
 
-        # 扫描级别：快速 / 标准 / 全端口（单选项，决定端口探测范围）
         self.scan_level_group = QActionGroup(self)
         self.scan_level_group.setExclusive(True)
-        level_sub = scan_menu.addMenu(tr("扫描级别"))
+        level_sub = settings_menu.addMenu(tr("扫描级别"))
+        level_sub.setStyleSheet("")
+        level_sub.setIcon(_mi(QStyle.SP_FileDialogListView))
         level_sub.setToolTip(tr("控制端口探测的端口范围（快速日常巡检 / 标准深度 / 全端口安全评估）"))
         for _lv in ("quick", "standard", "all"):
-            _a = QAction(SCAN_LEVEL_LABELS.get(_lv, _lv), self, checkable=True)
+            _a = QAction(scan_level_label(_lv), self, checkable=True)
             _a.setData(_lv)
             _a.setActionGroup(self.scan_level_group)
             _a.setChecked(getattr(self, "scan_level", "quick") == _lv)
@@ -441,157 +583,52 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             )
             level_sub.addAction(_a)
 
-        settings_sub = scan_menu.addMenu(tr("扫描设置"))
+        scan_settings_sub = settings_menu.addMenu(tr("扫描设置"))
+        scan_settings_sub.setStyleSheet("")
+        scan_settings_sub.setIcon(_mi(QStyle.SP_FileDialogListView))
         act_open_settings = QAction(tr("打开扫描设置对话框..."), self)
+        act_open_settings.setIcon(_mi(QStyle.SP_FileDialogListView))
         act_open_settings.triggered.connect(self._open_scan_settings)
-        settings_sub.addAction(act_open_settings)
-        settings_sub.addSeparator()
+        scan_settings_sub.addAction(act_open_settings)
         for _proto in sorted(PROTOCOL_PORTS.keys()):
-            _act = QAction(_proto, self, checkable=True)
-            _act.setToolTip(f"扫描 {_proto} 服务")
+            # 菜单显示本地化名称，但 setData/勾选逻辑一律用规范代码
+            _act = QAction(service_label(_proto), self, checkable=True)
+            _act.setData(_proto)
+            _act.setToolTip(f"扫描 {service_label(_proto)} 服务")
             _act.setChecked(_proto in self.selected_protocols)
             _act.toggled.connect(
                 lambda _checked, _p=_proto: self._toggle_protocol(_p, _checked)
             )
-            settings_sub.addAction(_act)
+            scan_settings_sub.addAction(_act)
 
-        # 分析菜单（顶级菜单，从扫描子菜单提升）
-        analysis_menu = menubar.addMenu(tr("分析(&A)"))
-
-        act_history = QAction(tr("历史对比..."), self)
-        act_history.setShortcut(QKeySequence("Ctrl+H"))
-        act_history.triggered.connect(self._open_history_compare)
-        analysis_menu.addAction(act_history)
-
-        act_history_query = QAction(tr("历史检索..."), self)
-        act_history_query.setShortcut(QKeySequence("Ctrl+Shift+H"))
-        act_history_query.setToolTip(tr("跨快照按类型/网段/首见时间/IP 检索历史设备"))
-        act_history_query.triggered.connect(self._open_history_query)
-        analysis_menu.addAction(act_history_query)
-
-        analysis_menu.addSeparator()
-
-        self.act_conflict = QAction(tr("冲突检测"), self)
-        self.act_conflict.setShortcut(QKeySequence("Ctrl+Shift+C"))
-        self.act_conflict.setToolTip(tr("检测 IP/MAC 冲突、未知设备等异常"))
-        self.act_conflict.triggered.connect(self._run_conflict_detection)
-        analysis_menu.addAction(self.act_conflict)
-
-        self.act_change = QAction(tr("变更检测"), self)
-        self.act_change.setShortcut(QKeySequence("Ctrl+Shift+V"))
-        self.act_change.setToolTip(tr("对比上次扫描快照，发现新增/消失/替换/改址等设备变动"))
-        self.act_change.triggered.connect(lambda: self._run_change_detection(silent=False))
-        analysis_menu.addAction(self.act_change)
-
-        analysis_menu.addSeparator()
-
-        act_subnet_util = QAction(tr("子网利用率..."), self)
-        act_subnet_util.setShortcut(QKeySequence("Ctrl+U"))
-        act_subnet_util.setToolTip(tr("按 /24 子网聚合，查看各网段在线占比与设备分布"))
-        act_subnet_util.triggered.connect(self._show_subnet_utilization)
-        analysis_menu.addAction(act_subnet_util)
-
-        act_audit_log = QAction(tr("审计日志..."), self)
-        act_audit_log.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        act_audit_log.setToolTip(tr("查看扫描活动记录（开始/停止/完成、冲突检测等）"))
-        act_audit_log.triggered.connect(self._show_audit_log)
-        analysis_menu.addAction(act_audit_log)
-
-        # 工具菜单 (内置 Ping/Tracert/Telnet/SSH 等网络工具, P2)
-        tool_menu = menubar.addMenu(tr("工具(&T)"))
-
-        act_ping = QAction(tr("Ping (持续)"), self)
-        act_ping.setShortcut(QKeySequence("Ctrl+P"))
-        act_ping.setToolTip(tr("对目标执行持续 Ping (ping -t)"))
-        act_ping.triggered.connect(lambda: self._launch_network_tool("ping"))
-        tool_menu.addAction(act_ping)
-
-        act_tracert = QAction(tr("Tracert (路由追踪)"), self)
-        act_tracert.setShortcut(QKeySequence("Ctrl+R"))
-        act_tracert.setToolTip(tr("对目标执行路由追踪 (tracert)"))
-        act_tracert.triggered.connect(lambda: self._launch_network_tool("tracert"))
-        tool_menu.addAction(act_tracert)
-
-        act_telnet = QAction(tr("Telnet"), self)
-        act_telnet.setShortcut(QKeySequence("Ctrl+N"))
-        act_telnet.setToolTip(tr("对目标启动 Telnet 会话"))
-        act_telnet.triggered.connect(lambda: self._launch_network_tool("telnet"))
-        tool_menu.addAction(act_telnet)
-
-        act_ssh = QAction(tr("SSH"), self)
-        act_ssh.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        act_ssh.setToolTip(tr("对目标启动 SSH 会话 (需 OpenSSH 客户端)"))
-        act_ssh.triggered.connect(lambda: self._launch_network_tool("ssh"))
-        tool_menu.addAction(act_ssh)
-
-        tool_menu.addSeparator()
-
-        act_rdp = QAction(tr("远程桌面 (RDP)"), self)
-        act_rdp.setShortcut(QKeySequence("Ctrl+M"))
-        act_rdp.setToolTip(tr("用系统 mstsc 远程桌面连接目标"))
-        act_rdp.triggered.connect(lambda: self._launch_network_tool("rdp"))
-        tool_menu.addAction(act_rdp)
-
-        act_cmd = QAction(tr("打开命令提示符"), self)
-        act_cmd.setShortcut(QKeySequence("Ctrl+J"))
-        act_cmd.setToolTip(tr("打开以目标命名的命令提示符窗口"))
-        act_cmd.triggered.connect(lambda: self._launch_network_tool("cmd"))
-        tool_menu.addAction(act_cmd)
-
-        tool_menu.addSeparator()
-
-        act_shutdown = QAction(tr("远程关机"), self)
-        act_shutdown.setToolTip(tr("向目标发送关机指令 (shutdown /s /m)"))
-        act_shutdown.triggered.connect(lambda: self._remote_power("shutdown"))
-        tool_menu.addAction(act_shutdown)
-
-        act_reboot = QAction(tr("远程重启"), self)
-        act_reboot.setToolTip(tr("向目标发送重启指令 (shutdown /r /m)"))
-        act_reboot.triggered.connect(lambda: self._remote_power("reboot"))
-        tool_menu.addAction(act_reboot)
-
-        tool_menu.addSeparator()
-        act_wmi = QAction(tr("WMI 设备识别 (需管理员)..."), self)
-        act_wmi.setShortcut(QKeySequence("Ctrl+Shift+W"))
-        act_wmi.setToolTip(tr("对在线疑似 Windows 设备做 WMI 远程识别（厂商/型号/序列号/系统），需管理员凭据"))
-        act_wmi.triggered.connect(lambda: self._run_wmi_identification())
-        tool_menu.addAction(act_wmi)
-
-        act_netbios = QAction(tr("NetBIOS 识别（轻量）"), self)
-        act_netbios.setToolTip(tr("零凭据、不需管理员：获取计算机名/工作组/当前用户/MAC（同网段 UDP/137）"))
-        act_netbios.triggered.connect(lambda: self._run_netbios_identification())
-        tool_menu.addAction(act_netbios)
-
-        act_switch_map = QAction(tr("交换机端口映射..."), self)
-        act_switch_map.setToolTip(tr("通过 SNMP 获取交换机 MAC 转发表，映射 MAC → 物理端口"))
-        act_switch_map.triggered.connect(self._show_switch_port_mapping)
-        tool_menu.addAction(act_switch_map)
-
-        # 视图菜单（仿 Advanced IP Scanner「查看」菜单：左列复选/图标，右列文字）
-        view_menu = menubar.addMenu(tr("查看(&V)"))
-        # 主题仅由「跟随时间自动切换」控制，不再提供手动切换入口
+        settings_menu.addSeparator()
 
         self.act_auto_theme = QAction(tr("跟随时间自动切换主题"), self)
+        self.act_auto_theme.setIcon(_mi(QStyle.SP_DialogApplyButton))
         self.act_auto_theme.setCheckable(True)
         self.act_auto_theme.setChecked(self.auto_time)
         self.act_auto_theme.triggered.connect(self._toggle_auto_theme)
-        view_menu.addAction(self.act_auto_theme)
+        settings_menu.addAction(self.act_auto_theme)
 
-        view_menu.addSeparator()
-
-        lang_menu = view_menu.addMenu(tr("语言 / Language"))
+        lang_menu = settings_menu.addMenu(tr("语言 / Language"))
+        lang_menu.setStyleSheet("")
+        lang_menu.setIcon(_mi(QStyle.SP_FileDialogListView))
         self.act_lang_zh = QAction(tr("中文"), self)
         self.act_lang_zh.setCheckable(True)
         self.act_lang_zh.triggered.connect(lambda: self._switch_language("zh-CN"))
         lang_menu.addAction(self.act_lang_zh)
-
         self.act_lang_en = QAction(tr("English"), self)
         self.act_lang_en.setCheckable(True)
         self.act_lang_en.triggered.connect(lambda: self._switch_language("en-US"))
         lang_menu.addAction(self.act_lang_en)
 
-        # 显示列子菜单 (P2-3)
+        # ── 查看菜单 ──
+        view_menu = menubar.addMenu(tr("查看(&V)"))
+        view_menu.setStyleSheet("")
+
         col_menu = view_menu.addMenu(tr("显示列"))
+        col_menu.setStyleSheet("")
+        col_menu.setIcon(_mi(QStyle.SP_FileDialogDetailedView))
         self._col_actions = {}
         _col_labels = [
             tr("IP地址"), tr("状态"), tr("主机名"), tr("MAC地址"), tr("制造商"),
@@ -607,32 +644,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             col_menu.addAction(_act)
             self._col_actions[_ci] = _act
 
-        view_menu.addSeparator()
-
-        act_expand = QAction(tr("展开全部"), self)
-        act_expand.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_ArrowDown)))
-        act_expand.setShortcut(QKeySequence("Ctrl++"))
-        act_expand.triggered.connect(self._expand_all_items)
-        view_menu.addAction(act_expand)
-
-        act_collapse = QAction(tr("收起全部"), self)
-        act_collapse.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_ArrowUp)))
-        act_collapse.setShortcut(QKeySequence("Ctrl+-"))
-        act_collapse.triggered.connect(self._collapse_all_items)
-        view_menu.addAction(act_collapse)
-
-        view_menu.addSeparator()
-
-        act_topology = QAction(tr("拓扑视图..."), self)
-        act_topology.setIcon(_gray_icon(self.style().standardIcon(QStyle.SP_DriveNetIcon)))
-        act_topology.setShortcut(QKeySequence("Ctrl+T"))
-        act_topology.triggered.connect(self._open_topology)
-        view_menu.addAction(act_topology)
-
-        view_menu.addSeparator()
-
-        # 筛选：原工具栏下拉框，移入菜单（单选项驱动 filter_combo）
         filter_menu = view_menu.addMenu(tr("筛选"))
+        filter_menu.setStyleSheet("")
+        filter_menu.setIcon(_mi(QStyle.SP_FileDialogContentsView))
         _filter_opts = [tr("全部"), tr("仅在线"), tr("仅离线"), tr("Excel已匹配"), tr("有服务")]
         _filter_group = QActionGroup(self)
         _filter_group.setExclusive(True)
@@ -644,17 +658,86 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             )
             filter_menu.addAction(_fact)
 
-        # 帮助菜单
+        view_menu.addSeparator()
+
+        act_expand = QAction(tr("展开全部"), self)
+        act_expand.setIcon(_mi(QStyle.SP_ArrowDown))
+        act_expand.setShortcut(QKeySequence("Ctrl++"))
+        act_expand.triggered.connect(self._expand_all_items)
+        view_menu.addAction(act_expand)
+
+        act_collapse = QAction(tr("收起全部"), self)
+        act_collapse.setIcon(_mi(QStyle.SP_ArrowUp))
+        act_collapse.setShortcut(QKeySequence("Ctrl+-"))
+        act_collapse.triggered.connect(self._collapse_all_items)
+        view_menu.addAction(act_collapse)
+
+        act_topology = QAction(tr("拓扑视图..."), self)
+        act_topology.setIcon(_mi(QStyle.SP_DriveNetIcon))
+        act_topology.setShortcut(QKeySequence("Ctrl+T"))
+        act_topology.triggered.connect(self._open_topology)
+        view_menu.addAction(act_topology)
+
+        # ── 工具菜单 ──
+        tool_menu = menubar.addMenu(tr("工具(&T)"))
+        tool_menu.setStyleSheet("")
+
+        act_ping = QAction(tr("Ping (持续)"), self)
+        act_ping.setIcon(_mi(QStyle.SP_MediaSeekForward))
+        act_ping.setShortcut(QKeySequence("Ctrl+G"))
+        act_ping.setToolTip(tr("对目标执行持续 Ping (ping -t)"))
+        act_ping.triggered.connect(lambda: self._launch_network_tool("ping"))
+        tool_menu.addAction(act_ping)
+
+        act_tracert = QAction(tr("Tracert (路由追踪)"), self)
+        act_tracert.setIcon(_mi(QStyle.SP_MediaSkipForward))
+        act_tracert.setShortcut(QKeySequence("Ctrl+R"))
+        act_tracert.setToolTip(tr("对目标执行路由追踪 (tracert)"))
+        act_tracert.triggered.connect(lambda: self._launch_network_tool("tracert"))
+        tool_menu.addAction(act_tracert)
+
+        tool_menu.addSeparator()
+
+        act_telnet = QAction(tr("Telnet"), self)
+        act_telnet.setIcon(_mi(QStyle.SP_DialogOpenButton))
+        act_telnet.setShortcut(QKeySequence("Ctrl+N"))
+        act_telnet.setToolTip(tr("对目标启动 Telnet 会话"))
+        act_telnet.triggered.connect(lambda: self._launch_network_tool("telnet"))
+        tool_menu.addAction(act_telnet)
+
+        act_ssh = QAction(tr("SSH"), self)
+        act_ssh.setIcon(_mi(QStyle.SP_DialogOpenButton))
+        act_ssh.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        act_ssh.setToolTip(tr("对目标启动 SSH 会话 (需 OpenSSH 客户端)"))
+        act_ssh.triggered.connect(lambda: self._launch_network_tool("ssh"))
+        tool_menu.addAction(act_ssh)
+
+        act_rdp = QAction(tr("远程桌面 (RDP)"), self)
+        act_rdp.setIcon(_mi(QStyle.SP_DriveHDIcon))
+        act_rdp.setShortcut(QKeySequence("Ctrl+M"))
+        act_rdp.setToolTip(tr("用系统 mstsc 远程桌面连接目标"))
+        act_rdp.triggered.connect(lambda: self._launch_network_tool("rdp"))
+        tool_menu.addAction(act_rdp)
+
+        act_cmd = QAction(tr("打开命令提示符"), self)
+        act_cmd.setIcon(_mi(QStyle.SP_CommandLink))
+        act_cmd.setShortcut(QKeySequence("Ctrl+J"))
+        act_cmd.setToolTip(tr("打开以目标命名的命令提示符窗口"))
+        act_cmd.triggered.connect(lambda: self._launch_network_tool("cmd"))
+        tool_menu.addAction(act_cmd)
+
+        # ── 帮助菜单 ──
         help_menu = menubar.addMenu(tr("帮助(&H)"))
+        help_menu.setStyleSheet("")
 
         act_oui_update = QAction(tr("检查 OUI 更新..."), self)
+        act_oui_update.setIcon(_mi(QStyle.SP_BrowserReload))
         act_oui_update.setToolTip(tr("从 IEEE 官网下载最新 MAC 厂商数据库"))
         act_oui_update.triggered.connect(self._update_oui_db)
         help_menu.addAction(act_oui_update)
 
-        help_menu.addSeparator()
-
         act_about = QAction(tr("关于"), self)
+        act_about.setIcon(_mi(QStyle.SP_DialogHelpButton))
         act_about.setShortcut(QKeySequence("F1"))
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
@@ -792,12 +875,22 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.selected_protocols = [p for p in protos if p in PROTOCOL_PORTS]
         if not self.selected_protocols:
             self.selected_protocols = list(PROTOCOL_PORTS.keys())
-        # IP 网段
+        # IP 网段：过滤掉无法解析 / 超过规模上限的旧配置，
+        # 否则升级前的 ini 里若存了超大网段，一扫描就会耗尽内存。
+        self._dropped_ranges = 0
         ranges = s.value("scan/ip_ranges", [])
         if isinstance(ranges, str):
             ranges = [r.strip() for r in ranges.splitlines() if r.strip()]
         if ranges:
-            self.ip_range_items = list(ranges)
+            kept, total = [], 0
+            for r in ranges:
+                n = count_ip_range(r)
+                if n <= 0 or n > MAX_IPS_PER_RANGE or total + n > MAX_IPS_TOTAL:
+                    self._dropped_ranges += 1
+                    continue
+                kept.append(r)
+                total += n
+            self.ip_range_items = kept
             self._update_range_list()
         # 窗口几何 & 状态
         geom = s.value("window/geometry")
@@ -850,7 +943,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         parts = []
         if self.ip_range_items:
             if total_ips is None:
-                total_ips = sum(len(parse_ip_range(r)) for r in self.ip_range_items)
+                total_ips = self._total_ips()
             parts.append(f"已添加: {len(self.ip_range_items)} 个网段, {total_ips} 个IP")
         if self.all_results:
             total = len(self.all_results)
@@ -872,7 +965,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
     def _update_range_list(self):
         if self.ip_range_items:
-            total_ips = sum(len(parse_ip_range(r)) for r in self.ip_range_items)
+            total_ips = self._total_ips()
             # 紧凑显示: 网段数 + IP总数 (保留兼容，但控件已隐藏)
             self.range_list_label.setText(
                 f"已添加: {len(self.ip_range_items)} 个网段, {total_ips} 个IP"
@@ -897,8 +990,12 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
 
     def _show_about(self):
+        _data_info = tr("数据目录：") + data_dir() + "\n" + tr("存放方式：") + data_dir_label()
         QMessageBox.about(self, tr("关于"), (
-            tr("<h3>局域网终端扫描工具</h3>" "<p>版本 1.0</p>")
+            tr("<h3>局域网终端扫描工具</h3>")
+            # 版本号从可翻译串里拆出来：它不需要翻译，混进去会导致
+            # 每次发版都要同步改语言包，且漏改时英文界面回退成中文。
+            + f"<p>{tr('版本')} {__version__}</p>"
             + tr("<p>功能：</p>") + "<ul>"
             + tr("<li>支持 CIDR / IP 范围 / 跨网段扫描</li>"
                  "<li>ICMP Ping + ARP 主动探测（发现禁 Ping 主机）+ 主机名 + 端口探测</li>")
@@ -910,12 +1007,24 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
                  "<li>操作系统探测（TTL 推测 + 服务 banner 提取版本）</li>")
             + tr("<li>设备指纹深度（端口/服务/mDNS/UPnP/SNMP 综合推断设备类型与型号）</li>"
                  "<li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>")
-            + "</ul>" + tr("<p style='color: #94A3B8;'>基于 PyQt5 开发</p>")
+            + "</ul>"
+            + f"<p style='color:#94A3B8; font-size:11px;'>{_data_info}</p>"
+            + tr("<p style='color: #94A3B8;'>基于 PyQt5 开发</p>")
         ))
 
     def closeEvent(self, event):
+        # 退出前必须停掉所有在跑的后台线程：
+        # QThread 对象若在 run() 未返回时被销毁，PyQt 会直接 abort 进程
+        # （"QThread: Destroyed while thread is still running"）。
+        for _thread in (self.scan_thread, self.wmi_thread, self.netbios_thread):
+            if _thread and _thread.isRunning():
+                _thread.stop()
         if self.scan_thread and self.scan_thread.isRunning():
-            self.scan_thread.stop()
             self.scan_thread.wait(3000)
+        # WMI 单次查询超时 8s，等待上限给到略大一点；取消后未开始的任务会被跳过
+        if self.wmi_thread and self.wmi_thread.isRunning():
+            self.wmi_thread.wait(10000)
+        if self.netbios_thread and self.netbios_thread.isRunning():
+            self.netbios_thread.wait(3000)
         self._save_settings()
         event.accept()

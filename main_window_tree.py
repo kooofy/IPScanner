@@ -6,12 +6,26 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QIcon, QPainter, QBrush, QPen, QPixmap
 
-from scanner import ScanResult, PROTOCOL_PORTS, format_ports_display
+from scanner import (ScanResult, PROTOCOL_PORTS, format_ports_display,
+                     SVC_HTTP, SVC_HTTPS, SVC_FTP, SVC_RDP,
+                     SVC_SNMP, SVC_SMB, SVC_MDNS, service_label,
+                     device_class_label, os_label)
 import audit_log
 from conflict_detector import SEVERITY_HIGH
 from ui_icons import get_pc_icons
-from styles import _ip_to_int, _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9
+from mac_library import MacMatcher
+from styles import _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9
+from ui_utils import _ip_to_int
+from scanner.wmi import transport_label
 from i18n import tr
+
+# 顶层设备项上缓存的"服务子项渲染签名"存放槽位。
+#
+# 第 0 列（树列）的 UserRole 被 IP 数值排序键占用（见 _set_item_data），
+# UserRole+1..+5 被子项的 proto/ip/descr/name/banner 占用，
+# 因此 +6 是安全的空槽。存在项自身上（而不是另开一个 dict）的好处是
+# 生命周期自动跟随项，清空表格时无需额外清理。
+_ROLE_SVC_SIG = Qt.UserRole + 6
 
 class ResultTreeItem(QTreeWidgetItem):
     """结果树项：重写 < 以支持按列的数值排序（IP / 响应时间 / 序号）。
@@ -122,14 +136,40 @@ class TreeMixin:
         self._add_service_children(item, result)
 
     def _add_service_children(self, item: QTreeWidgetItem, result: ScanResult):
-        """为设备项添加服务子项（展开后跨列显示），仿 Advanced IP Scanner 风格"""
-        item.takeChildren()
+        """为设备项添加服务子项（展开后跨列显示），仿 Advanced IP Scanner 风格。
 
+        子项内容完全由 result 的服务/WMI/NetBIOS 字段决定，因此先算一个签名：
+        与上次渲染一致就直接返回，**不**执行 takeChildren()。
+
+        旧实现每次都无条件 takeChildren() 全量重建，带来两个真实问题：
+          - 已经展开的设备，其子项选中态与展开态在每次刷新时被清空；
+          - 无谓的重建造成可感知的闪烁（扫描过程中每行都会被刷新一次）。
+        """
         # 优先使用带 banner 的详细信息；旧结果无 details 时回退 services 列表
         details = result.service_details or []
         if not details and result.services:
             details = [{"proto": p, "port": PROTOCOL_PORTS.get(p.upper(), 0), "banner": ""}
                        for p in result.services]
+
+        # 签名必须覆盖所有会影响子项内容的输入，包括**翻译后的**协议名 ——
+        # 否则切换界面语言后签名不变，子项会停留在旧语言。
+        sig = (
+            tuple((d.get("proto", ""), service_label(d.get("proto", "")),
+                   d.get("banner", "")) for d in details),
+            bool(getattr(result, "wmi_identified", False)),
+            result.wmi_manufacturer, result.wmi_model, result.wmi_serial,
+            result.wmi_os, result.wmi_user,
+            getattr(result, "wmi_transport", ""),
+            bool(getattr(result, "netbios_identified", False)),
+            result.netbios_name, result.netbios_workgroup,
+            result.netbios_user, result.netbios_mac,
+        )
+        if item.data(0, _ROLE_SVC_SIG) == sig:
+            return
+        item.setData(0, _ROLE_SVC_SIG, sig)
+
+        item.takeChildren()
+
         if (not details and not getattr(result, "wmi_identified", False)
                 and not getattr(result, "netbios_identified", False)):
             item.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
@@ -137,13 +177,13 @@ class TreeMixin:
         # 即使没有服务子项，也要展示 WMI 识别结果，故此处统一标记为可展开
         item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
 
-        item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
         parent_index = self.table.indexFromItem(item)
         for idx, detail in enumerate(details):
             proto = detail.get("proto", "")
-            port = detail.get("port", 0)
             banner = detail.get("banner", "")
-            proto_upper = proto.upper()
+            # proto 是语言无关的规范代码（见 scanner/constants.py），
+            # 显示名必须经 service_label() 惰性翻译，不能直接 .upper()
+            proto_label = service_label(proto)
 
             child = QTreeWidgetItem()
             # UserRole 元数据固定存于第 0 列（IP/树列，点击逻辑从此读取）
@@ -162,10 +202,10 @@ class TreeMixin:
             if banner:
                 # 保持与 AIP 一致的子项格式：proto, banner
                 # 例如 HTTPS 会显示为 "HTTPS, Tunnel is OpenSSL TLSv1.2: xxx"
-                display = f"{proto_upper}, {banner}"
+                display = f"{proto_label}, {banner}"
             else:
                 # 空 banner 时不再回退到 "port X"，与 AIP 保持一致：仅显示协议名
-                display = proto_upper
+                display = proto_label
             child.setText(0, display)
             child.setForeground(0, self._link_color())
             child.setToolTip(0, display)
@@ -175,7 +215,7 @@ class TreeMixin:
             # 注意：必须使用 QTreeView.setFirstColumnSpanned(row, parent_index, True) 才能生效。
 
             # SNMP 保留 sysName/sysDescr 供点击弹窗展示
-            if proto_upper == tr("SNMP"):
+            if proto.upper() == SVC_SNMP:
                 child.setData(0, Qt.UserRole + 3, result.snmp_sys_descr)
                 child.setData(0, Qt.UserRole + 4, result.snmp_sys_name)
 
@@ -198,7 +238,14 @@ class TreeMixin:
                 parts.append(result.wmi_os)
             if result.wmi_user:
                 parts.append(f"用户:{result.wmi_user}")
-            wmi_text = "WMI, " + " · ".join(parts) if parts else tr("WMI, 已识别")
+            if parts:
+                wmi_text = "WMI, " + " · ".join(parts)
+            else:
+                wmi_text = tr("WMI, 已识别")
+            _tv = getattr(result, "wmi_transport", "")
+            if _tv:
+                # 标注实际生效的通路（DCOM / WinRM）——排障时一眼看出走的哪条
+                wmi_text += f" · {transport_label(_tv)}"
             wmi_child.setIcon(0, self.style().standardIcon(QStyle.SP_ComputerIcon))
             wmi_child.setText(0, wmi_text)
             wmi_child.setForeground(0, self._link_color())
@@ -240,16 +287,16 @@ class TreeMixin:
 
     def _service_icon(self, proto: str):
         proto_upper = proto.upper()
-        if proto_upper in (tr("HTTP"), tr("HTTPS")):
+        if proto_upper in (SVC_HTTP, SVC_HTTPS):
             return self._globe_icon()
         icon_map = {
-            tr("FTP"): QStyle.SP_DirIcon,
-            tr("RDP"): QStyle.SP_ComputerIcon,
-            tr("SSH"): QStyle.SP_CommandLink,
+            SVC_FTP: QStyle.SP_DirIcon,
+            SVC_RDP: QStyle.SP_ComputerIcon,
+            "SSH": QStyle.SP_CommandLink,
             "TELNET": QStyle.SP_CommandLink,
-            tr("SNMP"): QStyle.SP_DriveNetIcon,
-            tr("SMB共享"): QStyle.SP_DriveNetIcon,
-            tr("mDNS"): QStyle.SP_DriveNetIcon,
+            SVC_SNMP: QStyle.SP_DriveNetIcon,
+            SVC_SMB: QStyle.SP_DriveNetIcon,
+            SVC_MDNS: QStyle.SP_DriveNetIcon,
         }
         sp = icon_map.get(proto_upper)
         if sp:
@@ -307,13 +354,13 @@ class TreeMixin:
         elif result.discovery_method == "mdns":
             tip += tr(" （mDNS 发现 · 组播发现设备）")
         if result.os_guess:
-            tip += f" · OS: {result.os_guess}"
+            tip += f" · OS: {os_label(result.os_guess)}"
             if result.os_detail:
                 tip += f" ({result.os_detail})"
         if result.shares:
             tip += f" · 共享: {', '.join(result.shares)}"
         if result.device_class:
-            tip += f" · 设备: {result.device_class}"
+            tip += f" · 设备: {device_class_label(result.device_class)}"
             if result.device_model:
                 tip += f" ({result.device_model})"
         if getattr(result, "wmi_identified", False):
@@ -393,19 +440,19 @@ class TreeMixin:
         item.setFont(8, _FONT_CONSOLAS_9)
 
         svc = result.services or []
-        services_text = ", ".join(svc) if svc else "—"
+        services_text = ", ".join(service_label(x) for x in svc) if svc else "—"
         item.setText(9, services_text)
         item.setData(9, Qt.UserRole, list(svc))
 
         # 操作系统列 (col 10)：TTL 推测族 + banner 版本
         os_text = ""
         if result.os_guess or result.os_detail:
-            os_text = (f"{result.os_guess} {result.os_detail}".strip())
+            os_text = f"{os_label(result.os_guess)} {result.os_detail}".strip()
         item.setText(10, os_text or "—")
 
         # 设备类型列 (col 11)：指纹推断的设备类别 + 型号，便于一眼识别具体设备
         if result.device_class:
-            class_text = result.device_class
+            class_text = device_class_label(result.device_class)
             if result.device_model:
                 class_text = f"{class_text} · {result.device_model}"
             item.setText(11, class_text)
@@ -457,7 +504,7 @@ class TreeMixin:
             proto = item.data(0, Qt.UserRole + 1)
             ip = item.data(0, Qt.UserRole + 2)
             if proto and ip:
-                if proto == tr("SNMP"):
+                if proto.upper() == SVC_SNMP:
                     descr = item.data(0, Qt.UserRole + 3) or ""
                     name = item.data(0, Qt.UserRole + 4) or ""
                     self._show_snmp_info(ip, name, descr)
@@ -531,13 +578,11 @@ class TreeMixin:
         act_copy_host.triggered.connect(lambda: self._copy_item_cell(top_item, 2))
         menu.addAction(act_copy_host)
 
-        menu.addSeparator()
 
         act_copy_row = QAction(tr("复制整行"), self)
         act_copy_row.triggered.connect(lambda: self._copy_item_row(top_item))
         menu.addAction(act_copy_row)
 
-        menu.addSeparator()
 
         act_rescan = QAction(tr("重新扫描此 IP"), self)
         act_rescan.triggered.connect(lambda: self._rescan_single_item(top_item))
@@ -575,7 +620,6 @@ class TreeMixin:
                 )
             )
 
-        menu.addSeparator()
 
         if lib_dev:
             act_edit_lib = QAction(tr("编辑地址库条目"), self)
@@ -622,17 +666,16 @@ class TreeMixin:
 
 
     def _refresh_matches_from_library(self):
-        """用当前地址库重新标注已有扫描结果 (导入/编辑地址库后调用)"""
-        if not self.library.is_loaded():
+        """用当前地址库重新标注已有扫描结果 (导入/编辑地址库后调用)。
+
+        用内存索引整库匹配一次，避免逐条查 SQLite（地址库变更属低频操作，
+        但仍应保持 O(n) 的字典查找而非 O(n) 次数据库往返）。
+        """
+        matcher = MacMatcher.from_library(self.library)
+        if matcher is None:
             return
         for r in self.all_results:
-            m = self.library.match(r.ip, r.mac)
-            if m:
-                r.device_type = m.get("device_type", "")
-                r.location = m.get("location", "")
-                r.user = m.get("user", "")
-                r.remark = m.get("remark", "")
-                r.excel_matched = True
+            matcher.apply_to(r)
             self._upsert_table_row(r)
         self._update_stats()
 

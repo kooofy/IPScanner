@@ -1,0 +1,25 @@
+# 统一行尾与二进制识别。
+#
+# 背景：本仓库此前没有 .gitattributes，只依赖开发者本机的 core.autocrlf，
+# 结果是工作区里 main.py / run.bat 是 CRLF，而 cli.py / scanner/*.py 是 LF，
+# 协作者之间极易产生"整文件级"的换行 diff，review 时几乎无法看出真实改动。
+#
+# 约定：文本文件一律以 LF 入库；Windows 批处理 / PowerShell 脚本保持 CRLF
+# （某些 Windows 环境下 CRLF 是它们能正常执行的前提）。
+
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制：禁止行尾转换，也不要尝试 diff
+*.png  binary
+*.ico  binary
+*.db   binary
+*.xlsx binary
+*.xls  binary
+*.exe  binary
+
+# 语言包 / 清单类 JSON 用 diff 查看更友好
+*.json text eol=lf

@@ -23,6 +23,8 @@ Downloads_*
 Thumbs.db
 *.log
 .workbuddy/
+.workbuddy-ai/
+.ruff_cache/
 
 # 本地配置（用户偏好/窗口布局，不入库）
 ipscanner.ini
@@ -33,9 +35,17 @@ scan_history.db-wal
 audit_log.db
 audit_log.db-shm
 audit_log.db-wal
+crash.log
+
+# i18n 审计脚本生成的待翻译清单（工作产物，不入库）
+i18n/_todo_*.json
 
 # PyInstaller 构建产物
 build/
 dist/
 dist_new/
-*.spec
+# 只忽略 PyInstaller 自动生成的 spec（与入口脚本同名）。
+# 手写的 IPScanner_*.spec 必须入库 —— 否则别人拿不到发布构建的配方，
+# 也就无法复现出同一份 exe（hiddenimports / datas 全在里面）。
+/main.spec
+/cli.spec

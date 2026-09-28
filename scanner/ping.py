@@ -5,8 +5,15 @@ import platform
 import re
 from typing import Dict, List, Optional, Tuple
 
+from app_logging import get_logger
+
 from .constants import _LOCAL_MAC_CACHE
 from .util import _run_cmd
+
+# 探测层失败大多是"预期内"的（主机离线、无路由、arping 未安装），因此统一用
+# debug 级别记录：默认 INFO 级别不会写进日志文件，需要排查时把级别调到 DEBUG
+# 即可看到每一步为什么没结果。只有"整个子系统不可用"才值得 warning。
+_log = get_logger(__name__)
 
 _IS_WINDOWS = platform.system() == "Windows"
 _IS_LINUX = platform.system() == "Linux"
@@ -101,8 +108,9 @@ def get_local_mac_map() -> Dict[str, str]:
                         ip = ip_match.group(1)
                         if not ip.startswith("127."):
                             mac_map[ip] = current_mac
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 取不到本机 MAC 只影响"本机行不显示 MAC"，不影响扫描，故记 debug
+        _log.debug("解析本机网卡信息失败（ipconfig /all 或 ip addr 输出异常）: %s", e)
 
     return mac_map
 
@@ -151,8 +159,10 @@ def _arp_ping_windows(ip: str) -> str:
         ret = iphlp.SendARP(dest, src, ctypes.byref(mac_buf), ctypes.byref(mac_len))
         if ret == 0 and mac_len.value >= 6:
             return ":".join(f"{b:02x}" for b in mac_buf[:6])
-    except Exception:
-        pass
+        _log.debug("SendARP 未命中 %s（返回码 %s，通常是目标不在同网段或未响应）", ip, ret)
+    except Exception as e:  # noqa: BLE001
+        # ctypes 调用失败（非 Windows / iphlpapi 不可用）→ 退化为"无 MAC"，属预期
+        _log.debug("SendARP 调用失败 %s: %s", ip, e)
     return ""
 
 
@@ -165,8 +175,9 @@ def _arp_ping_unix(ip: str) -> str:
         m = re.search(r"\[([0-9a-fA-F:]{17})\]", output)
         if m:
             return m.group(1).lower()
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # arping 未安装是常见情况（iputils-arping 非默认包），会走下面的 arp -n 回退
+        _log.debug("arping 不可用或执行失败 %s: %s", ip, e)
 
     # 回退: 尝试用 arp -n 读取系统 ARP 表 (Linux/macOS)
     try:
@@ -174,9 +185,52 @@ def _arp_ping_unix(ip: str) -> str:
         m = re.search(r"([0-9a-fA-F:]{17})", output)
         if m and ip in output:
             return m.group(1).lower()
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        _log.debug("读取系统 ARP 表失败 %s: %s", ip, e)
     return ""
+
+
+# ── Windows ipconfig 解析（中英双语，引擎与 UI 共用）────────────────
+# 中文 Windows 输出「IPv4 地址 / 子网掩码」，英文 Windows 输出
+# "IPv4 Address / Subnet Mask"。
+# 历史问题：scan_mixin._get_local_subnet_windows() 只匹配中文关键词，导致
+# 英文 Windows 上解析不到掩码，静默退化成 /24 猜测（可能扫错范围）。
+# 这里统一为一份双语实现，两个调用点复用，不再各写一套。
+_IPCONFIG_IP_RE = re.compile(r"IPv4\s*(?:地址|Address)[^\d]*(\d+\.\d+\.\d+\.\d+)", re.I)
+_IPCONFIG_MASK_RE = re.compile(
+    r"(?:子网掩码|Subnet\s*Mask)[^\d]*(\d+\.\d+\.\d+\.\d+)", re.I
+)
+
+
+def parse_windows_ipconfig(output) -> List[Tuple[str, str]]:
+    """从 ipconfig 输出解析出 [(ip, 子网掩码), ...]，中英文 Windows 通用。
+
+    按行推进、先 IP 后掩码才配对，避免多网卡场景下 IP 与掩码错位配对。
+    未配成对的 IP（如只列了地址没有掩码的条目）会被丢弃。
+    """
+    pairs = []
+    cur_ip = None
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        m = _IPCONFIG_IP_RE.search(line)
+        if m:
+            cur_ip = m.group(1)
+            continue
+        sm = _IPCONFIG_MASK_RE.search(line)
+        if sm and cur_ip:
+            pairs.append((cur_ip, sm.group(1)))
+            cur_ip = None
+    return pairs
+
+
+def windows_ipconfig_subnets() -> List[Tuple[str, str]]:
+    """执行 ipconfig 并返回 [(ip, 子网掩码), ...]（中英文 Windows 通用）。
+
+    非 Windows 平台或命令执行失败时返回空列表。
+    """
+    if not _IS_WINDOWS:
+        return []
+    return parse_windows_ipconfig(_run_cmd(["ipconfig"], timeout=10))
 
 
 def get_local_subnets() -> List:
@@ -189,27 +243,14 @@ def get_local_subnets() -> List:
     nets = []
     try:
         if _IS_WINDOWS:
-            output = _run_cmd(["ipconfig"], timeout=10)
-            cur_ip = None
-            for line in output.splitlines():
-                line = line.strip()
-                m = re.search(r"IPv4 地址[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
-                if not m:
-                    m = re.search(r"IPv4 Address[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
-                if m:
-                    cur_ip = m.group(1)
-                    continue
-                sm = re.search(r"子网掩码[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
-                if not sm:
-                    sm = re.search(r"Subnet Mask[ .]+: (\d+\.\d+\.\d+\.\d+)", line)
-                if sm and cur_ip:
-                    try:
-                        net = ipaddress.ip_network(f"{cur_ip}/{sm.group(1)}", strict=False)
-                        if net not in nets and not _is_virtual_subnet(str(net)):
-                            nets.append(net)
-                    except Exception:
-                        pass
-                    cur_ip = None
+            for ip_str, mask_str in windows_ipconfig_subnets():
+                try:
+                    net = ipaddress.ip_network(f"{ip_str}/{mask_str}", strict=False)
+                    if net not in nets and not _is_virtual_subnet(str(net)):
+                        nets.append(net)
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("忽略无法解析的 ipconfig 条目 %s/%s: %s",
+                               ip_str, mask_str, e)
         else:
             # Linux / macOS: 解析 ip addr show
             try:
@@ -232,8 +273,9 @@ def get_local_subnets() -> List:
                             if ip_str not in ("127.0.0.1",) and not _is_virtual_subnet(str(net)):
                                 if net not in nets:
                                     nets.append(net)
-                        except Exception:
-                            pass
+                        except Exception as e:  # noqa: BLE001
+                            _log.debug("忽略无法解析的 ifconfig 条目 %s/%s: %s",
+                                       ip_str, mask_str, e)
                     continue
                 ip_str, prefix_str = m.group(1), m.group(2)
                 if ip_str.startswith("127."):
@@ -242,10 +284,12 @@ def get_local_subnets() -> List:
                     net = ipaddress.ip_network(f"{ip_str}/{prefix_str}", strict=False)
                     if not _is_virtual_subnet(str(net)) and net not in nets:
                         nets.append(net)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("忽略无法解析的 ip addr 条目 %s/%s: %s",
+                               ip_str, prefix_str, e)
+    except Exception as e:  # noqa: BLE001
+        # 整体失败会影响「本机网段」填充与 ARP 主动探测范围，值得 warning
+        _log.warning("本机网段探测失败: %s", e, exc_info=True)
     return nets
 
 
@@ -283,8 +327,8 @@ def get_mac_for_ip(ip: str, arp_cache: Optional[Dict[str, str]] = None) -> str:
             match = re.search(r"([0-9a-fA-F\-:]{17})", line)
             if match and ip in line:
                 return match.group(1).replace("-", ":").lower()
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        _log.debug("arp -a 查询失败 %s: %s", ip, e)
 
     # Linux/macOS: 尝试读取 /proc/net/arp
     if not _IS_WINDOWS:
@@ -296,7 +340,7 @@ def get_mac_for_ip(ip: str, arp_cache: Optional[Dict[str, str]] = None) -> str:
                         mac = parts[3]
                         if mac != "00:00:00:00:00:00":
                             return mac.lower()
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            _log.debug("读取 /proc/net/arp 失败 %s: %s", ip, e)
 
     return ""

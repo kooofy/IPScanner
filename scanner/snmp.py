@@ -3,7 +3,11 @@ import random
 import re
 import socket
 
+from app_logging import get_logger
+
 from .constants import _SNMP_DEFAULT_COMMUNITIES, _SNMP_GET_OIDS
+
+_log = get_logger(__name__)
 
 # ── LLDP (Link Layer Discovery Protocol) OIDs ──
 # lldpRemTable: 1.0.8802.1.1.2.1.4.1
@@ -40,15 +44,18 @@ def _ber_len(length: int) -> bytes:
 
 
 def _snmp_enc_int(n: int) -> bytes:
-    """BER INTEGER (有符号，最小字节)。"""
+    """BER INTEGER（有符号，最短编码）。
+
+    正数若最高位为 1（如 200、65507）必须补一个 0x00 符号字节，
+    否则会被解码成负数；负数同理补 0xFF。这里按 n / ~n 的位长各多留
+    1 个符号位再 to_bytes —— 直接用 (bit_length+7)//8 会在
+    128~255、32768~65535 这类"位长恰为 8 的倍数"的值上溢出。
+    """
     if n == 0:
         body = b"\x00"
     else:
-        body = n.to_bytes((n.bit_length() + 7) // 8 or 1, "big", signed=True)
-        if n > 0 and (body[0] & 0x80):
-            body = b"\x00" + body
-        elif n < 0 and not (body[0] & 0x80):
-            body = b"\xff" + body
+        bits = n.bit_length() if n > 0 else (~n).bit_length()
+        body = n.to_bytes((bits + 8) // 8, "big", signed=True)
     return b"\x02" + _ber_len(len(body)) + body
 
 
@@ -213,8 +220,8 @@ def snmp_get_system(ip: str, communities=_SNMP_DEFAULT_COMMUNITIES,
         if sock is not None:
             try:
                 sock.close()
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                _log.debug("关闭 SNMP socket 失败: %s", e)
     return None
 
 
@@ -263,14 +270,16 @@ def snmp_walk(ip: str, base_oid: str, community: str = "public",
                 break
             results[oid] = (vbytes, vtag)
             current_oid = oid
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # SNMP walk 中断：已取到的条目仍然有效（上层按"部分结果"用），
+        # 但必须留痕，否则用户只会看到"端口映射不完整"却不知为何
+        _log.warning("SNMP walk 中断，返回已获取的部分结果: %s", e, exc_info=True)
     finally:
         if sock is not None:
             try:
                 sock.close()
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                _log.debug("关闭 SNMP socket 失败: %s", e)
     return results
 
 

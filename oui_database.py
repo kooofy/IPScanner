@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 MAC OUI 厂商数据库
 数据来源: IEEE 官方 OUI 数据库

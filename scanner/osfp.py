@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from .ports import _build_syn_packet, raw_capability
 from .util import _local_ip_for_dst
-from i18n import tr
+from .constants import SVC_HTTP, SVC_HTTPS, SVC_FTP
 
 
 def guess_os_from_ttl(ttl: int) -> str:
@@ -25,12 +25,12 @@ def guess_os_from_ttl(ttl: int) -> str:
     if not ttl or ttl <= 0:
         return ""
     if ttl >= 250:
-        return tr("网络设备")
+        return "网络设备"
     if ttl >= 110:
-        return tr("Windows")
+        return "Windows"
     if ttl >= 30:
-        return tr("Linux/Unix")
-    return tr("网络设备")
+        return "Linux/Unix"
+    return "网络设备"
 
 
 def _os_detail_from_banners(service_details: List[Dict], extra: Dict[str, str]) -> str:
@@ -43,11 +43,11 @@ def _os_detail_from_banners(service_details: List[Dict], extra: Dict[str, str]) 
     for sd in service_details or []:
         banner = sd.get("banner", "") or ""
         proto = (sd.get("proto", "") or "").upper()
-        if proto in (tr("HTTP"), tr("HTTPS")):
+        if proto in (SVC_HTTP, SVC_HTTPS):
             m = re.search(r"Server:\s*([^\r\n]+)", banner)
             if m:
                 parts.append(m.group(1).strip())
-        elif proto == tr("FTP"):
+        elif proto == SVC_FTP:
             m = re.search(r"220[-\s]*(.+)", banner)
             if m:
                 parts.append("FTP: " + m.group(1).strip()[:60])
@@ -165,11 +165,11 @@ def _match_tcp_stack(sig: Optional[dict]) -> str:
     ttl = sig.get("ttl", 0)
     opts = sig.get("opts", [])
     if ttl >= 250:
-        return tr("网络设备")
+        return "网络设备"
     if ttl >= 110:
-        return tr("Windows")
+        return "Windows"
     if ttl >= 30:
         if "TS" in opts:
-            return tr("Linux/Unix")
-        return tr("macOS/BSD")
-    return tr("网络设备")
+            return "Linux/Unix"
+        return "macOS/BSD"
+    return "网络设备"

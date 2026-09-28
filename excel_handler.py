@@ -11,24 +11,51 @@ import xlrd
 from datetime import datetime
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import re
 import csv
 from i18n import tr
 
 
-# 列名别名映射 (小写精确匹配)。一个字段可对应多列 (多 MAC / 多位置列)
+# 列名别名映射：这是**匹配表**，必须语言无关，因此全部写成字面量，绝不能包 tr()。
+#
+# 历史缺陷：这里原本写的是 tr("ip地址")。i18n.init() 早于 excel_handler 的导入，
+# 所以英文模式下这些别名在导入期就被求值成 "IP Address" —— 于是随版本内置的中文
+# 模板 设备清单模板.xlsx 在英文界面下**完全无法导入**（detect_columns 返回空字典，
+# 用户看到的是"未找到 IP/MAC 列"）。
+# 现在中英文别名同时以字面量列出：Excel 用哪种语言写都能匹配，与界面语言彻底解耦。
+#
+# 匹配前统一 .strip().lower()（见 detect_columns），故这里全部小写。
 COLUMN_ALIASES = {
-    "ip": ["ip", tr("ip地址"), "ipaddress", "ip_address", "ip addr", tr("主机地址")],
-    "mac": ["mac", tr("mac地址"), "macaddress", "mac_address", "mac addr", tr("物理地址"), tr("网卡地址"),
-            "lan-mac", "wifi-mac", "lanmac", "wifimac", tr("有线mac"), tr("无线mac"), tr("网卡mac"),
-            tr("计算机mac地址"), tr("计算机mac"), tr("电脑mac"), tr("终端mac"), tr("本机mac"), tr("无线网卡mac")],
-    "device_type": [tr("设备类型"), tr("类型"), "devicetype", "device_type", tr("设备"), "device", tr("终端类型"),
-                    tr("功能教室"), tr("打印机型号"), tr("型号"), tr("设备名称"), tr("一体机")],
-    "location": [tr("位置"), "location", tr("部署位置"), tr("机房"), tr("房间"), tr("楼层"), tr("安装位置"), "place",
-                 tr("楼宇"), tr("门牌"), tr("门牌号"), tr("处室名称"), tr("处室"), tr("房间号"), tr("地点"), tr("区域"), tr("楼层位置"), tr("部门")],
-    "user": [tr("使用者"), tr("用户"), "user", tr("负责人"), tr("使用人"), tr("归属"), "owner", tr("姓名"), tr("使用教师"), tr("使用人/部门"), tr("使用部门")],
-    "remark": [tr("备注"), tr("说明"), "remark", "note", "notes", tr("描述"), "description", "comment"],
+    "ip": [
+        "ip地址", "ip address", "主机地址", "host address", "ip", "ipaddress", "ip_address",
+        "ip addr"
+    ],
+    "mac": [
+        "mac地址", "mac address", "物理地址", "physical address", "网卡地址", "nic address", "有线mac",
+        "wired mac", "无线mac", "wireless mac", "网卡mac", "nic mac", "计算机mac地址",
+        "computer mac address", "计算机mac", "computer mac", "电脑mac", "pc mac", "终端mac",
+        "terminal mac", "本机mac", "local mac", "无线网卡mac", "wireless nic mac", "mac",
+        "macaddress", "mac_address", "mac addr", "lan-mac", "wifi-mac", "lanmac", "wifimac"
+    ],
+    "device_type": [
+        "设备类型", "device type", "类型", "type", "设备", "device", "终端类型", "terminal type", "功能教室",
+        "function room", "打印机型号", "printer model", "型号", "model", "设备名称", "device name", "一体机",
+        "mfp", "devicetype", "device_type"
+    ],
+    "location": [
+        "位置", "location", "部署位置", "deployment location", "机房", "server room", "房间", "room",
+        "楼层", "floor", "安装位置", "install location", "楼宇", "building", "门牌", "door no.", "门牌号",
+        "door plate no.", "处室名称", "office name", "处室", "office", "房间号", "room no.", "地点", "区域",
+        "area", "楼层位置", "floor location", "部门", "department", "place"
+    ],
+    "user": [
+        "使用者", "user", "用户", "负责人", "owner", "使用人", "归属", "姓名", "name", "使用教师", "teacher",
+        "使用人/部门", "user/dept", "使用部门", "department"
+    ],
+    "remark": [
+        "备注", "remark", "说明", "description", "描述", "note", "notes", "comment"
+    ],
 }
 
 

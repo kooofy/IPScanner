@@ -1,0 +1,30 @@
+# EditorConfig — 统一不同编辑器/IDE 的基础格式约定
+# https://editorconfig.org
+#
+# 说明：仓库内文本文件统一以 LF 存储（见 .gitattributes 与 git config
+# core.autocrlf）；Windows 上的 .bat / .ps1 例外，保持 CRLF 以便直接双击运行。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml,toml}]
+indent_size = 2
+
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+[*.md]
+# Markdown 里行尾两个空格是"硬换行"，不能删
+trim_trailing_whitespace = false
+
+[*.{png,ico,db,xlsx,xls}]
+# 二进制文件不需要文本格式约定
+insert_final_newline = false
+trim_trailing_whitespace = false

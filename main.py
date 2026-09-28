@@ -12,6 +12,12 @@ from app_paths import data_dir, resource_dir
 os.environ.setdefault("QT_NO_DIRECTWRITE", "1")
 os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
 
+# 日志必须最先初始化：后续任何 import 失败（PyQt5 DLL 缺失、语言包损坏等）
+# 都要能在 ipscanner.log 里留下痕迹，否则用户只能看到"双击没反应"。
+import app_logging
+app_logging.setup()
+_log = app_logging.get_logger(__name__)
+
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt, QSettings
 from PyQt5.QtGui import QFont, QIcon, QPixmap
@@ -29,15 +35,62 @@ from i18n import tr
 
 # ── 全局异常捕获 ──────────────────────────────────────────────
 
+# crash.log 单文件上限；超过则轮转一代（crash.log -> crash.log.1）
+_CRASH_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _rotate_crash_log(path: str):
+    """crash.log 超过上限时轮转一代（crash.log -> crash.log.1）。
+
+    刻意**不用** logging 的 RotatingFileHandler：crash.log 存在的意义正是
+    "日志系统本身可能不可用"时的最后兜底，它不能反过来依赖 logging 模块。
+    只保留一代历史即可 —— 崩溃日志是排障用的，不是需要长期留存的审计日志。
+
+    本函数**允许抛异常**，由调用方 `_record_crash` 隔离：轮转失败最坏只是
+    文件没变小，绝不能因此丢掉这次崩溃记录。
+    """
+    if os.path.getsize(path) < _CRASH_LOG_MAX_BYTES:
+        return
+    rotated = path + ".1"
+    if os.path.exists(rotated):
+        os.remove(rotated)
+    os.replace(path, rotated)
+
+
+def _record_crash(kind: str, err: str, log_level: int = 50):
+    """把未捕获异常同时写进 crash.log 与统一日志。
+
+    保留 crash.log 是有意的：日志系统本身依赖磁盘可写、依赖 data_dir() 探测，
+    而这里要处理的恰恰可能是"日志/数据目录起不来"这类问题。crash.log 用最
+    朴素的方式写，是最后一道保险；ipscanner.log 则便于和其它运行日志一起看。
+    """
+    try:
+        _log.log(log_level, "%s\n%s", kind, err)
+    except Exception:
+        # 日志系统自身出错时无处可记，只能放弃这一路（下面还有 crash.log 兜底）
+        pass
+    try:
+        _p = os.path.join(data_dir(), "crash.log")
+        try:
+            _rotate_crash_log(_p)
+        except Exception as e:  # noqa: BLE001
+            # 轮转只是"别让文件无限变大"的锦上添花。这里必须继续往下追加：
+            # 一次轮转异常（文件被占用 / 磁盘满 / 权限不足）导致崩溃记录整个
+            # 丢失，比 crash.log 变大严重得多。
+            _log.debug("crash.log 轮转失败，本次直接追加: %s", e)
+        with open(_p, "a", encoding="utf-8") as _f:
+            _f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {kind}:\n"
+                     f"{err}\n{'=' * 60}\n")
+    except Exception:
+        # crash.log 是最后一道保险；连它都写不了（磁盘满 / 目录不可写）时，
+        # 已经没有任何可用的落盘通道，只能静默
+        pass
+
+
 def _global_except_hook(exc_type, exc_value, exc_tb):
     import traceback as _tb
     _err = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
-    try:
-        _log = os.path.join(data_dir(), "crash.log")
-        with open(_log, "a", encoding="utf-8") as _f:
-            _f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 未捕获异常(excepthook):\n{_err}\n{'=' * 60}\n")
-    except Exception:
-        pass
+    _record_crash("未捕获异常(excepthook)", _err)
     sys.stderr.write(tr(">>> [未捕获异常]\n") + _err)
 
 sys.excepthook = _global_except_hook
@@ -47,12 +100,7 @@ _thread_hook_prev = threading.excepthook
 def _thread_except_hook(args):
     import traceback as _tb
     _err = "".join(_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
-    try:
-        _log = os.path.join(data_dir(), "crash.log")
-        with open(_log, "a", encoding="utf-8") as _f:
-            _f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 线程未捕获异常:\n{_err}\n{'=' * 60}\n")
-    except Exception:
-        pass
+    _record_crash("线程未捕获异常", _err)
     sys.stderr.write(tr(">>> [线程未捕获异常]\n") + _err)
     if _thread_hook_prev:
         _thread_hook_prev(args)
@@ -73,13 +121,7 @@ class SafeApp(QApplication):
         except Exception:
             import traceback as _tb
             err = _tb.format_exc()
-            try:
-                _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                _log = os.path.join(data_dir(), "crash.log")
-                with open(_log, "a", encoding="utf-8") as _f:
-                    _f.write(f"[{_ts}] 未捕获异常:\n{err}\n{'=' * 60}\n")
-            except Exception:
-                pass
+            _record_crash("事件循环未捕获异常", err)
             # 节流弹窗，避免高频绘制异常刷屏 (3 秒内同种不再弹)
             _now = datetime.now().timestamp()
             if _now - SafeApp._last_popup > 3:
@@ -90,11 +132,26 @@ class SafeApp(QApplication):
                         tr("程序捕获到一个错误，已写入 crash.log：\n\n") + err[-1500:]
                     )
                 except Exception:
+                    # 连弹窗都失败了（极少见）：异常已记入日志，此处不再处理
                     pass
             return False
 
 
 # ── 入口 ──────────────────────────────────────────────────────
+
+def _shutdown_databases():
+    """退出前关闭所有缓存连接（`db_util.shutdown()` 内部会做 WAL checkpoint）。
+
+    `db_util` 的连接是按 db_path 永久缓存的，进程退出时不 close 就会残留
+    `oui.db-wal` / `*.db-shm`，而且最后一批写入还留在 WAL 里 —— 用户直接拷走
+    .db 文件会以为数据丢了。
+
+    挂在 aboutToQuit 上而不是 closeEvent：后者只在走窗口关闭流程时触发，
+    菜单退出 / 系统注销等路径不一定经过。
+    """
+    import db_util
+    db_util.shutdown()
+
 
 def main():
 
@@ -104,6 +161,7 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = SafeApp(sys.argv)
+    app.aboutToQuit.connect(_shutdown_databases)
     app.setStyleSheet(STYLE_SHEET)
     app.setFont(QFont("Microsoft YaHei", 9))
 

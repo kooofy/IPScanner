@@ -52,8 +52,8 @@ class TestScanPortsRttCallback(unittest.TestCase):
         # rtt_callback 仅 connect 模式使用，UDP/SYN 分支不应触发
         cb = MagicMock()
         with patch("scanner.ports.udp_scan_port", return_value="open"):
-            open_ports = scan_ports("127.0.0.1", ports=[53], timeout=0.5,
-                                    mode="udp", rtt_callback=cb)
+            scan_ports("127.0.0.1", ports=[53], timeout=0.5,
+                       mode="udp", rtt_callback=cb)
         self.assertEqual(cb.call_count, 0)
 
 

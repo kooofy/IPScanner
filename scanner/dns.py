@@ -8,9 +8,12 @@ import struct
 import time
 from typing import Dict
 
+from app_logging import get_logger
+
 from .constants import _MDNS_GROUP, _MDNS_PORT, _resolve_executor, _resolve_executor_lock
 from .util import _run_cmd
-from i18n import tr
+
+_log = get_logger(__name__)
 
 
 def _get_resolve_executor():
@@ -62,8 +65,9 @@ def get_netbios_name(ip: str, timeout: float = 2.0) -> str:
                 # nmblookup 输出格式: "COMPUTERNAME  <00> - B <ACTIVE>"
                 if not name.startswith("IS~"):
                     return name
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # nmblookup 未安装（Windows 上正常）或查询失败 → 主机名留空
+        _log.debug("nmblookup 查询主机名失败 %s: %s", ip, e)
     return ""
 
 
@@ -143,14 +147,14 @@ def _parse_mdns_packet(data: bytes, by_ip: dict, src_ip: str):
                     if ip != src_ip:
                         by_ip.setdefault(ip, {"names": set(), "services": set()})["names"].add(name)
             elif rtype == 12:   # PTR：DNS-SD 服务类型枚举
-                target = _parse_dns_name(rdata, 0)[0] if rdata else ""
                 low = name.lower()
                 if low.endswith("_tcp.local") or low.endswith("_udp.local"):
                     label = name[:-6] if name.endswith(".local") else name
                     entry["services"].add(label)
             # SRV(33)/TXT(16)/AAAA(28) 等暂不解析（本机链路单设备响应已含自身信息）
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 畸形/截断的 mDNS 报文：网络里常有无视规范的实现，属预期情况
+        _log.debug("解析 mDNS 报文失败（来自 %s，已跳过）: %s", src_ip, e)
 
 
 def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
@@ -213,8 +217,9 @@ def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
             q = _build_dns_query(name, qtype, random.randint(1, 65535))
             try:
                 sock.sendto(q, (_MDNS_GROUP, _MDNS_PORT))
-            except OSError:
-                pass
+            except OSError as e:
+                # 组播发送失败（无网卡 / 被防火墙拦 / 无组播路由）→ 发现会整体失效
+                _log.warning("mDNS 组播发送失败（%s），本次发现可能不完整: %s", name, e)
 
         end = time.time() + timeout
         while time.time() < end:
@@ -226,12 +231,14 @@ def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
                 break
             if addr:
                 _parse_mdns_packet(data, by_ip, addr[0])
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # mDNS 发现整体失败：会让"支持 mDNS 但不响应 Ping/ARP"的设备全部漏掉，
+        # 属于用户能直接感知的结果缺失，必须留痕
+        _log.warning("mDNS 发现过程异常，结果可能不完整: %s", e, exc_info=True)
     finally:
         if sock is not None:
             try:
                 sock.close()
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                _log.debug("关闭 mDNS socket 失败: %s", e)
     return by_ip

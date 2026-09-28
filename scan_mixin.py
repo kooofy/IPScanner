@@ -9,22 +9,28 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from scanner import (
-    ScanResult, parse_ip_range, PROTOCOL_PORTS, get_ports_for_level,
-    SCAN_LEVEL_LABELS, merge_wmi, merge_netbios
+    ScanResult, get_ports_for_level,
+    scan_level_label, SVC_MDNS, merge_wmi, merge_netbios,
+    count_ip_range, is_valid_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
+    windows_ipconfig_subnets, parse_ip_range,
 )
 import audit_log
 import ui_logic
 import history_store
+from app_logging import get_logger
 from ui_threads import ScanThread, MdnsThread, WmiThread, NetbiosThread
 from ui_dialogs import (
-    WmiCredentialDialog, ConflictReportDialog, SubnetUtilizationDialog,
-    ChangeReportDialog
+    WmiCredentialDialog, SnmpV3CredentialDialog, ConflictReportDialog,
+    SubnetUtilizationDialog, ChangeReportDialog
 )
 from conflict_detector import (
     detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING
 )
 from change_detector import detect_changes, get_change_summary
 from i18n import tr
+
+_log = get_logger(__name__)
+
 
 class ScanMixin:
     def _open_scan_settings(self):
@@ -75,18 +81,24 @@ class ScanMixin:
     # --- IP 范围管理 ---
 
     def _auto_detect_subnet(self):
-        """自动检测本机网段并填入"""
-        import socket as sock
+        """自动检测本机网段并填入输入框。
+
+        用 `_get_local_subnet()`（默认出口 IP 优先 + 解析网卡掩码），而**不是**
+        `gethostbyname(gethostname())`。后者有两个真实缺陷：
+
+        1. 多网卡 / VPN / Docker 环境下常解析到错误的网卡地址，甚至返回
+           `127.0.0.1`，于是预填的网段根本不是本机所在网段；
+        2. 它只能拼出 `/24`。真实网段是 `/22` 或 `/16` 时会少扫一大片，
+           而且用户很难察觉（输入框里看着"挺对"）。
+        """
         try:
-            hostname = sock.gethostname()
-            local_ip = sock.gethostbyname(hostname)
-            parts = local_ip.split(".")
-            if len(parts) == 4:
-                subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+            subnet = self._get_local_subnet()
+            if subnet:
                 self.range_input.setText(subnet)
                 self.range_input.selectAll()
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 只是预填输入框失败，用户仍可手输网段，不影响可用性
+            _log.debug("自动检测本机网段失败（可手动输入）: %s", e)
 
     def _get_default_local_ip(self):
         """获取本机默认出口 IPv4 地址（非 127.0.0.1）。"""
@@ -109,25 +121,22 @@ class ScanMixin:
             return self._get_local_subnet_unix()
 
     def _get_local_subnet_windows(self):
-        """Windows: 解析 ipconfig 输出。"""
-        try:
-            out = subprocess.check_output(
-                ["ipconfig"], encoding="gbk", errors="ignore",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except Exception:
-            out = ""
-        ips = re.findall(r"IPv4[地址\\s]+[\.:\s]+([\d.]+)", out)
-        masks = re.findall(r"子网掩码[\.:\s]+([\d.]+)", out)
+        """Windows: 解析 ipconfig 输出（中英文 Windows 通用）。
+
+        解析与命令执行统一复用 scanner.ping 的实现，与引擎侧
+        get_local_subnets() 共用同一套规则，避免两处漂移。
+        """
+        pairs = windows_ipconfig_subnets()
         default_ip = self._get_default_local_ip()
-        if ips and masks and len(ips) == len(masks):
+        if pairs:
+            # 优先使用默认出口 IP 所在网卡，避免多网卡时选错网段
             if default_ip:
-                for ip, mask in zip(ips, masks):
+                for ip, mask in pairs:
                     if ip == default_ip:
                         net, prefix = self._ip_mask_to_subnet(ip, mask)
                         if net:
                             return f"{net}/{prefix}"
-            for ip, mask in zip(ips, masks):
+            for ip, mask in pairs:
                 if ip.startswith("127.") or self._is_virtual_adapter_ip(ip):
                     continue
                 net, prefix = self._ip_mask_to_subnet(ip, mask)
@@ -161,8 +170,9 @@ class ScanMixin:
                         pm = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line)
                         if pm:
                             return f"{pm.group(1)}/{pm.group(2)}"
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                # 拿不到前缀长度 → 退回 /24 猜测，下面就是该回退路径
+                _log.debug("读取接口前缀长度失败，退回 /24 推测: %s", e)
             parts = default_ip.split(".")
             return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
 
@@ -224,11 +234,18 @@ class ScanMixin:
         用户确认后再点"扫描"按钮才开始。
         """
         self.range_input.setText(subnet)
-        # 若尚未在列表中则静默添加；已存在则不重复添加、不弹窗
-        if subnet not in self.ip_range_items and parse_ip_range(subnet):
+        # 若尚未在列表中则静默添加；已存在则不重复添加、不弹窗。
+        # 本机所在网段可能异常大（如 /8 的园区网），超出规模上限时只填不加入。
+        if (subnet not in self.ip_range_items
+                and is_valid_range(subnet)
+                and count_ip_range(subnet) <= MAX_IPS_PER_RANGE):
             self.ip_range_items.append(subnet)
             self._update_range_list()
         self.range_input.setFocus()
+
+    def _total_ips(self) -> int:
+        """待扫列表中的 IP 总数（只计数不构建列表，避免反复生成大列表）。"""
+        return sum(count_ip_range(r) for r in self.ip_range_items)
 
 
     def _add_ip_range(self):
@@ -241,16 +258,28 @@ class ScanMixin:
 
         added, dup = 0, 0
         invalid = []
+        too_large = []
+        over_total = []
         added_tokens = []
+        total = self._total_ips()
         for tok in tokens:
-            if not parse_ip_range(tok):
+            # 只解析、不构建 IP 列表：先算规模，超限的绝不进入待扫列表
+            if not is_valid_range(tok):
                 invalid.append(tok)
+                continue
+            n = count_ip_range(tok)
+            if n > MAX_IPS_PER_RANGE:
+                too_large.append(f"{tok}（{n} 个 IP）")
                 continue
             if tok in self.ip_range_items:
                 dup += 1
                 continue
+            if total + n > MAX_IPS_TOTAL:
+                over_total.append(f"{tok}（{n} 个 IP）")
+                continue
             self.ip_range_items.append(tok)
             added_tokens.append(tok)
+            total += n
             added += 1
 
         if added > 0:
@@ -260,13 +289,33 @@ class ScanMixin:
             # 审计：记录添加网段
             self._audit(audit_log.CAT_RANGE, tr("添加网段"), ", ".join(added_tokens))
 
+        # 规模超限：必须明确告知用户，不能静默丢弃
+        if too_large:
+            QMessageBox.warning(
+                self, tr("范围过大"),
+                tr("以下网段的 IP 数超过单次上限 {limit} 个，已忽略：\n  {items}"
+                   "\n\n请拆分为更小的范围（如按 /24 分批）后再扫描。").format(
+                    limit=MAX_IPS_PER_RANGE, items="\n  ".join(too_large))
+            )
+        if over_total:
+            QMessageBox.warning(
+                self, tr("范围过大"),
+                tr("加上以下网段后，待扫 IP 总数将超过上限 {limit} 个，已忽略：\n  {items}"
+                   "\n\n请先清空部分网段，或分多次扫描。").format(
+                    limit=MAX_IPS_TOTAL, items="\n  ".join(over_total))
+            )
+
         if added == 0:
+            if too_large or over_total:
+                return
             # 全部无效或全部重复，未新增任何网段
             if invalid:
                 QMessageBox.warning(
                     self, tr("格式错误"),
-                    tr("以下项无法解析:\n  ") + "\n  ".join(invalid) +
-                    tr("\n\n支持格式 (可一行多个, 用逗号/空格/换行分隔):\n") + "  192.168.1.0/24\n  192.168.1.1-254\n  192.168.1.1"
+                    tr("以下项无法解析:\n  {items}"
+                       "\n\n支持格式 (可一行多个, 用逗号/空格/换行分隔):\n"
+                       "  192.168.1.0/24\n  192.168.1.1-254\n  192.168.1.1").format(
+                        items="\n  ".join(invalid))
                 )
             elif dup:
                 QMessageBox.information(self, tr("提示"), tr("这些网段都已添加过了"))
@@ -276,9 +325,10 @@ class ScanMixin:
         if dup or invalid:
             msg = []
             if dup:
-                msg.append(f"已跳过 {dup} 个重复网段")
+                msg.append(tr("已跳过 {n} 个重复网段").format(n=dup))
             if invalid:
-                msg.append(tr("以下项无法解析, 已忽略:\n  ") + "\n  ".join(invalid))
+                msg.append(tr("以下项无法解析，已忽略:\n  {items}").format(
+                    items="\n  ".join(invalid)))
             QMessageBox.information(self, tr("提示"), "\n".join(msg))
 
     def _clear_ranges(self):
@@ -295,6 +345,20 @@ class ScanMixin:
             if not self.ip_range_items:
                 QMessageBox.warning(self, tr("提示"), tr("请先添加至少一个 IP 范围"))
                 return
+
+        # 规模兜底：网段可能来自旧配置或手工编辑的 ini，启动前再校验一次总量
+        total_ips = self._total_ips()
+        if total_ips > MAX_IPS_TOTAL:
+            QMessageBox.warning(
+                self, tr("范围过大"),
+                tr("待扫 IP 总数为 {total}，超过上限 {limit} 个，已中止扫描。"
+                   "\n\n请清空部分网段，或分多次扫描。").format(
+                    total=total_ips, limit=MAX_IPS_TOTAL)
+            )
+            return
+        if total_ips == 0:
+            QMessageBox.warning(self, tr("提示"), tr("待扫列表中没有可解析的 IP，请检查网段格式。"))
+            return
 
         self.scan_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -315,6 +379,8 @@ class ScanMixin:
             tcp_scan_mode=self.tcp_scan_mode,
             mdns_discovery=self.mdns_check.isChecked(),
             ports=get_ports_for_level(self.scan_level) if self.port_scan_check.isChecked() else None,
+            library=self.library,
+            snmp_v3_user=self.snmp_v3_creds.to_user() if self.snmp_v3_creds.has_creds() else None,
         )
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()
@@ -323,13 +389,12 @@ class ScanMixin:
         self.scan_thread.finished_signal.connect(self._on_scan_finished, Qt.QueuedConnection)
         self.scan_thread.log_signal.connect(lambda msg: self.status_bar.showMessage(msg), Qt.QueuedConnection)
         # 审计：记录扫描开始
-        total_ips = sum(len(parse_ip_range(r)) for r in self.ip_range_items)
         self._audit(
             audit_log.CAT_SCAN, tr("开始扫描"),
             f"范围: {', '.join(self.ip_range_items)} ({total_ips} 个IP) | "
             f"超时 {self.timeout_spin.value()}ms · 线程 {self.threads_spin.value()} · "
             f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}"
-            f"{tr(' · 级别 ') + SCAN_LEVEL_LABELS.get(self.scan_level, self.scan_level) if self.port_scan_check.isChecked() else ''}",
+            f"{tr(' · 级别 ') + scan_level_label(self.scan_level) if self.port_scan_check.isChecked() else ''}",
         )
         self.scan_thread.start()
 
@@ -375,7 +440,7 @@ class ScanMixin:
         self.scan_level = level
         self._sync_scan_level_menu()
         self._save_settings()
-        _label = SCAN_LEVEL_LABELS.get(level, level)
+        _label = scan_level_label(level)
         _n = len(get_ports_for_level(level))
         self.status_bar.showMessage(f"扫描级别: {_label} · 端口数 {_n}")
 
@@ -390,18 +455,9 @@ class ScanMixin:
         self.status_bar.showMessage(f"扫描中 [{current}/{total}] {ip} ...")
 
     def _on_scan_result(self, result: ScanResult):
-        # 地址库匹配放在主线程执行 (SQLite 连接不能跨线程使用)
-        if self.library and self.library.is_loaded():
-            try:
-                match = self.library.match(result.ip, result.mac)
-                if match:
-                    result.device_type = match.get("device_type", "")
-                    result.location = match.get("location", "")
-                    result.user = match.get("user", "")
-                    result.remark = match.get("remark", "")
-                    result.excel_matched = True
-            except Exception as e:
-                print(tr("地址库匹配出错:"), e)
+        # 地址库匹配已在扫描线程内完成（见 ScanThread._build_library_lookup：
+        # 整库预加载为内存索引 + O(1) 查找），主线程只负责渲染。
+        # 旧实现在此逐条查 SQLite，/16 网段会产生约 6.5 万次主线程查询并冻结界面。
         self._upsert_table_row(result)
 
     def _on_scan_finished(self, results):
@@ -415,10 +471,21 @@ class ScanMixin:
             # 先关闭排序，避免批量添加时的性能问题
             self.table.setSortingEnabled(False)
 
-            # 全量刷新结果行：新设备入表，已有设备同步刷新
-            # （扫描末尾的 mDNS 发现会为已有设备追加服务子项，需重渲染才能显示）
+            # 只渲染"还没有行"或"扫描末尾被 mDNS 就地改过"的结果。
+            #
+            # 旧实现无条件把 results 全量再 upsert 一遍，但每行在扫描过程中已经
+            # 通过 result_callback 渲染过了 —— /16 网段就是 6.5 万次无谓重渲染。
+            #
+            # 两点必须同时成立才能这样收窄，已逐一核实：
+            #   1. 离线主机从未被回调（引擎只对 alive 主机提交 enrich），
+            #      所以它们必然不在 _ip_item_map 里，会走"新增"分支正常入表；
+            #   2. mDNS（Phase 3）是唯一在回调之后仍会改动已渲染对象的地方，
+            #      引擎已在那些结果上打了 mdns_updated（见 ScanResult.mdns_updated）。
             for result in results:
-                self._upsert_table_row(result)
+                if (result.ip not in self._ip_item_map
+                        or getattr(result, "mdns_updated", False)):
+                    self._upsert_table_row(result)
+                    result.mdns_updated = False
 
             # 应用筛选（默认"仅在线"：扫描完成后隐藏离线终端）
             self._filter_results()
@@ -429,6 +496,11 @@ class ScanMixin:
                 self.status_bar.showMessage("；".join(_warns))
                 for _w in _warns:
                     print("[WARN]", _w)
+
+            # 扫描被拒绝（如范围超限）导致 0 结果时明确弹窗，
+            # 否则用户会误以为"这个网段里没有任何设备"。
+            if _warns and not results:
+                QMessageBox.warning(self, tr("扫描未执行"), "\n\n".join(_warns))
 
             # 恢复排序
             self.table.setSortingEnabled(True)
@@ -613,10 +685,10 @@ class ScanMixin:
                         r.discovery_method = "mdns"
                     if not r.hostname and host:
                         r.hostname = host
-                if services and tr("mDNS") not in r.services:
-                    r.services.append(tr("mDNS"))
+                if services and SVC_MDNS not in r.services:
+                    r.services.append(SVC_MDNS)
                     r.service_details.append({
-                        "proto": tr("mDNS"), "port": 0, "banner": ", ".join(services)
+                        "proto": SVC_MDNS, "port": 0, "banner": ", ".join(services)
                     })
                 self._upsert_table_row(r)
                 added += 1
@@ -634,6 +706,55 @@ class ScanMixin:
             sys.stderr.write(f"[ERR] _on_mdns_finished: {e}\n")
             self.status_bar.showMessage(f"mDNS 处理异常: {e}")
 
+    # --- SNMPv3 用户配置 ---
+    def _configure_snmp_v3(self):
+        """配置 SNMPv3 USM 用户（认证/加密）。
+
+        配置后扫描**优先**用 v3 识别设备；未配置则回退到 v2c 团体字探测。
+        清空用户名即等于关闭 v3（回到 v2c）。
+        """
+        dlg = SnmpV3CredentialDialog(
+            self,
+            saved={
+                "username": self.snmp_v3_creds.username,
+                "auth_proto": self.snmp_v3_creds.auth_proto,
+                "auth_key": self.snmp_v3_creds.auth_key,
+                "priv_proto": self.snmp_v3_creds.priv_proto,
+                "priv_key": self.snmp_v3_creds.priv_key,
+            },
+            saved_target=self._snmp_v3_test_target(),
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        user, auth_proto, auth_key, priv_proto, priv_key, save = dlg.get_config()
+        self.snmp_v3_creds.set(user, auth_proto, auth_key, priv_proto, priv_key)
+        if save:
+            self.snmp_v3_creds.save_to(self.settings)
+        if user:
+            self.status_bar.showMessage(tr("SNMPv3 用户已设置：%s") % user)
+        else:
+            self.status_bar.showMessage(
+                tr("SNMPv3 未配置用户名，扫描将使用 v2c 团体字"))
+
+    def _snmp_v3_test_target(self) -> str:
+        """给"测试"按钮挑一个默认目标：首个网段的第一个地址。
+
+        必须先 count_ip_range 计数再展开 —— 网段框里可能还留着半截输入，
+        直接 parse_ip_range 展开未校验的范围会瞬间吃光内存。
+        """
+        if not self.ip_range_items:
+            return ""
+        first = self.ip_range_items[0]
+        try:
+            if count_ip_range(first) > MAX_IPS_PER_RANGE:
+                return ""
+            ips = parse_ip_range(first)
+        except Exception as e:  # noqa: BLE001
+            # 网段框里是半截输入（用户还没写完）属于正常情况，仅记 debug
+            _log.debug("推导 SNMPv3 测试目标失败: %s", e)
+            return ""
+        return ips[0] if ips else ""
+
     # --- WMI 设备识别 ---
     def _run_wmi_identification(self, targets=None):
         """对目标 Windows 设备执行 WMI 识别。
@@ -646,14 +767,15 @@ class ScanMixin:
             dlg = WmiCredentialDialog(
                 self, saved_username=self.wmi_creds.username,
                 saved_domain=self.wmi_creds.domain,
+                saved_transport=self.wmi_creds.transport,
             )
             if dlg.exec_() != QDialog.Accepted:
                 return
-            user, pwd, domain, save = dlg.get_credentials()
+            user, pwd, domain, save, transport = dlg.get_credentials()
             if not user or not pwd:
                 QMessageBox.warning(self, tr("WMI 识别"), tr("用户名和密码不能为空"))
                 return
-            self.wmi_creds.set(user, pwd, domain)
+            self.wmi_creds.set(user, pwd, domain, transport)
             if save:
                 self.wmi_creds.save_to(self.settings)
 

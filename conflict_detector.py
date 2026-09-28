@@ -9,7 +9,7 @@
 纯逻辑模块，不依赖任何 UI 组件。
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict
 from i18n import tr
 
 
@@ -23,16 +23,21 @@ CONFLICT_DUPLICATE_MAC = "duplicate_mac"
 CONFLICT_DUPLICATE_HOSTNAME = "duplicate_hostname"
 CONFLICT_UNKNOWN_DEVICE = "unknown_device"
 
-_TYPE_LABELS = {
-    CONFLICT_DUPLICATE_MAC: tr("MAC 地址重复"),
-    CONFLICT_DUPLICATE_HOSTNAME: tr("主机名重复"),
-    CONFLICT_UNKNOWN_DEVICE: tr("未知设备"),
+
+# 冲突类型 / 严重级别的显示原文。
+# 注意：这里存的是**未翻译的源串**，翻译在 type_label / severity_label 属性里
+# 惰性进行。旧实现在模块级写 tr("MAC 地址重复")，tr() 在 import 期就被求值并
+# 冻结，切换语言后这些标签不会跟着变（要重启进程才生效）。
+_TYPE_TEXT = {
+    CONFLICT_DUPLICATE_MAC: "MAC 地址重复",
+    CONFLICT_DUPLICATE_HOSTNAME: "主机名重复",
+    CONFLICT_UNKNOWN_DEVICE: "未知设备",
 }
 
-_SEVERITY_LABELS = {
-    SEVERITY_HIGH: tr("严重"),
-    SEVERITY_WARNING: tr("警告"),
-    SEVERITY_INFO: tr("提示"),
+_SEVERITY_TEXT = {
+    SEVERITY_HIGH: "严重",
+    SEVERITY_WARNING: "警告",
+    SEVERITY_INFO: "提示",
 }
 
 
@@ -49,11 +54,15 @@ class Conflict:
 
     @property
     def type_label(self) -> str:
-        return _TYPE_LABELS.get(self.conflict_type, self.conflict_type)
+        """当前语言下的冲突类型名（惰性翻译）。"""
+        text = _TYPE_TEXT.get(self.conflict_type)
+        return tr(text) if text else self.conflict_type
 
     @property
     def severity_label(self) -> str:
-        return _SEVERITY_LABELS.get(self.severity, self.severity)
+        """当前语言下的严重级别名（惰性翻译）。"""
+        text = _SEVERITY_TEXT.get(self.severity)
+        return tr(text) if text else self.severity
 
 
 def detect_conflicts(results, library=None) -> List[Conflict]:

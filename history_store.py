@@ -192,6 +192,18 @@ def ensure_migrated(db_path=None, json_path=None):
 
 # --- 历史条件查询 -----------------------------------------------------------
 
+def _canon(text):
+    """把可能已翻译的文本还原为语言无关的源串（跨语言比较用）。
+
+    i18n 未就绪时退化为原值，保证本模块可独立使用。
+    """
+    try:
+        from i18n import canonical
+        return canonical(text or "")
+    except Exception:
+        return text or ""
+
+
 # 聚合时从快照逐条取用的设备字段（无首见时间，需推导）
 _AGG_FIELDS = (
     "status", "mac", "hostname", "vendor", "device_class", "os_guess",
@@ -234,43 +246,62 @@ def query_history(device_class=None, network=None, first_seen_after=None,
     """
     net = _parse_network(network)
 
+    # 单条 JOIN 取回全部设备行（按快照时间升序），再在内存里聚合。
+    #
+    # 旧写法是 `for snap in list_snapshots(): get_snapshot(snap["id"])` ——
+    # 典型的 N+1：N 个快照就是 N+1 次查询，而且每次 get_snapshot 都会把该快照
+    # 的整张设备表读回来。默认保留 20 个快照、每个几百台设备时，这里是 21 次
+    # 查询 + 全量读盘。
+    #
+    # 按时间**升序**遍历是刻意的：这样每遇到一个更新的快照就必然满足
+    # snap_time > last_seen，于是"非空即覆盖"自然等价于「最近一次出现且非空」。
+    # 若改成降序，最新快照里为空的字段将永远填不上旧值 —— 与文档承诺不符。
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT s.time AS snap_time, d.ip, d.status, d.mac, d.hostname, "
+            "       d.vendor, d.device_class, d.os_guess, d.open_ports, "
+            "       d.location, d.user, d.remark "
+            "  FROM devices d JOIN snapshots s ON s.id = d.snapshot_id "
+            " WHERE d.ip IS NOT NULL AND TRIM(d.ip) <> '' "
+            " ORDER BY s.time ASC, d.id ASC"
+        ).fetchall()
+
     agg = {}  # ip -> 聚合记录
-    for snap in list_snapshots(db_path):
-        snap_time = snap["time"]
-        full = get_snapshot(snap["id"], db_path)
-        if not full:
+    for r in rows:
+        ip = (r["ip"] or "").strip()
+        if not ip:
             continue
-        for d in full["devices"]:
-            ip = (d.get("ip") or "").strip()
-            if not ip:
-                continue
-            cur = agg.get(ip)
-            if cur is None:
-                cur = {
-                    "ip": ip,
-                    "first_seen": snap_time,
-                    "last_seen": snap_time,
-                }
+        snap_time = r["snap_time"]
+        cur = agg.get(ip)
+        if cur is None:
+            cur = {
+                "ip": ip,
+                "first_seen": snap_time,
+                "last_seen": snap_time,
+            }
+            for f in _AGG_FIELDS:
+                cur[f] = r[f] or ""
+            agg[ip] = cur
+        else:
+            if snap_time > cur["last_seen"]:
+                cur["last_seen"] = snap_time
+                # 最新快照覆盖属性（仅非空，避免清空历史好值）
                 for f in _AGG_FIELDS:
-                    cur[f] = d.get(f, "") or ""
-                agg[ip] = cur
-            else:
-                if snap_time > cur["last_seen"]:
-                    cur["last_seen"] = snap_time
-                    # 最新快照覆盖属性（仅非空，避免清空历史好值）
-                    for f in _AGG_FIELDS:
-                        v = d.get(f, "") or ""
-                        if v:
-                            cur[f] = v
-                if snap_time < cur["first_seen"]:
-                    cur["first_seen"] = snap_time
+                    v = r[f] or ""
+                    if v:
+                        cur[f] = v
+            if snap_time < cur["first_seen"]:
+                cur["first_seen"] = snap_time
 
     # 过滤
-    dc = (device_class or "").strip().lower()
+    # device_class 是语言无关的规范值（见 scanner/classify.py），但用户在英文
+    # 界面里输入的是 "Printer"、历史库里存的却是「打印机」。用 i18n.canonical()
+    # 把两边都还原为源串再比较，跨语言查询才不会静默返回空结果。
+    dc = _canon(device_class).lower()
     ipk = (ip_substr or "").strip().lower()
     results = []
     for cur in agg.values():
-        if dc and dc not in (cur.get("device_class", "") or "").lower():
+        if dc and dc not in _canon(cur.get("device_class", "")).lower():
             continue
         if ipk and ipk not in (cur.get("ip", "") or "").lower():
             continue

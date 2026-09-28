@@ -10,8 +10,8 @@
 
 纯标准库，无 PyQt 依赖，便于单元测试。
 """
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from dataclasses import dataclass
+from typing import List, Dict
 from i18n import tr
 
 

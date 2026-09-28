@@ -15,7 +15,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable
 
 from scanner.snmp import snmp_walk, snmp_get_system
+from scanner.snmp_v3 import snmp_v3_walk, snmp_v3_get_system
+from app_logging import get_logger
 from i18n import tr
+
+_log = get_logger(__name__)
 
 
 # ── OID 前缀 ──
@@ -71,39 +75,63 @@ def _extract_suffix(oid: str, prefix: str) -> str:
 
 
 def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
-                     progress_cb: Optional[Callable[[str], None]] = None) -> SwitchInfo:
+                     progress_cb: Optional[Callable[[str], None]] = None,
+                     snmp_v3_user=None, port: int = 161) -> SwitchInfo:
     """对指定交换机执行 SNMP 端口映射。
 
     Args:
         ip: 交换机 IP 地址
-        community: SNMP v2c 社区名
+        community: SNMP v2c 社区名（仅在未配置 SNMPv3 用户时使用）
         timeout: 每次 GETNEXT 的超时（秒）
         progress_cb: 进度回调（接收状态文本）
+        snmp_v3_user: SnmpV3User 或 None。传入时改用 SNMPv3 认证/加密遍历
+            （此时 `community` 被忽略）。
+        port: SNMP 端口（默认 161；开放出来主要是为了可测试）
 
     Returns:
         SwitchInfo 对象，mappings 为 MAC→端口映射列表；出错时 error 非空。
     """
     info = SwitchInfo(ip=ip)
+    use_v3 = snmp_v3_user is not None
 
     def _progress(msg):
         if progress_cb:
             progress_cb(msg)
 
+    # 传输方式只在这一处分叉；下面整段映射组装逻辑对 v2c/v3 完全无感
+    if use_v3:
+        def _get_system():
+            res = snmp_v3_get_system(ip, snmp_v3_user, timeout=timeout, port=port)
+            return None if "error" in res else res
+
+        def _walk(base_oid):
+            return snmp_v3_walk(ip, snmp_v3_user, base_oid, timeout=timeout,
+                                port=port)
+    else:
+        def _get_system():
+            return snmp_get_system(ip, communities=[community], timeout=timeout,
+                                   port=port)
+
+        def _walk(base_oid):
+            return snmp_walk(ip, base_oid, community=community, timeout=timeout,
+                             port=port)
+
     # 0) 获取交换机基本信息
     _progress(tr("正在获取交换机信息..."))
-    sys_info = snmp_get_system(ip, communities=[community], timeout=timeout)
+    sys_info = _get_system()
     if sys_info:
         info.sys_name = sys_info.get("sys_name", "")
         info.sys_descr = sys_info.get("sys_descr", "")
 
     # 1) 遍历 MAC 转发表 (dot1dTpFdbTable)
     _progress(tr("正在遍历 MAC 转发表..."))
-    fdb_port_raw = snmp_walk(ip, _OID_FDB_PORT, community=community, timeout=timeout)
+    fdb_port_raw = _walk(_OID_FDB_PORT)
     if not fdb_port_raw:
         info.error = (
             f"无法从 {ip} 获取 MAC 转发表。\n"
-            + tr("请确认：\n"
-                 "  1. 交换机已开启 SNMP 且社区名正确\n")
+            + (tr("请确认：\n  1. 交换机已开启 SNMPv3 且用户名/口令正确\n")
+               if use_v3 else
+               tr("请确认：\n  1. 交换机已开启 SNMP 且社区名正确\n"))
             + tr("  2. 本机与交换机网络可达（UDP 161）\n"
                  "  3. 交换机支持 BRIDGE-MIB (dot1dTpFdbTable)")
         )
@@ -111,16 +139,16 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
 
     # 2) 遍历 dot1dTpFdbStatus（过滤 self/管理地址）
     _progress(tr("正在读取转发表状态..."))
-    fdb_status_raw = snmp_walk(ip, _OID_FDB_STATUS, community=community, timeout=timeout)
+    fdb_status_raw = _walk(_OID_FDB_STATUS)
 
     # 3) 遍历 dot1dBasePortIfIndex（桥接端口 → ifIndex）
     _progress(tr("正在读取端口索引映射..."))
-    base_port_raw = snmp_walk(ip, _OID_BASE_PORT_IFINDEX, community=community, timeout=timeout)
+    base_port_raw = _walk(_OID_BASE_PORT_IFINDEX)
 
     # 4) 遍历 ifDescr / ifName（ifIndex → 端口名称）
     _progress(tr("正在读取端口名称..."))
-    ifdescr_raw = snmp_walk(ip, _OID_IF_DESCR, community=community, timeout=timeout)
-    ifname_raw = snmp_walk(ip, _OID_IF_NAME, community=community, timeout=timeout)
+    ifdescr_raw = _walk(_OID_IF_DESCR)
+    ifname_raw = _walk(_OID_IF_NAME)
 
     # ── 组装映射 ──
 
@@ -131,8 +159,8 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
         if suffix and vtag == 0x02:  # INTEGER
             try:
                 bp_to_if[int(suffix)] = int.from_bytes(vbytes, "big")
-            except ValueError:
-                pass
+            except ValueError as e:
+                _log.debug("跳过非法的桥接端口索引 %r: %s", suffix, e)
 
     # ifIndex → 端口名称（优先 ifName，回退 ifDescr）
     if_to_name: Dict[int, str] = {}
@@ -141,8 +169,8 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
         if suffix and vtag == 0x04:  # OCTET STRING
             try:
                 if_to_name[int(suffix)] = vbytes.decode("utf-8", "replace").strip()
-            except ValueError:
-                pass
+            except ValueError as e:
+                _log.debug("跳过非法的 ifDescr 索引 %r: %s", suffix, e)
     for oid, (vbytes, vtag) in ifname_raw.items():
         suffix = _extract_suffix(oid, _OID_IF_NAME)
         if suffix and vtag == 0x04:
@@ -150,8 +178,8 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
                 name = vbytes.decode("utf-8", "replace").strip()
                 if name:
                     if_to_name[int(suffix)] = name
-            except ValueError:
-                pass
+            except ValueError as e:
+                _log.debug("跳过非法的 ifName 索引 %r: %s", suffix, e)
 
     # 状态过滤：仅保留 status=3 (learned) 和 status=5 (self)
     # 实际上 status=3 是动态学习到的终端 MAC，status=5 是交换机自身
@@ -162,8 +190,8 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
         if suffix and vtag == 0x02:
             try:
                 status_map[suffix] = int.from_bytes(vbytes, "big")
-            except ValueError:
-                pass
+            except ValueError as e:
+                _log.debug("跳过非法的转发表状态条目 %r: %s", suffix, e)
 
     # MAC → 桥接端口
     _progress(tr("正在组装映射结果..."))

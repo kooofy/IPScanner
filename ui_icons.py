@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""图标与调色板工具：PC 图标预渲染、深色 QPalette 构造。"""
-from PyQt5.QtCore import Qt
+"""图标与调色板工具：PC 图标预渲染、工具栏矢量图标、深色 QPalette 构造。"""
+from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import (
-    QColor, QPainter, QBrush, QPen, QPixmap, QIcon, QPalette
+    QColor, QPainter, QBrush, QPen, QPixmap, QIcon, QPalette, QImage
 )
 
 _PC_ICONS = None
@@ -72,3 +72,77 @@ def get_pc_icons():
     if _PC_ICONS is None:
         _PC_ICONS = (QIcon(_make_pc_pixmap(True)), QIcon(_make_pc_pixmap(False)))
     return _PC_ICONS
+
+
+# ── 工具栏矢量图标（自 styles.py 迁入）─────────────────────────────
+# 这些图形以 18x18 为设计基准，按 size/18 等比缩放，因此任意 size 都居中铺满。
+
+def _gray_icon(base_icon):
+    """将图标转为灰度，用于菜单左列（与黑色复选标记形成明显色差）。"""
+    if not isinstance(base_icon, QIcon):
+        return base_icon
+    src = base_icon.pixmap(16, 16)
+    img = src.toImage().convertToFormat(QImage.Format_ARGB32)
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.alpha() == 0:
+                continue
+            g = int(0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+            img.setPixelColor(x, y, QColor(g, g, g, c.alpha()))
+    return QIcon(QPixmap.fromImage(img))
+
+
+def _make_tool_icon(kind, color="#555555", size=18):
+    """绘制工具栏小图标（IP/C/展开/收起），支持指定线条颜色以适配主题。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.scale(size / 18.0, size / 18.0)  # 18 基准 -> size，内容自动居中铺满
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.5)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    if kind == "ip":
+        p.drawRoundedRect(1, 1, 16, 16, 2, 2)
+        font = p.font()
+        font.setBold(True)
+        font.setPointSize(6)
+        p.setFont(font)
+        p.drawText(QRect(1, 1, 16, 16), Qt.AlignCenter, "IP")
+    elif kind == "c":
+        p.drawRoundedRect(1, 1, 16, 16, 2, 2)
+        font = p.font()
+        font.setBold(True)
+        font.setPointSize(7)
+        p.setFont(font)
+        p.drawText(QRect(1, 1, 16, 16), Qt.AlignCenter, "C")
+    elif kind == "expand":
+        p.drawRect(1, 1, 16, 16)
+        p.drawLine(4, 7, 9, 12)
+        p.drawLine(9, 12, 14, 7)
+    elif kind == "collapse":
+        p.drawRect(1, 1, 16, 16)
+        p.drawLine(4, 10, 9, 5)
+        p.drawLine(9, 5, 14, 10)
+    p.end()
+    return QIcon(pm)
+
+
+def _make_pause_icon(color="#555555", size=18):
+    """绘制暂停图标（两竖条），线条颜色随主题，与工具栏小工具一致。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.scale(size / 18.0, size / 18.0)
+    pen = QPen(QColor(color))
+    pen.setWidthF(2.5)
+    pen.setCapStyle(Qt.FlatCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawLine(7, 3, 7, 15)
+    p.drawLine(11, 3, 11, 15)
+    p.end()
+    return QIcon(pm)

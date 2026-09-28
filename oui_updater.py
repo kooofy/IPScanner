@@ -5,7 +5,6 @@
 在后台线程中执行，通过信号回调汇报进度。
 """
 import os
-import re
 import sqlite3
 import tempfile
 import shutil
@@ -13,6 +12,9 @@ import urllib.request
 import urllib.error
 
 from app_paths import data_dir
+from app_logging import get_logger
+
+_log = get_logger(__name__)
 from parse_ieee_oui import parse_ieee_oui, simplify_vendor_name
 
 # IEEE OUI 数据源（也支持 MA-L / MA-M / MA-S，统一用 oui.txt）
@@ -156,5 +158,6 @@ def update_oui_db(progress_callback=None) -> dict:
         if txt_path and os.path.exists(txt_path):
             try:
                 os.unlink(txt_path)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                # 临时文件删不掉只留垃圾，不影响本次更新结果
+                _log.debug("清理 OUI 临时文件失败 %s: %s", txt_path, e)

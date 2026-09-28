@@ -1,0 +1,18 @@
+# IPScanner 开发 / 构建依赖（运行时依赖经 -r 一并引入）
+#
+# 安装：pip install -r requirements-dev.txt
+#
+# 普通使用者只需要 requirements.txt；本文件面向"要改代码 / 要出发布包"的场景。
+-r requirements.txt
+
+# ── 打包发布 ────────────────────────────────────────────────────────
+# 发布构建用 pyinstaller IPScanner_1.6.0.spec（GUI）与 IPScanner_cli.spec（无头）
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+
+# ── 静态检查 ────────────────────────────────────────────────────────
+# 规则集刻意只开"正确性"相关的 F / E9（未定义名、未使用导入、未使用变量、
+# 语法错误），不开格式类规则 —— 目的是把真实缺陷挡在门外，而不是制造
+# 大面积的风格 diff。配置见 pyproject.toml 的 [tool.ruff.lint]。
+# 用法：python -m ruff check .
+ruff==0.16.8

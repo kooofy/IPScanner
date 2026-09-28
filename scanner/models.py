@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
 from i18n import tr
 try:
     from oui_database import get_mac_vendor
 except ImportError:
     def get_mac_vendor(mac: str) -> str:
         return ""
+from .constants import device_class_label
 
 
 @dataclass
@@ -36,6 +37,13 @@ class ScanResult:
     shares: List[str] = field(default_factory=list)
     # 发现方式："ping" / "arp" / "mdns" / ""（离线），用于 UI 标记与导出
     discovery_method: str = ""
+    # 扫描末尾的 mDNS 阶段是否**就地修改过**本结果（追加 mDNS 服务/主机名、或置为在线）。
+    #
+    # 结果对象在 enrich 完成时就已通过 result_callback 交给 UI 渲染过一轮；
+    # mDNS（Phase 3）是**唯一**会在回调之后继续改动已渲染对象的地方
+    # （Phase 2 的 ARP 只处理 status != online 的主机，那些从未被回调过）。
+    # UI 靠这个标记决定"扫描结束后要不要重渲染这一行"，避免对全部结果做 O(n) 重渲染。
+    mdns_updated: bool = False
     # 端口探测方式："connect" / "syn" / "udp"，用于 UI 标记与导出
     scan_method: str = "connect"
     # 操作系统探测：TTL 推测族 + banner 提取的版本信息
@@ -62,6 +70,7 @@ class ScanResult:
     wmi_cpu: str = ""               # Win32_Processor.Name
     wmi_ram_gb: float = 0.0         # 物理内存（GB）
     wmi_last_boot: str = ""         # 最近启动时间（可读字符串）
+    wmi_transport: str = ""         # 实际生效的传输通路：""/"dcom"/"winrm"（语言无关）
     wmi_error: str = ""
     # NetBIOS 轻量识别（UDP/137 NBSTAT，零凭据，不需管理员；作为 WMI 轻量补充）
     netbios_identified: bool = False    # 是否成功取得 NetBIOS 信息
@@ -90,7 +99,7 @@ class ScanResult:
             tr("主机名"): self.hostname,
             tr("MAC地址"): self.mac,
             tr("厂商"): self.vendor,
-            tr("设备类型"): self.device_class or self.device_type,
+            tr("设备类型"): device_class_label(self.device_class) or self.device_type,
             tr("设备型号"): self.device_model,
             tr("位置"): self.location,
             tr("使用者"): self.user,

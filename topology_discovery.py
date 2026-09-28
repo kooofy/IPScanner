@@ -7,7 +7,7 @@ CDP (Cisco Discovery Protocol) — Cisco 专有。
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
-from scanner.snmp import snmp_walk, snmp_get_system
+from scanner.snmp import snmp_walk
 
 
 # ── OID constants (imported from snmp.py at runtime to avoid circular imports) ──
