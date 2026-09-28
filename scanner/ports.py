@@ -142,9 +142,14 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
     open_ports = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(64, len(ports))) as executor:
         def _probe(p):
-            t0 = time.monotonic()
+            # 必须用 perf_counter：Windows 上它一直是 QueryPerformanceCounter（~100ns），
+            # 而 time.monotonic() 在 Python 3.12 及以前是 GetTickCount64，分辨率只有
+            # 15.6ms（3.13 才改成 QPC）。局域网 connect 通常只要几百微秒，
+            # 用粗时钟两次调用会落在同一 tick 上、差值为 0.0，被下面的
+            # `elapsed > 0` 守卫丢掉 —— 结果 RTT 采样恒为空、自适应超时永远退回默认值。
+            t0 = time.perf_counter()
             ok = scan_port(ip, p, timeout)
-            return ok, (time.monotonic() - t0) if ok else 0.0
+            return ok, (time.perf_counter() - t0) if ok else 0.0
         futures = {executor.submit(_probe, p): p for p in ports}
         for future in concurrent.futures.as_completed(futures):
             port = futures[future]
