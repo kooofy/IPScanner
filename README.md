@@ -160,6 +160,13 @@ python cli.py history --show 12 --format csv -o snapshot12.csv
 
 **语言**：`--lang zh-CN` / `--lang en-US`，默认跟随系统。
 
+**编码**：stdout / stderr 一律以 **UTF-8** 输出，消费端请按 UTF-8 解码。
+Windows 上输出被重定向到管道或文件时（CI、`> out.json`、`| jq`），
+系统默认会改用 ANSI 代码页（英文系统为 cp1252），而 stdout 的默认错误处理器是
+`strict` —— 一旦输出里有中文（设备名、`device_class`、表格）就会直接抛
+`UnicodeEncodeError` 并以退出码 1 结束。CLI 在解析参数之前会主动把两个流切到
+UTF-8，因此 `--help` 与所有输出在任何代码页下都能正常工作。
+
 **SNMPv3（USM）**
 
 口令**只从环境变量读取**，没有任何接受口令的命令行选项 —— argv 会出现在进程列表

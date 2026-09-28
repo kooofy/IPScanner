@@ -11,6 +11,7 @@
 """
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -378,6 +379,89 @@ class NoGuiDependencyTest(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertEqual(proc.stdout.strip(), "OK")
+
+
+class LegacyCodepageTest(unittest.TestCase):
+    """CLI 必须在非 UTF-8 代码页下也能正常输出中文。
+
+    背景：Windows 上 stdout 被重定向到管道/文件时，Python 用**系统 ANSI
+    代码页**编码（英文系统是 cp1252），而 stdout 默认 ``errors='strict'`` ——
+    只要输出里有中文就直接抛 ``UnicodeEncodeError`` 并以退出码 1 结束。
+    CI 的 CLI 冒烟测试（`IPScanner_cli.exe scan ... --format json`）就是这么挂的：
+    `--version` 是 ASCII 能过，`scan` 一写「设备」就崩。
+
+    stderr 默认 ``backslashreplace`` 不崩，但中文会变成 ``\\u51c6...`` 转义垃圾，
+    所以这里两个流都要断言。
+    """
+
+    def _run_cli(self, argv):
+        """在 PYTHONIOENCODING=cp1252 的子进程里跑 CLI，返回 CompletedProcess(bytes)。"""
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        return subprocess.run([sys.executable, "cli.py", *argv],
+                              cwd=ROOT, env=env, capture_output=True)
+
+    def test_stdout_chinese_survives_legacy_codepage(self):
+        """空历史库必输出中文「没有历史快照」—— 断言它没把进程搞崩。
+
+        这是**确定性**的中文 stdout 输出，不依赖网络与设备探测结果。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "history.db")
+            proc = self._run_cli(["history", "--list", "--db", db])
+        self.assertEqual(proc.returncode, 0,
+                         msg=proc.stderr.decode("utf-8", "replace"))
+        # 必须是 UTF-8 字节；若仍是 cp1252 会解码失败或得到乱码
+        self.assertIn("没有历史快照", proc.stdout.decode("utf-8"))
+
+    def test_scan_json_survives_legacy_codepage(self):
+        """CI 冒烟测试里失败的那条命令，逐字复现。"""
+        proc = self._run_cli(["scan", "-r", "127.0.0.1/32",
+                              "--no-ports", "--no-mdns", "--format", "json"])
+        self.assertEqual(proc.returncode, 0,
+                         msg=proc.stderr.decode("utf-8", "replace"))
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(payload["device_count"], 1)
+
+    def test_stderr_is_real_utf8_not_backslash_escaped(self):
+        """stderr 的中文不能被转义成 \\uXXXX —— 那样 CI 日志没法看。"""
+        proc = self._run_cli(["scan", "-r", "127.0.0.1/32",
+                              "--no-ports", "--no-mdns", "--format", "json"])
+        err = proc.stderr.decode("utf-8")
+        self.assertIn("准备扫描", err)
+        self.assertNotIn("\\u51c6", err)
+
+    def test_help_survives_legacy_codepage(self):
+        """--help 的 metavar 含中文（如「用户名」），也必须能打印出来。"""
+        proc = self._run_cli(["scan", "--help"])
+        self.assertEqual(proc.returncode, 0,
+                         msg=proc.stderr.decode("utf-8", "replace"))
+        self.assertIn("用户名", proc.stdout.decode("utf-8"))
+
+    def test_force_utf8_stdio_tolerates_streams_without_reconfigure(self):
+        """单测的 redirect_stdout 用 StringIO —— 没有 reconfigure，不能因此报错。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            cli._force_utf8_stdio()          # 不应抛异常
+        buf.write("仍然可写")
+        self.assertEqual(buf.getvalue(), "仍然可写")
+
+    def test_force_utf8_stdio_requests_utf8_on_both_streams(self):
+        calls = []
+
+        class _S:
+            def reconfigure(self, **kw):
+                calls.append(kw)
+
+        saved_out, saved_err = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = _S(), _S()
+            cli._force_utf8_stdio()
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+        self.assertEqual(len(calls), 2, "stdout 与 stderr 都要切换")
+        for kw in calls:
+            self.assertEqual(kw["encoding"], "utf-8")
 
 
 if __name__ == "__main__":

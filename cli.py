@@ -86,6 +86,38 @@ _SNAPSHOT_DEVICE_COLUMNS = (
 
 # ────────────────────────────── 输出工具 ──────────────────────────────
 
+def _force_utf8_stdio():
+    """把 stdout / stderr 切到 UTF-8。
+
+    **为什么必须做**：Windows 上 stdout 被重定向到管道或文件时
+    （CI、``> out.json``、``| jq``），Python 用**系统 ANSI 代码页**编码
+    （英文系统是 cp1252），而 stdout 的默认错误处理器是 ``strict`` ——
+    只要输出里有中文（设备名、device_class、表格、JSON 值），
+    就会直接抛 ``UnicodeEncodeError`` 并以退出码 1 结束。
+    本项目面向中文设备名，CLI 的定位又是"给脚本消费"，所以这是必踩的坑。
+
+    stderr 默认是 ``backslashreplace``，不会崩，但中文会变成
+    ``\\u51c6\\u5907...`` 这种转义垃圾，CI 日志基本没法看；
+    一并切到 UTF-8 才有可读输出。
+
+    **为什么是 reconfigure 而不是改 errors**：只放宽 errors 只是把中文
+    变成 ``?``，仍然是坏数据；切编码才能保住内容。UTF-8 能编码任何
+    合法字符，``errors="replace"`` 仅作为兜底（应对文件名解码产生的
+    孤立代理项），保证"永不因输出而崩溃"。
+
+    真正连着控制台时 Python 本就走 UTF-8（Windows 下经 WriteConsoleW），
+    reconfigure 是幂等的；被替换成 StringIO（单测的 redirect_stdout）
+    时没有 reconfigure 方法，静默跳过即可。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # StringIO 等测试替身没有 reconfigure；已关闭或不支持改编码的流
+            # 也只能作罢 —— 都不影响后续写入。
+            continue
+
+
 def _disp_width(text: str) -> int:
     """字符串的终端显示宽度（CJK 全角按 2 计）。"""
     w = 0
@@ -858,6 +890,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # 必须早于 build_parser()：argparse 的 --help 里含中文 metavar（如「用户名」），
+    # 在 cp1252 下会直接崩在 parse_args 内部，用户连帮助都看不到。
+    _force_utf8_stdio()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
