@@ -23,14 +23,25 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import cli
+import i18n
 from scanner.models import ScanResult
 
 
 def _run_main(argv):
-    """运行 cli.main，返回 (exit_code, stdout, stderr)。"""
+    """运行 cli.main，返回 (exit_code, stdout, stderr)。
+
+    cli.main() 内部会调用 ``i18n.init(None)``，按**系统语言**重新加载语言包。
+    在本进程里直接调用它会污染全局语言状态，使后续测试的断言随开发机 / CI 的
+    系统语言漂移 —— 英文 runner 上 test_compare 曾因此挂掉 5 个。
+    这里显式还原（与其他测试文件 test_i18n_lazy / test_snmp_v3 … 的做法一致）。
+    """
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cli.main(argv)
+    lang = i18n.current_lang()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(argv)
+    finally:
+        i18n.init(lang)
     return code, out.getvalue(), err.getvalue()
 
 
