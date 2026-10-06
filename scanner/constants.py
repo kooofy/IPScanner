@@ -127,6 +127,16 @@ SVC_RDP = "RDP"
 SVC_SNMP = "SNMP"
 SVC_MDNS = "mDNS"
 SVC_SMB = "SMB"
+# P2-2 扩展服务指纹覆盖的服务（均为 ASCII 规范代码，显示走 service_label）
+SVC_TELNET = "Telnet"
+SVC_SMTP = "SMTP"
+SVC_POP3 = "POP3"
+SVC_IMAP = "IMAP"
+SVC_VNC = "VNC"
+SVC_MYSQL = "MySQL"
+SVC_REDIS = "Redis"
+SVC_POSTGRESQL = "PostgreSQL"
+SVC_MONGODB = "MongoDB"
 
 # 规范代码 -> 翻译原文（切勿在 import 期 tr()）
 SERVICE_LABELS = {
@@ -137,6 +147,15 @@ SERVICE_LABELS = {
     SVC_SNMP: "SNMP",
     SVC_MDNS: "mDNS",
     SVC_SMB: "SMB共享",
+    SVC_TELNET: "Telnet",
+    SVC_SMTP: "SMTP",
+    SVC_POP3: "POP3",
+    SVC_IMAP: "IMAP",
+    SVC_VNC: "VNC",
+    SVC_MYSQL: "MySQL",
+    SVC_REDIS: "Redis",
+    SVC_POSTGRESQL: "PostgreSQL",
+    SVC_MONGODB: "MongoDB",
 }
 
 
@@ -256,10 +275,18 @@ _PRINTER_MODEL_RE = re.compile(
 )
 
 
+# ── 跨模块共享状态 ────────────────────────────────────────────────────
+# 这两个变量被 ports.py 与 engine.py 共同读写，**必须**通过 ``constants.xxx``
+# 属性访问，不能用 ``from .constants import _xxx`` 再赋值 —— 后者只会创建一份
+# 本模块的副本，写不回这里（Python 的 import 是名字绑定，不是引用别名）。
+# 历史缺陷：ports.py 曾经这么写，导致三份互不相干的副本：
+#   · ports 的副本一旦置位就再没人复位（提权后仍静默回退 connect）
+#   · engine 的副本恒为 False，使"SYN 发送被拒"的回退告警成为死代码
+# _syn_failed 用 Event 而非裸 bool：它被多个探测线程并发读写，Event 自带同步。
 _raw_cap_cache = None
 
 
-_syn_failed = False
+_syn_failed = threading.Event()
 
 
 _MDNS_GROUP = "224.0.0.251"

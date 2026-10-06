@@ -1,0 +1,58 @@
+{
+  "version": "2026.10.1",
+  "updated": "2026-10-06",
+  "description": "服务版本指纹规则。把一段服务 banner 文本映射到 (service, product, version)。字段：service=规范服务代码；product=产品名；pattern=Python 正则（默认忽略大小写）；version=版本号所在的捕获组（组序号或组名，可省略）；ports=该规则只在这些端口上生效（可省略，省略即不限端口）；os_hint=可选的操作系统线索。规则按数组顺序求值、命中即止，因此顺序即优先级：产品专属规则在前，通用/兜底规则在后。",
+  "rules": [
+    {"service": "SSH", "product": "OpenSSH", "pattern": "SSH-[0-9.]+-OpenSSH[_-]([A-Za-z0-9._]+)", "version": 1},
+    {"service": "SSH", "product": "Dropbear", "pattern": "SSH-[0-9.]+-dropbear[_-]?([A-Za-z0-9._]*)", "version": 1},
+    {"service": "SSH", "product": "RomSSH", "pattern": "SSH-[0-9.]+-RomSSH[_-]?([A-Za-z0-9._]*)", "version": 1},
+    {"service": "SSH", "product": "Cisco SSH", "pattern": "SSH-[0-9.]+-Cisco-([A-Za-z0-9._]+)", "version": 1},
+
+    {"service": "HTTP", "product": "Apache httpd", "pattern": "Apache/([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "nginx", "pattern": "nginx/([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "Microsoft IIS", "pattern": "Microsoft-IIS/([0-9.]+)", "version": 1, "os_hint": "Windows"},
+    {"service": "HTTP", "product": "lighttpd", "pattern": "lighttpd/([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "Apache Tomcat", "pattern": "Apache-Coyote/([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "Jetty", "pattern": "Jetty\\(([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "gunicorn", "pattern": "gunicorn/([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "Werkzeug", "pattern": "Werkzeug/([0-9.]+)", "version": 1},
+    {"service": "HTTP", "product": "uvicorn", "pattern": "uvicorn"},
+    {"service": "HTTP", "product": "Cowboy", "pattern": "Cowboy"},
+
+    {"service": "FTP", "product": "vsftpd", "pattern": "vsFTPd ([0-9.]+)", "version": 1},
+    {"service": "FTP", "product": "ProFTPD", "pattern": "ProFTPD ([0-9.]+)", "version": 1},
+    {"service": "FTP", "product": "FileZilla Server", "pattern": "FileZilla Server ([0-9.]+)", "version": 1},
+    {"service": "FTP", "product": "Pure-FTPd", "pattern": "Pure-FTPd"},
+    {"service": "FTP", "product": "Microsoft FTP", "pattern": "Microsoft FTP Service", "os_hint": "Windows"},
+
+    {"service": "SMTP", "product": "Postfix", "pattern": "Postfix"},
+    {"service": "SMTP", "product": "Exim", "pattern": "Exim ([0-9.]+)", "version": 1},
+    {"service": "SMTP", "product": "Sendmail", "pattern": "Sendmail ([0-9.]+)", "version": 1},
+    {"service": "SMTP", "product": "Microsoft ESMTP", "pattern": "Microsoft ESMTP MAIL", "os_hint": "Windows"},
+    {"service": "SMTP", "product": "Haraka", "pattern": "Haraka"},
+
+    {"service": "POP3", "product": "Dovecot", "pattern": "Dovecot ready", "ports": [110]},
+    {"service": "IMAP", "product": "Dovecot", "pattern": "Dovecot ready", "ports": [143]},
+
+    {"service": "MySQL", "product": "MariaDB", "pattern": "([0-9]+\\.[0-9]+\\.[0-9]+)-MariaDB", "version": 1},
+    {"service": "MySQL", "product": "MariaDB", "pattern": "MariaDB"},
+    {"service": "MySQL", "product": "MySQL", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)", "version": 1},
+    {"service": "MySQL", "product": "MySQL", "pattern": "MySQL"},
+
+    {"service": "VNC", "product": "VNC", "pattern": "RFB ([0-9.]+)", "version": 1},
+
+    {"service": "FTP", "product": "", "pattern": "^220[- ]", "ports": [21]},
+    {"service": "SMTP", "product": "", "pattern": "^220[- ]", "ports": [25]},
+
+    {"service": "SSH", "product": "", "pattern": "^SSH-[0-9.]+"},
+    {"service": "HTTP", "product": "", "pattern": "HTTP/[0-9.]+"},
+    {"service": "POP3", "product": "", "pattern": "^\\+OK"},
+    {"service": "IMAP", "product": "", "pattern": "^\\* OK"},
+
+    {"service": "Redis", "product": "Redis", "pattern": "PONG|NOAUTH|ERR", "ports": [6379]},
+    {"service": "PostgreSQL", "product": "PostgreSQL", "pattern": "PostgreSQL", "ports": [5432]},
+    {"service": "MongoDB", "product": "MongoDB", "pattern": "MongoDB", "ports": [27017]},
+    {"service": "RDP", "product": "Microsoft RDP", "pattern": "RDP", "ports": [3389], "os_hint": "Windows"},
+    {"service": "Telnet", "product": "", "pattern": "\\S", "ports": [23]}
+  ]
+}

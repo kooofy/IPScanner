@@ -6,7 +6,9 @@
 -r requirements.txt
 
 # ── 打包发布 ────────────────────────────────────────────────────────
-# 发布构建用 pyinstaller IPScanner_1.6.0.spec（GUI）与 IPScanner_cli.spec（无头）
+# 发布构建用 pyinstaller IPScanner.spec（GUI）与 IPScanner_cli.spec（无头）。
+# spec 文件名固定、不带版本号；产物名才由 version.py 派生（IPScanner_<版本>.exe），
+# 因此发版只需改 version.py 一处。
 pyinstaller==6.21.0
 pyinstaller-hooks-contrib==2026.6
 

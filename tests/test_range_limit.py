@@ -14,7 +14,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from scanner.range import (
-    parse_ip_range, count_ip_range, is_valid_range,
+    parse_ip_range, count_ip_range, is_valid_range, is_ipv6_range,
     RangeTooLarge, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
 )
 
@@ -128,6 +128,46 @@ class BackwardCompatibilityTest(unittest.TestCase):
         self.assertEqual(len(parse_ip_range("192.168.1.0/24")), 254)
         self.assertEqual(parse_ip_range(""), [])
         self.assertEqual(parse_ip_range("not an ip"), [])
+
+
+class Ipv6RejectionTest(unittest.TestCase):
+    """IPv6 必须被**显式拒绝** —— 本工具只支持 IPv4。
+
+    历史缺陷：`ipaddress.ip_network("2001:db8::/120")` 语法完全合法，会被正常
+    解析并产出一串 IPv6 地址；但下游 ARP/SendARP、NetBIOS、WMI、SNMP 全部
+    假设 IPv4，用户最终拿到一张"全部离线"的假结果表，且没有任何报错。
+    """
+
+    def test_ipv6_cidr_is_rejected(self):
+        self.assertFalse(is_valid_range("2001:db8::/120"))
+        self.assertEqual(count_ip_range("2001:db8::/120"), 0)
+        self.assertEqual(parse_ip_range("2001:db8::/120"), [])
+
+    def test_ipv6_single_is_rejected(self):
+        for s in ("::1", "fe80::1", "2001:db8::1"):
+            self.assertFalse(is_valid_range(s), msg=s)
+            self.assertEqual(count_ip_range(s), 0, msg=s)
+            self.assertEqual(parse_ip_range(s), [], msg=s)
+
+    def test_ipv6_range_is_rejected(self):
+        self.assertFalse(is_valid_range("2001:db8::1-2001:db8::ff"))
+        self.assertEqual(count_ip_range("2001:db8::1-2001:db8::ff"), 0)
+
+    def test_is_ipv6_range_distinguishes_from_garbage(self):
+        """上层要靠它把"不支持 IPv6"和"格式写错了"分开提示。"""
+        for s in ("::1", "fe80::1", "2001:db8::/120", "2001:db8::1-2001:db8::ff"):
+            self.assertTrue(is_ipv6_range(s), msg=s)
+        for s in ("", "hello", "192.168.1.0/33", "999.1.1.1", "192.168.1.1-",
+                  "192.168.1.1", "192.168.1.0/24", "192.168.1.1-254"):
+            self.assertFalse(is_ipv6_range(s), msg=s)
+
+    def test_ipv4_is_not_affected(self):
+        """版本闸门不能误伤 IPv4。"""
+        self.assertTrue(is_valid_range("192.168.1.0/24"))
+        self.assertTrue(is_valid_range("10.0.0.1-20"))
+        self.assertTrue(is_valid_range("172.16.0.1"))
+        self.assertEqual(parse_ip_range("192.168.1.0/30"),
+                         ["192.168.1.1", "192.168.1.2"])
 
 
 if __name__ == "__main__":

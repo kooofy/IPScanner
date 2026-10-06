@@ -372,8 +372,8 @@ def _run_scan(args):
     由调用方转成退出码 —— 这样 ``main()`` 对库调用方保持"只返回 int"的契约。
     """
     from scanner import NetworkScanner
-    from scanner.range import (count_ip_range, MAX_IPS_PER_RANGE,
-                               MAX_IPS_TOTAL)
+    from scanner.range import (count_ip_range, is_ipv6_range,
+                               MAX_IPS_PER_RANGE, MAX_IPS_TOTAL)
 
     try:
         ports = _resolve_ports(args)
@@ -406,7 +406,13 @@ def _run_scan(args):
     for r in args.ranges:
         n = count_ip_range(r)
         if n <= 0:
-            log(f"错误: 无法解析 IP 范围 {r!r}")
+            # IPv6 与"写错了"要分开报：前者语法合法，笼统说"无法解析"会
+            # 让用户反复检查自己的格式，而真正的原因是工具不支持。
+            if is_ipv6_range(r):
+                log(f"错误: 「{r}」是 IPv6 范围，本工具目前只支持 IPv4 扫描。"
+                    f"请改用 IPv4 网段（如 192.168.1.0/24）。")
+            else:
+                log(f"错误: 无法解析 IP 范围 {r!r}")
             return None, None
         if n > MAX_IPS_PER_RANGE:
             log(f"错误: 范围「{r}」包含 {n} 个地址，超过单次上限 {MAX_IPS_PER_RANGE} 个。"
@@ -475,6 +481,25 @@ def cmd_scan(args) -> int:
         if args.fail_if_empty:
             return EXIT_ERROR
 
+    # 变更告警：基线必须在**保存本次快照之前**取到，否则拿到的就是自己
+    notifiers = []
+    baseline_id = None
+    if getattr(args, "notify", False):
+        import notifier as _notifier
+        notifiers = _notifier.build_notifiers(
+            _notifier.load_config(getattr(args, "notify_config", None)))
+        if not notifiers:
+            warn("已指定 --notify，但没有可用的通知渠道。"
+                 "请检查通知配置（默认：数据目录下的 notify.json）")
+        else:
+            try:
+                import history_store
+                snaps = history_store.list_snapshots(db_path=_db_path(args))
+                baseline_id = snaps[-1]["id"] if snaps else None
+            except Exception as e:  # noqa: BLE001
+                warn(f"读取历史快照失败，本次跳过变更对比: {e}")
+                notifiers = []
+
     if args.save_snapshot:
         try:
             import history_store
@@ -501,7 +526,52 @@ def cmd_scan(args) -> int:
         emit(render_csv(records, _RESULT_COLUMNS), args.output)
     else:
         emit(render_table(records, _RESULT_COLUMNS), args.output)
+
+    if notifiers:
+        _notify_changes(results, baseline_id, notifiers, args)
     return EXIT_OK
+
+
+def _notify_changes(results, baseline_id, notifiers, args) -> None:
+    """对比基线快照并推送变更告警。
+
+    **无变更时不发告警。** 定时任务每 30 分钟推一条"无变更"会把渠道变成噪音，
+    真正需要被看见的变更反而会被淹没。同理，首次运行只告知"基线已建立"。
+    """
+    import change_detector as cd
+    import history_store
+    import notifier as _notifier
+
+    if baseline_id is None:
+        if getattr(args, "save_snapshot", False):
+            subject = "[IPScanner] 已建立基线快照"
+            body = ("首次运行：本次结果已存为基线，未做变更对比。\n"
+                    "从下一次扫描开始即可检测新增 / 消失 / 属性变更。")
+        else:
+            subject = "[IPScanner] 无历史基线"
+            body = ("尚无历史快照可对比，本次未做变更检测。\n"
+                    "请在扫描命令中加上 --save-snapshot 以建立基线。")
+    else:
+        try:
+            baseline = history_store.get_snapshot(baseline_id, db_path=_db_path(args))
+        except Exception as e:  # noqa: BLE001
+            warn(f"读取基线快照 #{baseline_id} 失败: {e}")
+            return
+        previous = (baseline or {}).get("devices", [])
+        changes = cd.detect_changes(results, previous)
+        if not changes:
+            log(f"变更对比（当前扫描 → 快照 #{baseline_id}）：无变更，不发送告警")
+            return
+        subject, body = _notifier.format_change_message(
+            changes, cd.get_change_summary(changes),
+            label=f"当前扫描 → 快照 #{baseline_id}")
+
+    log(f"发送变更告警：{subject}")
+    for name, ok, err in _notifier.send_all(notifiers, subject, body):
+        if ok:
+            log(f"  已发送 [{name}]")
+        else:
+            warn(f"  发送失败 [{name}]: {err}")
 
 
 def _ip_sort_key(ip: str):
@@ -684,6 +754,97 @@ def cmd_history(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────────── 计划任务 ──────────────────────────────
+
+def cmd_schedule(args) -> int:
+    """注册 / 卸载 / 查询系统计划任务（Windows schtasks、POSIX crontab）。
+
+    为什么做成 CLI 子命令而不是只在 GUI 里提供：无人值守的资产监控本身就发生在
+    "没人开界面"的场景。把注册动作也放进 GUI，等于要求用户先开一次界面来配置
+    "以后再也不要开界面"的任务 —— 说不通。CLI 里一条命令搞定，才配得上"自动化"。
+    """
+    import scheduler
+
+    action = "register" if args.register else ("unregister" if args.unregister else "status")
+
+    if not scheduler.is_supported():
+        log("错误: 当前系统未找到可用的调度命令"
+            "（Windows 需要 schtasks，Linux/macOS 需要 crontab）。")
+        return EXIT_ERROR
+
+    name = args.name or scheduler.DEFAULT_TASK_NAME
+
+    if action == "status":
+        ok, out = scheduler.query(name)
+        if ok:
+            log(f"计划任务「{name}」已注册。")
+            if out:
+                log(out)
+            return EXIT_OK
+        log(f"计划任务「{name}」未注册。")
+        return EXIT_OK
+
+    if action == "unregister":
+        ok, msg = scheduler.unregister(name)
+        if ok:
+            log(f"已卸载计划任务「{name}」。")
+            return EXIT_OK
+        log(f"错误: 卸载失败: {msg}")
+        return EXIT_ERROR
+
+    # ── register ──
+    ranges = [r for r in (args.ranges or []) if r and str(r).strip()]
+    if not ranges:
+        log("错误: 注册计划任务需要至少一个 -r/--range。")
+        return EXIT_ERROR
+
+    # 频率/时间参数非法要在调用系统调度器**之前**就拦下 —— schtasks 会把这些
+    # 报成含糊的 "参数错误"，用户根本对不上是哪一项写错了。
+    try:
+        scheduler.validate_schedule(args.freq, args.interval, args.at)
+    except scheduler.ScheduleError as e:
+        log(f"错误: {e}")
+        return EXIT_ERROR
+
+    cli_args = scheduler.build_scan_argv(
+        ranges, level=args.level, save_snapshot=True,
+        note=args.note or "", notify=not args.no_notify,
+    )
+    # --db / --notify-config 若显式给了，要一并固化进任务命令行，
+    # 否则计划任务运行时用的是默认数据目录，与用户手动扫描的库对不上。
+    if getattr(args, "db", None):
+        cli_args += ["--db", args.db]
+    if getattr(args, "notify_config", None):
+        cli_args += ["--notify-config", args.notify_config]
+    if args.quiet:
+        cli_args.append("--quiet")
+
+    exe, prefix = scheduler.default_executable()
+    command = scheduler.build_task_command(exe, prefix, cli_args)
+
+    ok, msg = scheduler.register(
+        name, command, args.freq, interval=args.interval,
+        at=args.at, run_highest=args.highest,
+    )
+    if not ok:
+        log(f"错误: 注册计划任务失败: {msg}")
+        return EXIT_ERROR
+    log(f"已注册计划任务「{name}」。")
+    log(f"  执行命令: {command}")
+    log(f"  触发规则: {_describe_schedule(args)}")
+    return EXIT_OK
+
+
+def _describe_schedule(args) -> str:
+    """把调度参数渲染成一句人类可读的说明（仅用于日志）。"""
+    import scheduler
+    if args.freq == scheduler.FREQ_DAILY:
+        return f"每天 {args.at}"
+    if args.freq == scheduler.FREQ_HOURLY:
+        return f"每 {args.interval} 小时"
+    return f"每 {args.interval} 分钟"
+
+
 def _fmt_time(ts) -> str:
     try:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
@@ -789,6 +950,8 @@ def _add_snmp_v3_args(parser):
 # ────────────────────────────── 参数定义 ──────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
+    import scheduler as _sched
+
     common = argparse.ArgumentParser(add_help=False)
     # default=SUPPRESS：子解析器不会用 None 覆盖主解析器已解析到的 --lang
     # （argparse 的已知行为：子解析器的默认值会写回同一个 namespace）。
@@ -832,6 +995,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--library", action="store_true", help="启用地址库自动匹配（读 mac_library.db）")
     sp.add_argument("--save-snapshot", action="store_true", help="把本次结果存为历史快照")
     sp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")
+    sp.add_argument("--notify", action="store_true",
+                    help="检测到资产变更时推送告警（需先配置通知渠道）")
+    sp.add_argument("--notify-config", metavar="文件",
+                    help="通知配置文件路径（默认：数据目录下的 notify.json）")
     sp.add_argument("--fail-if-empty", action="store_true", help="无任何结果时返回退出码 1")
     sp.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table",
                     help="输出格式（默认 table）")
@@ -880,6 +1047,38 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
     hp.add_argument("-o", "--output", metavar="文件")
     hp.set_defaults(func=cmd_history)
+
+    # ── schedule ──
+    cp = sub.add_parser("schedule", help="注册/卸载/查询定时扫描计划任务",
+                        parents=[common],
+                        description="把「扫描 + 存快照 + 变更告警」注册为系统计划任务"
+                                    "（Windows schtasks / Linux·macOS crontab），"
+                                    "实现无人值守的资产变更监控。")
+    grp = cp.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--register", action="store_true", help="注册（或覆盖）计划任务")
+    grp.add_argument("--unregister", action="store_true", help="删除计划任务")
+    grp.add_argument("--status", action="store_true", help="查询计划任务是否存在")
+    cp.add_argument("-r", "--range", action="append", dest="ranges", metavar="范围",
+                    help="IP 范围，可重复（--register 时必填）")
+    cp.add_argument("--name", metavar="任务名",
+                    help=f"计划任务名（默认「{_sched.DEFAULT_TASK_NAME}」）")
+    cp.add_argument("--freq", choices=("minute", "hourly", "daily"), default="daily",
+                    help="扫描频率（默认 daily）")
+    cp.add_argument("--interval", type=int, default=1, metavar="N",
+                    help="间隔：minute=每 N 分钟(1-1439)、hourly=每 N 小时(1-23)")
+    cp.add_argument("--at", metavar="HH:MM", default="09:00",
+                    help="daily 频率的执行时刻（默认 09:00）")
+    cp.add_argument("--level", choices=("quick", "standard", "all"), default="quick",
+                    help="端口扫描级别（默认 quick）")
+    cp.add_argument("--note", metavar="备注", help="快照备注")
+    cp.add_argument("--no-notify", action="store_true",
+                    help="定时任务不发送变更告警（默认会发）")
+    cp.add_argument("--notify-config", metavar="文件",
+                    help="通知配置文件路径（默认：数据目录下的 notify.json）")
+    cp.add_argument("--highest", action="store_true",
+                    help="以最高权限运行（SYN 半开扫描 / ARP 主动探测需要管理员权限）")
+    cp.add_argument("-q", "--quiet", action="store_true", help="定时任务静默运行")
+    cp.set_defaults(func=cmd_schedule)
 
     # scan 与 diff 都会真正发起扫描，因此都需要 SNMPv3 参数。
     # 放在最后统一挂载，避免两处 add_argument 各写一遍、日后再漂移。

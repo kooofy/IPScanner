@@ -40,17 +40,41 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
 
 | 能力 | 说明 |
 | --- | --- |
-| 扫描范围 | 单个 IP、CIDR（`192.168.1.0/24`）、IP 区间（`10.0.0.1-10.0.0.200`）、多个网段批量 |
+| 扫描范围 | 单个 IP、CIDR（`192.168.1.0/24`）、IP 区间（`10.0.0.1-10.0.0.200`）、多个网段批量（仅 IPv4） |
 | 扫描深度 | `快速 (21)` / `标准 (1023)` / `全端口 (65535)` 三档 |
 | 探测方式 | TCP 全连接 / TCP SYN 半开 / UDP 探测，可随时切换 |
-| 存活探测 | ICMP Ping + **ARP 主动探测**（能发现禁 Ping 的主机）+ mDNS 组播发现 |
-| 并发 | 线程数可调（默认 100），RTT 自适应端口超时 |
+| 存活探测 | **原生 ICMP**（Windows `IcmpSendEcho` / Unix raw socket，零依赖、零管理员）+ **ARP 主动探测**（能发现禁 Ping 的主机）+ mDNS 组播发现 |
+| 并发 | 线程数可调（默认 100），RTT 自适应端口超时；端口探测走**进程内单例有界池**（上限 384） |
+
+> **存活探测为什么用原生 ICMP**：旧实现每个 IP 起一个 `ping` 子进程，/24 就是 254 次
+> 进程创建、/16（本项目上限）是 65536 次。Windows 上单次进程创建约 10~20ms，这部分
+> 开销往往比真正的网络等待还大 —— 这是与 Advanced IP Scanner / nmap 最主要的体感差距。
+> 现在默认走 Windows `iphlpapi.IcmpSendEcho`（用户态导出，**零第三方依赖、零管理员
+> 权限**，与已有的 `SendARP` 是同一套 ctypes 手法）或 Unix 的 raw socket；
+> 拿不到权限时自动回退子进程 `ping`，功能不降级。
+> 实测单次探测：有响应主机 0.7ms vs 251ms（约 370×），不可达主机 0.19s vs 1.56s（32 地址并发）。
+>
+> **端口探测为什么要收敛线程池**：端口扫描在流水线里是**按设备**反复调用的
+> （enrich 阶段并发 50 台，每台还要为协议端口再扫一次）。旧实现每次调用都新建一个
+> 线程池，最坏组合（standard 档 1023 端口）会在创建/销毁中抖动出数千个线程。
+> 现在改为**进程内单例有界池**（上限 384）：一次创建、跨设备跨扫描复用，线程数有硬上限。
+> 实测现实负载（快 LAN / 多数端口关闭）下耗时与旧实现持平或略快，而线程数大幅下降；
+> 只有"整台主机端口全被防火墙丢包"的极端场景才有约 7% 的时延代价。
+> 另外，完整端口扫描已覆盖协议端口（80/443/21/3389）时不再重复探测，省掉一次多余往返。
 
 ### 识别与指纹
 
 - **MAC 厂商库**：内置 OUI 数据库，支持在线更新；未知厂商可按前缀批量查询。
 - **设备类型与型号**：综合端口、服务 banner、mDNS、UPnP、SNMP、OUI 线索推断。
 - **操作系统**：TTL 推测 + 服务 banner 版本提取。
+- **服务版本指纹库**：把服务 banner 解析为「服务 / 产品 / 版本」，覆盖
+  SSH、HTTP、FTP、SMTP、POP3、IMAP、Telnet、VNC、MySQL·MariaDB、
+  Redis、PostgreSQL、MongoDB、RDP 等内网高频服务。
+  规则放在 `service_fingerprints.json`，查找策略与 `oui.db` 一致
+  （**用户数据目录优先 → 内置回退**）：把新版 JSON 放进数据目录即可生效，
+  补一条指纹无需发版。数据文件缺失/损坏或单条正则写错都会自动回退到
+  内置规则，不会让"指纹库坏了"升级成"扫描失败"。
+  探测**只做无凭据识别**，不发送任何需要认证的请求。
 - **mDNS / DNS-SD**：发现打印机、NAS、Apple 设备、IoT 等组播设备（无需扫描也可单独运行）。
 - **NetBIOS**：UDP/137 NBSTAT 查询计算机名与工作组，零凭据、不需管理员。
 - **WMI 远程识别**：经 PowerShell CIM 取权威硬件/系统信息（需管理员凭据；
@@ -68,6 +92,9 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
 
 - **历史快照**：每次扫描可存为快照，支持跨快照聚合查询（按设备类型 / 网段 / IP 过滤）。
 - **变更对比**：对比两次快照，列出新增 / 消失 / 属性变更的设备。
+- **定时扫描 + 变更告警**：注册为系统计划任务（Windows `schtasks` / Linux·macOS `crontab`），
+  无人值守地周期性扫描并在资产变化时推送告警到 Webhook / 企业微信 / 钉钉 / 邮件
+  （零第三方依赖；敏感值支持 `env:` 间接引用，不落盘）。
 - **IP 冲突检测**：识别同一 IP 对应多个 MAC 等异常，按严重级别分级。
 - **子网利用率**：按 `/24` 聚合统计在线/离线数量与利用率。
 - **拓扑发现**：基于 CDP/LLDP + SNMP 交换机端口映射绘制链路图。
@@ -189,6 +216,53 @@ python cli.py scan -r 10.0.0.0/24 --snmpv3-user monitor \
 口令缺失或组合非法（如只给 `--snmpv3-priv` 不给 `--snmpv3-auth`）时，
 会在**扫描开始前**报错并以退出码 `1` 结束，不会白扫一个网段。
 
+### 定时扫描与变更告警
+
+资产监控的价值在于"变化发生时被看见"，而不是"有人想起来时才扫一次"。
+`schedule` 子命令把「扫描 → 存快照 → 对比上次基线 → 有变更就推送告警」
+注册成**系统计划任务**，实现无人值守。
+
+```bash
+# 每天 09:00 扫描并告警（Windows 走 schtasks，Linux/macOS 走 crontab）
+python cli.py schedule --register -r 192.168.1.0/24 --freq daily --at 09:00
+
+# 每 30 分钟一次，且以最高权限运行（SYN 半开 / ARP 探测需要管理员权限）
+python cli.py schedule --register -r 10.0.0.0/24 --freq minute --interval 30 --highest
+
+# 查询 / 卸载
+python cli.py schedule --status
+python cli.py schedule --unregister
+```
+
+> **为什么是系统计划任务，而不是应用内定时器？**
+> 应用内定时器要求 GUI 一直开着——关窗、注销、重启都会让监控**静默中断**，
+> 而用户不会收到任何提示。交给系统调度器则天然满足"机器开着就一定会跑"，
+> 且扫描发生在独立进程里，不会因 GUI 卡顿而漂移。
+
+**通知渠道配置**：默认读取数据目录下的 `notify.json`（可用 `--notify-config` 指定）。
+支持通用 Webhook、企业微信群机器人、钉钉群机器人（含加签）、SMTP 邮件四类，全部仅用标准库实现。
+
+```json
+{
+  "channels": [
+    {"type": "wecom",    "url": "env:IPSCANNER_WECOM_URL"},
+    {"type": "dingtalk", "url": "env:DING_URL", "secret": "env:DING_SECRET"},
+    {"type": "email",    "host": "smtp.example.com", "user": "ops@example.com",
+     "password": "env:SMTP_PASS", "recipients": ["oncall@example.com"]}
+  ]
+}
+```
+
+- **敏感值不落盘**：webhook URL 里的机器人 token、SMTP 口令都支持
+  `env:VAR_NAME` 间接引用，实际值从环境变量读取。配置文件常被复制、备份、误提交，
+  明文放进去等于泄露——这与 SNMPv3 口令"只走环境变量"是同一条原则。
+- **失败隔离**：任一渠道挂掉不影响其余渠道；逐个回传结果，配错一个渠道不会让整套告警失效。
+- **业务错误也算失败**：企业微信 / 钉钉即使业务失败也返回 HTTP 200，错误藏在 body 的
+  `errcode` 里。只看状态码会把"机器人被禁用""token 失效"当成发送成功——**告警静默丢失
+  比告警发不出去更危险**，因此这类响应一律判定为失败。
+- **无变更不发告警**：每 30 分钟推一条"无变更"只会把渠道变成噪音，
+  真正需要被看见的变更反而被淹没；首次运行只告知"基线已建立"。
+
 ---
 
 ## 项目结构
@@ -209,9 +283,10 @@ IPScanner/
 ├─ ui_dialogs.py              # 各类对话框（含拓扑视图）
 ├─ ui_logic.py                # 与 UI 解耦的纯业务逻辑（便于单测）
 ├─ scanner/                   # 扫描引擎（不依赖 PyQt，可独立复用）
-│  ├─ engine.py               #   扫描编排
+│  ├─ engine.py               #   扫描编排（ScanContext + 可插拔的 DiscoveryPhase）
 │  ├─ ping.py                 #   ICMP / ARP / 本机网段探测
-│  ├─ ports.py                #   端口探测（connect / syn / udp）
+│  ├─ ports.py                #   端口探测（connect / syn / udp，进程内单例有界池）
+│  ├─ banners.py              #   扩展服务 banner 探测（Telnet/MySQL/Redis/VNC…）
 │  ├─ classify.py             #   设备类型与型号推断
 │  ├─ osfp.py                 #   操作系统指纹
 │  ├─ dns.py                  #   mDNS / DNS-SD
@@ -225,9 +300,12 @@ IPScanner/
 ├─ switch_mapper.py           # SNMP 交换机端口映射
 ├─ conflict_detector.py       # IP 冲突检测
 ├─ change_detector.py         # 资产变更检测
+├─ notifier.py                # 变更告警通知渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
+├─ scheduler.py               # 定时扫描调度（schtasks / crontab，命令构造为纯函数）
 ├─ history_store.py           # 历史快照存储（SQLite）
 ├─ audit_log.py               # 审计日志（SQLite）
 ├─ mac_library.py             # MAC 地址库
+├─ service_fingerprints.py    # 服务版本指纹库（规则在 service_fingerprints.json）
 ├─ excel_handler.py           # Excel 导入 / 导出
 ├─ i18n.py + i18n/            # 国际化（zh-CN / en-US）
 ├─ app_paths.py               # 开发态 / 打包态路径解析
@@ -264,6 +342,8 @@ IPScanner/
 | `audit_log.db` | 审计日志 |
 | `mac_library.db` | 本地 MAC 地址库（含内部设备信息） |
 | `oui.db` | MAC 厂商库（随版本内置，支持在线更新） |
+| `service_fingerprints.json` | 服务版本指纹规则（随版本内置，可在数据目录放置同名文件覆盖更新） |
+| `notify.json` | 定时扫描的变更告警通知渠道配置（见「定时扫描与变更告警」） |
 | `ipscanner.log` | 运行日志（1 MB × 3 轮转） |
 | `crash.log` | 未捕获异常堆栈 |
 
@@ -343,6 +423,10 @@ python -m ruff check .
 - **日志**：统一用 `app_logging.get_logger(__name__)`，不要新增 `print` /
   `sys.stderr.write` 来输出诊断信息。
 - **异常**：`except Exception` 之后不要留空 —— 预期内的失败打 `debug`，影响功能的打 `warning`。
+- **新增发现方式**：扫描编排采用「上下文 + 可插拔发现阶段」。在 `scanner/engine.py`
+  里新增一个 `DiscoveryPhase` 子类（实现 `run(ctx)`），登记进 `PHASES` 即可，
+  **不需要改动 `scan()`**。阶段之间只通过 `ScanContext` 交互；`scan()` 本身只做
+  前置解析 → 建立 ctx → 依次跑阶段 → 收尾。
 
 ---
 
@@ -351,23 +435,29 @@ python -m ruff check .
 **当前限制**
 
 - WMI 远程识别仅支持 Windows 目标，且需要有效管理员凭据。
-- 只支持 IPv4；IPv6 网段无法扫描。
+- 只支持 IPv4。IPv6 字面量（`::1`、`2001:db8::/120` 等）会在**输入阶段就被明确
+  拒绝**并提示"暂不支持 IPv6"，而不是解析通过后扫出一张"全部离线"的假结果表 ——
+  下游的 ARP/SendARP、NetBIOS、WMI、SNMP 全部假设 IPv4，静默放行只会误导使用者。
 - WMI 传输：DCOM 需目标开放 135 + 动态 RPC 端口；WinRM 需目标启用 WinRM（默认
   5985）。WinRM 走 HTTP，**工作组环境**下还需把目标加入客户端 `TrustedHosts`
   （本工具只提示，不会替你改这项系统安全配置）。
 - SNMPv3 支持认证 `HMAC-MD5-96` / `HMAC-SHA-96` 与加密 `AES-128-CFB128`；
   **不支持已废弃的 DES 隐私协议**（标准库无 DES，且现代设备默认关闭），
   指定 DES 会明确报错而不是静默降级成明文。v1 不支持（v3 与 v2c 已覆盖）。
-- CI 只在 Windows 上跑；macOS / Linux 未经自动化覆盖。
+- CI：Windows 上跑完整矩阵（Python 3.10~3.13，含 PyInstaller 打包验证）；
+  ubuntu / macOS 上跑单版本矩阵，用于覆盖 `platform.system()` 分支。
+  WMI 相关的实机用例在非 Windows 上会自动跳过。
 - 打包体积较大：GUI 版（onedir）磁盘占用约 114 MB，压缩分发约 46 MB。
 
 **后续计划**
 
 - [x] SNMP v3（USM 认证与加密）
 - [x] SNMPv3 的 CLI 参数（`--snmpv3-user` 等；口令走环境变量，避免出现在进程列表）
+- [x] 定时扫描 + 资产变更告警（`schedule` 子命令 + 四类通知渠道）
+- [x] 服务版本指纹库（外部可更新数据文件，覆盖 Telnet/VNC/MySQL/Redis/PostgreSQL/MongoDB/RDP 等）
 - [ ] IPv6 扫描支持
 - [ ] WinRM 走 HTTPS(5986) + 可选的证书校验开关（当前固定 HTTP/5985）
-- [ ] macOS / Linux 的 CI 覆盖
+- [x] macOS / Linux 的 CI 覆盖（ubuntu / macos 单版本矩阵）
 
 ---
 

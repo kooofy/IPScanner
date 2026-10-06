@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 import ctypes
 import ipaddress
+import os
 import platform
 import re
+import socket
+import struct
+import time
 from typing import Dict, List, Optional, Tuple
 
 from app_logging import get_logger
 
 from .constants import _LOCAL_MAC_CACHE
-from .util import _run_cmd
+from .util import _inet_checksum, _run_cmd
 
 # 探测层失败大多是"预期内"的（主机离线、无路由、arping 未安装），因此统一用
 # debug 级别记录：默认 INFO 级别不会写进日志文件，需要排查时把级别调到 DEBUG
@@ -20,11 +24,234 @@ _IS_LINUX = platform.system() == "Linux"
 _IS_MAC = platform.system() == "Darwin"
 
 
-def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
+# ── 原生 ICMP 存活探测 ────────────────────────────────────────────────
+#
+# 为什么不再默认走 `ping` 子进程
+# ------------------------------
+# 旧实现每个 IP 起一个 `ping` 进程：/24 是 254 次进程创建，/16（本项目上限）
+# 是 65536 次。Windows 上单次进程创建约 10~20ms，这部分开销往往**比真正的
+# 网络等待还大** —— 这是与 Advanced IP Scanner / nmap 最主要的体感差距。
+#
+# Windows：iphlpapi 的 IcmpSendEcho
+#   用户态导出，**零第三方依赖、零管理员权限**，与本项目已有的 SendARP
+#   （见 _arp_ping_windows）是同一套 ctypes 手法，风格保持一致。
+#
+# Linux / macOS：SOCK_RAW + IPPROTO_ICMP
+#   需要 root 或 CAP_NET_RAW。拿不到权限时静默回退子进程 —— 功能不受影响，
+#   只是慢一点，因此不值得打扰用户。
+#
+# 两条路都必须返回与子进程版**完全一致**的 (alive, rtt_ms, ttl) 三元组：
+# TTL 是 OS 指纹（见 osfp.guess_os_from_ttl）的输入，丢了会让识别率下降。
+
+_IP_SUCCESS = 0
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+# 原生 ICMP 可用性：None=尚未探测，True/False=探测结果。
+# 只在 ping.py 内部读写，因此不需要放进 constants 共享 ——
+# 对比 _syn_failed 的教训：跨模块共享的可变状态必须只有一个持有者。
+_native_ping_ok: Optional[bool] = None
+
+_iphlpapi = None
+_ws2_32 = None
+_icmp_configured = False
+
+
+class _IP_OPTION_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("Ttl", ctypes.c_ubyte),
+        ("Tos", ctypes.c_ubyte),
+        ("Flags", ctypes.c_ubyte),
+        ("OptionsSize", ctypes.c_ubyte),
+        ("OptionsData", ctypes.c_void_p),
+    ]
+
+
+class _ICMP_ECHO_REPLY(ctypes.Structure):
+    """对应 Windows SDK 的 ICMP_ECHO_REPLY（字段顺序不可改）。
+
+    ``Options.Ttl`` 是**回包**的 TTL —— IcmpSendEcho 会把收到的 IP 头选项
+    填进这里，这正是 OS 指纹需要的信息。
     """
-    Ping 单个 IP，返回 (是否在线, 响应时间ms, TTL)。
-    TTL 用于 OS 推测（Windows≈128 / Linux·macOS·BSD≈64 / 部分网络设备≈255）。
+    _fields_ = [
+        ("Address", ctypes.c_ulong),
+        ("Status", ctypes.c_ulong),
+        ("RoundTripTime", ctypes.c_ulong),
+        ("DataSize", ctypes.c_ushort),
+        ("Reserved", ctypes.c_ushort),
+        ("Data", ctypes.c_void_p),
+        ("Options", _IP_OPTION_INFORMATION),
+    ]
+
+
+def _init_icmp_windows() -> bool:
+    """解析 iphlpapi/ws2_32 并声明签名。成功返回 True，不可用返回 False。"""
+    global _iphlpapi, _ws2_32, _icmp_configured
+    if _icmp_configured:
+        return _iphlpapi is not None
+    _icmp_configured = True
+    try:
+        _iphlpapi = ctypes.windll.iphlpapi
+        _ws2_32 = ctypes.windll.ws2_32
+
+        _ws2_32.inet_addr.argtypes = [ctypes.c_char_p]
+        _ws2_32.inet_addr.restype = ctypes.c_ulong
+
+        _iphlpapi.IcmpCreateFile.argtypes = []
+        _iphlpapi.IcmpCreateFile.restype = ctypes.c_void_p
+
+        _iphlpapi.IcmpCloseHandle.argtypes = [ctypes.c_void_p]
+        _iphlpapi.IcmpCloseHandle.restype = ctypes.c_int
+
+        _iphlpapi.IcmpSendEcho.argtypes = [
+            ctypes.c_void_p,        # IcmpHandle
+            ctypes.c_ulong,         # DestinationAddress (IPAddr, 网络序)
+            ctypes.c_char_p,        # RequestData
+            ctypes.c_ushort,        # RequestSize
+            ctypes.c_void_p,        # RequestOptions（可空）
+            ctypes.c_void_p,        # ReplyBuffer
+            ctypes.c_ulong,         # ReplySize
+            ctypes.c_ulong,         # Timeout(ms)
+        ]
+        _iphlpapi.IcmpSendEcho.restype = ctypes.c_ulong
+    except Exception as e:  # noqa: BLE001
+        # 非 Windows 或 iphlpapi 不可用：属预期，上层会回退子进程 ping
+        _log.debug("IcmpSendEcho 不可用，回退子进程 ping: %s", e)
+        _iphlpapi = None
+        _ws2_32 = None
+    return _iphlpapi is not None
+
+
+_ICMP_PAYLOAD = b"ipscanner-ping"
+
+
+def _icmp_ping_windows(ip: str, timeout_ms: int):
+    """Windows 原生 ICMP。返回 (alive, rtt_ms, ttl)；不可用返回 None。"""
+    if not _init_icmp_windows():
+        return None
+
+    addr = _ws2_32.inet_addr(ip.encode("ascii", "ignore"))
+    if addr == 0xFFFFFFFF:      # INADDR_NONE：不是合法的 IPv4 字面量
+        return None
+
+    handle = _iphlpapi.IcmpCreateFile()
+    if not handle or handle == _INVALID_HANDLE_VALUE:
+        _log.debug("IcmpCreateFile 失败，回退子进程 ping")
+        return None
+    try:
+        # 回包缓冲区至少要能放下 ICMP_ECHO_REPLY + 请求数据 + 8 字节 ICMP 头
+        reply_size = ctypes.sizeof(_ICMP_ECHO_REPLY) + len(_ICMP_PAYLOAD) + 8
+        reply_buf = ctypes.create_string_buffer(reply_size)
+
+        # 每次调用独立建/销句柄：IcmpSendEcho 不保证同一句柄跨线程安全，
+        # 而本函数会被 100 个工作线程并发调用。建句柄只是用户态→内核的
+        # 一次快速调用，比"起一个 ping 进程"便宜好几个数量级。
+        n = _iphlpapi.IcmpSendEcho(
+            handle,
+            ctypes.c_ulong(addr),
+            _ICMP_PAYLOAD,
+            ctypes.c_ushort(len(_ICMP_PAYLOAD)),
+            None,
+            ctypes.cast(reply_buf, ctypes.c_void_p),
+            ctypes.c_ulong(reply_size),
+            ctypes.c_ulong(max(1, int(timeout_ms))),
+        )
+        if n == 0:
+            # 超时 / 目标不可达 / 无路由：都属于"这台不在线"
+            return False, 0.0, 0
+
+        reply = ctypes.cast(reply_buf,
+                            ctypes.POINTER(_ICMP_ECHO_REPLY)).contents
+        if reply.Status != _IP_SUCCESS:
+            return False, 0.0, 0
+        return True, float(reply.RoundTripTime), int(reply.Options.Ttl)
+    finally:
+        _iphlpapi.IcmpCloseHandle(handle)
+
+
+def _build_icmp_echo_request(ident: int, seq: int, payload: bytes) -> bytes:
+    """构造 ICMP Echo Request（type=8），校验和已填好。
+
+    抽成纯函数是为了可单测 —— 校验和算错是这类实现最典型的 bug，
+    且表现为"永远收不到回包"，极难定位。
     """
+    header = struct.pack("!BBHHH", 8, 0, 0, ident & 0xFFFF, seq & 0xFFFF)
+    checksum = _inet_checksum(header + payload)
+    return struct.pack("!BBHHH", 8, 0, checksum, ident & 0xFFFF, seq & 0xFFFF) + payload
+
+
+def _icmp_ping_unix(ip: str, timeout_ms: int):
+    """Linux/macOS 原生 ICMP。无 CAP_NET_RAW 时返回 None（上层回退）。"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    except OSError as e:
+        _log.debug("原生 ICMP 需要 root/CAP_NET_RAW，回退子进程 ping: %s", e)
+        return None
+
+    try:
+        ident = os.getpid() & 0xFFFF
+        seq = 1
+        packet = _build_icmp_echo_request(ident, seq, _ICMP_PAYLOAD)
+        budget = max(0.05, timeout_ms / 1000.0)
+
+        t0 = time.perf_counter()
+        sock.settimeout(budget)
+        sock.sendto(packet, (ip, 0))
+
+        deadline = t0 + budget
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return False, 0.0, 0
+            sock.settimeout(remaining)
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                return False, 0.0, 0
+            except OSError as e:
+                _log.debug("原生 ICMP 收包失败 %s: %s", ip, e)
+                return False, 0.0, 0
+            if addr[0] != ip:
+                continue
+
+            # Linux 与 BSD/macOS 的 raw socket 都会带上 IP 头（首字节高 4 位=4）；
+            # 少数内核/配置下不带，因此两种形态都要能处理。
+            ttl = 0
+            if data and (data[0] >> 4) == 4:
+                ihl = (data[0] & 0x0F) * 4
+                if len(data) > 8:
+                    ttl = data[8]
+                icmp = data[ihl:]
+            else:
+                icmp = data
+
+            if len(icmp) < 8 or icmp[0] != 0:      # 0 = Echo Reply
+                continue
+            r_id, _r_seq = struct.unpack("!HH", icmp[4:8])
+            if r_id != ident:
+                continue
+            rtt_ms = (time.perf_counter() - t0) * 1000.0
+            return True, rtt_ms, ttl
+    finally:
+        sock.close()
+
+
+def _probe_native_ping() -> bool:
+    """探测原生 ICMP 是否可用（只在进程内做一次）。"""
+    if _IS_WINDOWS:
+        return _init_icmp_windows()
+    if _IS_LINUX or _IS_MAC:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+            s.close()
+            return True
+        except OSError:
+            _log.debug("原生 ICMP 不可用（需 root / CAP_NET_RAW），改用子进程 ping")
+            return False
+    return False
+
+
+def _ping_subprocess(ip: str, timeout_ms: int) -> Tuple[bool, float, int]:
+    """子进程 ping 回退路径（原实现，行为保持不变）。"""
     if _IS_WINDOWS:
         cmd = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
     elif _IS_MAC:
@@ -54,6 +281,45 @@ def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
         return False, 0.0, ttl
     except Exception:
         return False, 0.0, 0
+
+
+def reset_native_ping_probe():
+    """清除"原生 ICMP 可用性"缓存，供测试与权限变化后重新探测。"""
+    global _native_ping_ok
+    _native_ping_ok = None
+
+
+def ping_ip(ip: str, timeout_ms: int = 1000) -> Tuple[bool, float, int]:
+    """
+    Ping 单个 IP，返回 (是否在线, 响应时间ms, TTL)。
+    TTL 用于 OS 推测（Windows≈128 / Linux·macOS·BSD≈64 / 部分网络设备≈255）。
+
+    优先走原生 ICMP（Windows IcmpSendEcho / Unix raw socket），
+    不可用或调用异常时回退子进程 ping。两条路径返回结构完全一致。
+    """
+    global _native_ping_ok
+
+    if _native_ping_ok is None:
+        _native_ping_ok = _probe_native_ping()
+
+    if _native_ping_ok:
+        try:
+            if _IS_WINDOWS:
+                res = _icmp_ping_windows(ip, timeout_ms)
+            else:
+                res = _icmp_ping_unix(ip, timeout_ms)
+        except Exception as e:  # noqa: BLE001
+            # 原生路径意外失败：不放弃这台设备，退回子进程再试一次，
+            # 并记 debug 便于定位（预期内失败如"无权限"在探测阶段已排除）
+            _log.debug("原生 ICMP 调用异常，回退子进程 ping %s: %s", ip, e)
+            res = None
+
+        if res is not None:
+            return res
+        # 原生路径明确表示不可用（如中途失去权限）→ 关掉它，后续全部走子进程
+        _native_ping_ok = False
+
+    return _ping_subprocess(ip, timeout_ms)
 
 
 def get_local_mac_map() -> Dict[str, str]:

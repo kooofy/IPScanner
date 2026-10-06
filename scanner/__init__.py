@@ -11,7 +11,7 @@ from .constants import (COMMON_PORTS, PORT_NAMES, PROTOCOL_PORTS,
                        SVC_SNMP, SVC_MDNS, SVC_SMB,
                        SERVICE_LABELS, service_label, service_code,
                        device_class_label, os_label)
-from .range import (parse_ip_range, count_ip_range, is_valid_range,
+from .range import (parse_ip_range, count_ip_range, is_valid_range, is_ipv6_range,
                     RangeTooLarge, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL)
 from .engine import NetworkScanner
 from .ping import parse_windows_ipconfig, windows_ipconfig_subnets
@@ -31,7 +31,7 @@ from .snmp_v3 import (snmp_v3_get_system, snmp_v3_walk, SnmpV3User,
 
 __all__ = [
     'ScanResult', 'COMMON_PORTS', 'PORT_NAMES', 'PROTOCOL_PORTS',
-    'parse_ip_range', 'count_ip_range', 'is_valid_range',
+    'parse_ip_range', 'count_ip_range', 'is_valid_range', 'is_ipv6_range',
     'RangeTooLarge', 'MAX_IPS_PER_RANGE', 'MAX_IPS_TOTAL',
     'NetworkScanner', 'mdns_discover',
     'parse_windows_ipconfig', 'windows_ipconfig_subnets',

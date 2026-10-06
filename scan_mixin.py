@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt
 from scanner import (
     ScanResult, get_ports_for_level,
     scan_level_label, SVC_MDNS, merge_wmi, merge_netbios,
-    count_ip_range, is_valid_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
+    count_ip_range, is_valid_range, is_ipv6_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
     windows_ipconfig_subnets, parse_ip_range,
 )
 import audit_log
@@ -258,6 +258,7 @@ class ScanMixin:
 
         added, dup = 0, 0
         invalid = []
+        ipv6 = []
         too_large = []
         over_total = []
         added_tokens = []
@@ -265,7 +266,9 @@ class ScanMixin:
         for tok in tokens:
             # 只解析、不构建 IP 列表：先算规模，超限的绝不进入待扫列表
             if not is_valid_range(tok):
-                invalid.append(tok)
+                # IPv6 语法合法但本工具不支持。与"写错了"分开归类，
+                # 否则用户看到同一句"无法解析"会以为是自己格式问题而反复试错。
+                (ipv6 if is_ipv6_range(tok) else invalid).append(tok)
                 continue
             n = count_ip_range(tok)
             if n > MAX_IPS_PER_RANGE:
@@ -309,6 +312,13 @@ class ScanMixin:
             if too_large or over_total:
                 return
             # 全部无效或全部重复，未新增任何网段
+            if ipv6:
+                QMessageBox.warning(
+                    self, tr("暂不支持 IPv6"),
+                    tr("以下项是 IPv6 地址，本工具目前只支持 IPv4 扫描：\n  {items}"
+                       "\n\n请改用 IPv4 网段（如 192.168.1.0/24）。").format(
+                        items="\n  ".join(ipv6))
+                )
             if invalid:
                 QMessageBox.warning(
                     self, tr("格式错误"),
@@ -317,15 +327,18 @@ class ScanMixin:
                        "  192.168.1.0/24\n  192.168.1.1-254\n  192.168.1.1").format(
                         items="\n  ".join(invalid))
                 )
-            elif dup:
+            if not ipv6 and not invalid and dup:
                 QMessageBox.information(self, tr("提示"), tr("这些网段都已添加过了"))
             return
 
-        # 有成功添加时，仅对"重复 / 无效"做补充提示，避免无效输入被静默吞掉
-        if dup or invalid:
+        # 有成功添加时，仅对"重复 / 无效 / IPv6"做补充提示，避免无效输入被静默吞掉
+        if dup or invalid or ipv6:
             msg = []
             if dup:
                 msg.append(tr("已跳过 {n} 个重复网段").format(n=dup))
+            if ipv6:
+                msg.append(tr("以下项是 IPv6 地址，本工具目前只支持 IPv4 扫描，已忽略：\n  {items}").format(
+                    items="\n  ".join(ipv6)))
             if invalid:
                 msg.append(tr("以下项无法解析，已忽略:\n  {items}").format(
                     items="\n  ".join(invalid)))
