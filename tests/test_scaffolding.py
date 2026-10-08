@@ -50,13 +50,38 @@ def _requirements_entries(rel_path):
     return entries
 
 
-class RequirementsPinnedTest(unittest.TestCase):
-    """依赖必须精确锁定。"""
+def _has_marker(line):
+    """该依赖行是否带 PEP 508 环境标记（`;` 之后为标记部分）。"""
+    return ";" in line
 
+
+def _package_name(line):
+    """从依赖行取出包名（去掉 extras、版本约束与环境标记）。"""
+    return re.split(r"[=<>!;\[]", line, maxsplit=1)[0].strip()
+
+
+class RequirementsPinnedTest(unittest.TestCase):
+    """依赖必须精确锁定；平台条件行是唯一例外，且受白名单管控。"""
+
+    # 精确锁定：name==x.y.z（可带 extras）。
     PIN_RE = re.compile(r"^[A-Za-z0-9._-]+(\[[^\]]+\])?==[^\s;]+$")
+
+    # 平台条件行的合法形式：name==ver 或 name>=ver，后接 `; 环境标记`。
+    MARKER_LINE_RE = re.compile(
+        r"^[A-Za-z0-9._-]+(\[[^\]]+\])?(==|>=)[^\s;]+;\s*\S.*$"
+    )
+
+    # 允许使用「环境标记 + 下界约束」的包白名单。
+    # 默认答案是"精确锁版本"；只有当一个包在**各平台上没有共同可用版本**时，
+    # 才允许分流。加新条目必须同时写清理由（见 requirements.txt 对应注释）。
+    #   PyQt5-Qt5：Windows 只有 5.15.2 有 win wheel；macOS arm64 要 >=5.15.11；
+    #              而 Linux 的 5.15.11~5.15.13 又没有 manylinux wheel。三平台无交集。
+    MARKER_ALLOWED = {"PyQt5-Qt5"}
 
     def test_runtime_requirements_all_pinned(self):
         for lineno, line in _requirements_entries("requirements.txt"):
+            if _has_marker(line):
+                continue      # 平台条件行由 test_marker_lines_are_allowlisted 校验
             with self.subTest(line=line):
                 self.assertRegex(
                     line, self.PIN_RE,
@@ -65,6 +90,8 @@ class RequirementsPinnedTest(unittest.TestCase):
 
     def test_dev_requirements_all_pinned(self):
         for lineno, line in _requirements_entries("requirements-dev.txt"):
+            if _has_marker(line):
+                continue
             with self.subTest(line=line):
                 self.assertRegex(
                     line, self.PIN_RE,
@@ -72,15 +99,39 @@ class RequirementsPinnedTest(unittest.TestCase):
                 )
 
     def test_no_open_ended_specifiers(self):
-        """显式拦截 `>=` / `~=` / 裸包名 —— 这是本次修复针对的具体写法。"""
+        """显式拦截 `>=` / `~=` / 裸包名 —— 这是本次修复针对的具体写法。
+
+        例外：带环境标记的平台条件行允许用 `>=` 下界 —— 三平台没有共同可用
+        版本时，精确锁死会让某个平台直接装不上。这些行必须落在 MARKER_ALLOWED
+        白名单内，并由 test_marker_lines_are_allowlisted 校验形式。
+        """
         for rel in ("requirements.txt", "requirements-dev.txt"):
             for lineno, line in _requirements_entries(rel):
+                if _has_marker(line):
+                    continue
                 with self.subTest(file=rel, line=line):
                     for bad in (">=", "<=", "~=", ">", "<", "!="):
                         self.assertNotIn(
                             bad, line,
                             f"{rel}:{lineno} 含开放版本约束 {bad!r}：{line}",
                         )
+
+    def test_marker_lines_are_allowlisted(self):
+        """平台条件行不能悄悄扩散：包名必须在白名单里，且形式受限。"""
+        for rel in ("requirements.txt", "requirements-dev.txt"):
+            for lineno, line in _requirements_entries(rel):
+                if not _has_marker(line):
+                    continue
+                with self.subTest(file=rel, line=line):
+                    self.assertIn(
+                        _package_name(line), self.MARKER_ALLOWED,
+                        f"{rel}:{lineno} 用了环境标记但不在 MARKER_ALLOWED 白名单：{line}",
+                    )
+                    self.assertRegex(
+                        line, self.MARKER_LINE_RE,
+                        f"{rel}:{lineno} 平台条件行形式非法"
+                        f"（应为 name==ver 或 name>=ver; 标记）：{line}",
+                    )
 
     def test_dev_requirements_pulls_in_runtime(self):
         self.assertIn("-r requirements.txt", _read("requirements-dev.txt"))

@@ -19,7 +19,17 @@
 # GUI 框架。三件套版本必须匹配：单独升 PyQt5 而不管 PyQt5_sip 会踩 ABI 不兼容，
 # 典型症状是 import 阶段就抛 "DLL load failed" 或 sip 版本断言失败。
 PyQt5==5.15.11
-PyQt5-Qt5==5.15.2
+# PyQt5-Qt5（Qt 运行库）是**唯一必须按平台分流**的依赖：PyPI 上没有任何一个
+# 版本同时覆盖三个平台，因此只能用「环境标记 + 下界」让 pip 各平台自行解析：
+#   Windows：只有 5.15.2 提供 win wheel，没有第二个选择 → 必须精确锁死；
+#   macOS  ：arm64 从 5.15.11 起才有 wheel（5.15.2 只有 intel 版）；
+#   Linux  ：5.15.11~5.15.13 没有 manylinux wheel，会自然解析到 5.15.14+。
+# 下界取 5.15.11 是三个平台可用版本的交集下沿；最终装到的版本仍被
+# PyQt5==5.15.11 自身的约束 `PyQt5-Qt5<5.16.0,>=5.15.2` 兜住。
+# ⚠️ 这两行是 tests/test_scaffolding.py 里 MARKER_ALLOWED 白名单的成员：
+#    以后新增"带环境标记的下界依赖"，必须同时加进白名单并写清理由。
+PyQt5-Qt5==5.15.2; sys_platform == "win32"
+PyQt5-Qt5>=5.15.11; sys_platform != "win32"
 PyQt5_sip==12.18.0
 
 # Excel 设备清单导入 / 导出
