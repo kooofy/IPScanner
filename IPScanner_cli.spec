@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 # IPScanner 无头 CLI 独立构建（P0-5）。
 #
-# 与 GUI 版（IPScanner_1.6.0.spec）**相互独立、互不影响**：
+# 与 GUI 版（IPScanner.spec）**相互独立、互不影响**：
 #   - 入口是 cli.py，不是 main.py；
 #   - console=True，供计划任务 / SSH / 容器调用；
 #   - 显式 excludes 掉 PyQt5 / 图形相关库，二进制体积远小于 GUI 版；
