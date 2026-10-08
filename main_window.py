@@ -6,13 +6,14 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTreeWidget, QHeaderView,
-    QProgressBar, QMessageBox, QSpinBox, QComboBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
+    QProgressBar, QMessageBox, QSpinBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
+    QSplitter, QStackedWidget, QToolButton, QMenu, QInputDialog, QButtonGroup,
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QByteArray
 from PyQt5.QtGui import QColor, QIcon, QPixmap, QKeySequence
 from scanner import (
     PROTOCOL_PORTS, WmiCredentialStore, SnmpV3CredentialStore,
-    scan_level_label, service_label,
+    scan_level_label, service_label, get_ports_for_level,
     count_ip_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
 )
 from mac_library import MacLibrary
@@ -23,9 +24,17 @@ from ui_icons import (
 )
 from version import __version__
 from conflict_detector import SEVERITY_HIGH, SEVERITY_WARNING
+import ui_logic
 
 from styles import STYLE_SHEET, DARK_STYLE_SHEET
 from main_window_tree import TreeMixin
+from detail_panel import DeviceDetailPanel
+from empty_state import EmptyStatePanel
+from overview import OverviewPanel
+from filter_bar import FilterChipBar, FilterChipScroll, FILTERS
+from favorites import FavoriteStore
+from scan_presets import ScanPresetStore, PresetError, validate_name
+import system_theme
 from i18n import tr
 from scan_mixin import ScanMixin
 from export_mixin import ExportMixin
@@ -34,11 +43,76 @@ from library_mixin import LibraryMixin
 from network_tool_mixin import NetworkToolMixin
 from oui_mixin import OuiMixin
 
+#: 列索引 → 规范中文名（顺序即表格列序，勿改）。
+COLUMN_LABELS = (
+    "IP地址", "状态", "主机名", "MAC地址", "制造商", "位置", "使用者",
+    "响应时间(ms)", "开放端口", "服务", "操作系统", "设备类型", "备注",
+)
+
+#: 列预设：key → (规范中文标签, 可见列索引)。
+#:
+#: 标签存**规范中文**、构建菜单时才 `tr()` —— 模块级调用 tr() 会因语言包
+#: 尚未加载而被冻结成中文（见 i18n 的惰性翻译约定）。
+#:
+#: 13 列同时铺开在 1366 宽的屏幕上必然横向滚动，而"哪几列该一起看"是有
+#: 场景答案的：巡检看连通性、资产看归属、安全看暴露面。预设把这层知识
+#: 固化下来，用户不必自己拼 13 个 checkbox。
+COLUMN_PRESETS = (
+    ("inspect", "巡检", (0, 1, 2, 3, 4, 7)),
+    ("asset", "资产", (0, 1, 2, 3, 4, 5, 6, 11, 12)),
+    ("security", "安全", (0, 1, 8, 9, 10)),
+    ("all", "全量", tuple(range(len(COLUMN_LABELS)))),
+)
+
+#: 主题模式：key → 规范中文标签。
+#:
+#: 与列预设同理，标签存规范中文、构建菜单时才 tr()。
+#:
+#: 为什么把「跟随系统」放第一位并作为新装默认：Windows 10/11 的
+#: 个性化设置是用户表达明暗偏好的标准入口，工具理应尊重它；而旧版的
+#: 「18:00 后自动转深色」是个拍脑袋的猜测，做夜间运维的人白天也想深色。
+#: 所以跟随系统升为默认，按时间降级为可选项（见 UI_REVIEW.md P3-3）。
+#:
+#: key 复用 system_theme 的常量，避免两处各写一份字符串字面量。
+THEME_MODES = (
+    (system_theme.MODE_SYSTEM, "跟随系统"),
+    (system_theme.MODE_LIGHT, "浅色"),
+    (system_theme.MODE_DARK, "深色"),
+    (system_theme.MODE_TIME, "按时间自动切换（18:00–06:00 深色）"),
+)
+
+#: 主题模式默认值（新装 / 配置损坏时）
+DEFAULT_THEME_MODE = system_theme.DEFAULT_MODE
+
+#: 结果视图模式：key → 规范中文标签（UI_REVIEW P3-2）。
+#:
+#: 「列表」是原来的表格视图，「概览」是本次新增的仪表盘。两者共用同一份
+#: 扫描结果，切换不重新扫描、也不改变筛选条件。
+VIEW_MODES = (
+    ("list", "列表"),
+    ("overview", "概览"),
+)
+
+#: 结果视图默认值
+DEFAULT_VIEW_MODE = "list"
+
+
+def _vsep() -> QFrame:
+    """工具栏分组用的竖直分隔线（颜色走 QSS，不在此硬编码）。"""
+    sep = QFrame()
+    sep.setObjectName("toolSep")
+    sep.setFrameShape(QFrame.VLine)
+    sep.setFixedWidth(1)
+    return sep
+
+
 class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, NetworkToolMixin, OuiMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(tr("局域网终端扫描工具 — IP Scanner"))
-        self.setMinimumSize(1200, 750)
+        # 1200x750 在 1366x768 的笔记本上会顶满整屏（连任务栏都盖住），
+        # 降到 1024x640；列多时靠横向滚动兜底，而不是强迫用户换屏。
+        self.setMinimumSize(1024, 640)
         self.resize(1300, 850)
 
         self.library = MacLibrary()  # 持久 MAC 地址库 (SQLite)
@@ -51,17 +125,28 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.all_results: list = []
         self.ip_range_items: list = []
         self._ip_item_map: dict = {}
-        self.dark_mode = False  # 深色模式开关
-        self.auto_time = False  # 是否跟随时间自动切换深色/浅色主题
+        self._result_map: dict = {}      # {ip: ScanResult} 供详情面板 O(1) 取回
+        self.dark_mode = False  # 解析后的实际主题（所有取色方只看这个）
+        self.theme_mode = DEFAULT_THEME_MODE  # 用户选择：system/light/dark/time
+        self.auto_time = False  # 兼容旧字段：是否处于「按时间」模式
+        self.view_mode = DEFAULT_VIEW_MODE  # 结果视图：list / overview
         self._conflicts: list = []       # 最近一次冲突检测结果
         self._conflict_ips: dict = {}    # {ip: [conflict_type, ...]} 用于树视图标记
         self._changes: list = []         # 最近一次资产变更检测结果
+        self._change_map: dict = {}      # {ip: [变更类型, ...]} 供行内角标与「变更」筛选
+        self._timeline_cache: dict = {}  # {设备键: 历史轨迹} 写入新快照后失效
 
         # 配置持久化 (QSettings, Ini 格式, 存于项目目录便于查看/重置)
         self.settings = QSettings(
             os.path.join(data_dir(), "ipscanner.ini"),
             QSettings.IniFormat
         )
+
+        # 设备收藏（UI_REVIEW P1-3）：轻量"常看这几台"标记，与 MAC 地址库
+        # （资产台账）职责不同，故分开存储。
+        self.favorites = FavoriteStore(self.settings)
+        # 命名扫描预设：网段 + 级别 + 协议集 + 探测方式 的组合
+        self.scan_presets = ScanPresetStore(self.settings)
 
         # WMI 识别凭据：从配置解密载入（DPAPI，仅本机当前用户可读）
         self.wmi_creds = WmiCredentialStore()
@@ -114,14 +199,15 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         if _notices:
             self.status_bar.showMessage(" | ".join(_notices), 15000)
 
-        # 应用初始主题（若开启跟随时间自动切换，则先按当前时间决定深/浅色）
-        if self.auto_time:
-            self.dark_mode = self._should_be_dark_now()
+        # 应用初始主题：按用户选择的模式解析出实际明暗
+        self.dark_mode = self._resolve_dark()
         self._apply_theme(self.dark_mode)
-        # 按时间自动切换主题：每分钟检查一次时间边界（自动模式下跨过阈值即切换）
+        # 主题巡检：每分钟一次。既用于「按时间」模式的跨阈值切换，也用于
+        # 「跟随系统」模式 —— Qt5 在 Windows 上并不总会投递主题变更事件，
+        # 轮询是跨平台最省心的兜底（代价是 1 分钟粒度，用户可接受）。
         self._theme_timer = QTimer(self)
         self._theme_timer.setInterval(60 * 1000)
-        self._theme_timer.timeout.connect(self._check_theme_by_time)
+        self._theme_timer.timeout.connect(self._check_theme_change)
         self._theme_timer.start()
 
     def _init_ui(self):
@@ -131,80 +217,75 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         main_layout.setSpacing(2)
         main_layout.setContentsMargins(4, 4, 4, 4)
 
-        # ── 工具栏 Row 1: 扫描按钮 + IP 范围 + 搜索 (仿 Advanced IP Scanner) ──
+        # ── 工具栏 Row 1：按语义分组的动作区（UI_REVIEW P1-1）──
+        #
+        # 原实现是 6 个纯图标按钮平铺，三个真实问题：
+        #   1. 自绘图标语义模糊 —— "ip" 与 "c" 两个绿方块不 hover 分不清；
+        #   2. 动作语义混杂 —— "展开/收起"是视图操作，却和"扫描"并排；
+        #   3. `setFixedSize(100, 36)` 写死像素，高 DPI 下与
+        #      AA_EnableHighDpiScaling 冲突，控件会错位/糊。
+        # 现在：按钮一律「图标 + 文字」，按语义分两组，用竖线隔开，
+        # 展开/收起移交「查看」菜单（那里本就有 Ctrl++ / Ctrl+- 两个动作）。
         tb1 = QHBoxLayout()
-        tb1.setSpacing(4)
+        tb1.setSpacing(6)
         tb1.setContentsMargins(2, 2, 2, 2)
 
-        # 大按钮组：扫描 + 暂停（对齐 Advanced IP Scanner 左侧醒目工具栏）
-        _BIG_BTN_H = 36
-        _BIG_ICON = 32
+        _ICON_SZ = 16
+        _icon_color = "#FFFFFF" if self.dark_mode else "#555555"
 
-        # 扫描按钮 - 白底 + 绿色播放图标（用图片资源替代绘制）
         _play_pm = QPixmap(os.path.join(resource_dir(), "assets", "play_icon.png")).scaled(
-            _BIG_ICON, _BIG_ICON, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.scan_btn = QPushButton(tr("扫描"))
         self.scan_btn.setIcon(QIcon(_play_pm))
-        self.scan_btn.setIconSize(QSize(_BIG_ICON, _BIG_ICON))
+        self.scan_btn.setIconSize(QSize(22, 22))
         self.scan_btn.setObjectName("primaryBtn")
-        self.scan_btn.setFixedSize(100, _BIG_BTN_H)  # 固定宽高，避免被布局拉宽
+        self.scan_btn.setToolTip(tr("开始扫描 (F5)"))
+        self.scan_btn.setMinimumSize(96, 32)
 
-        # 暂停/停止按钮 - 与扫描按钮同高的大按钮
-        self.stop_btn = QPushButton()
+        self.stop_btn = QPushButton(tr("停止"))
         self.stop_btn.setObjectName("stopBtn")
-        self.stop_btn.setFixedSize(_BIG_BTN_H, _BIG_BTN_H)  # 正方形暂停按钮
-        self.stop_btn.setIcon(_make_pause_icon())
-        self.stop_btn.setIconSize(QSize(_BIG_BTN_H - 6, _BIG_BTN_H - 6))
+        self.stop_btn.setIcon(_make_pause_icon(_icon_color, _ICON_SZ))
+        self.stop_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setToolTip(tr("停止扫描"))
+        self.stop_btn.setToolTip(tr("停止扫描 (Esc)"))
+        self.stop_btn.setMinimumSize(84, 32)
 
         tb1.addWidget(self.scan_btn)
         tb1.addWidget(self.stop_btn)
+        tb1.addWidget(_vsep())
 
-        # 四个快捷工具按钮（对齐 AIP 右侧工具栏），高度与扫描/暂停等大
-        _SMALL_BTN = _BIG_BTN_H  # 36，与扫描/暂停按钮等高
-        _ICON_SZ = 22            # 按 36/30 比例放大图标（18 -> 22）
-
-        _icon_color = "#FFFFFF" if self.dark_mode else "#555555"
-
-        self.local_subnet_btn = QPushButton()
+        self.local_subnet_btn = QPushButton(tr("本机子网"))
         self.local_subnet_btn.setObjectName("toolBtnGreen")
-        self.local_subnet_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
         self.local_subnet_btn.setIcon(_make_tool_icon("ip", _icon_color, _ICON_SZ))
         self.local_subnet_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.local_subnet_btn.setToolTip(tr("扫描本机所在子网"))
+        self.local_subnet_btn.setMinimumHeight(32)
 
-        self.c_subnet_btn = QPushButton()
+        self.c_subnet_btn = QPushButton(tr("C 类网段"))
         self.c_subnet_btn.setObjectName("toolBtnGreen")
-        self.c_subnet_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
         self.c_subnet_btn.setIcon(_make_tool_icon("c", _icon_color, _ICON_SZ))
         self.c_subnet_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
         self.c_subnet_btn.setToolTip(tr("扫描 C 类子网"))
-
-        self.expand_btn = QPushButton()
-        self.expand_btn.setObjectName("toolBtnYellow")
-        self.expand_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
-        self.expand_btn.setIcon(_make_tool_icon("expand", _icon_color, _ICON_SZ))
-        self.expand_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
-        self.expand_btn.setToolTip(tr("全选并展开所有项"))
-
-        self.collapse_btn = QPushButton()
-        self.collapse_btn.setObjectName("toolBtnYellow")
-        self.collapse_btn.setFixedSize(_SMALL_BTN, _SMALL_BTN)
-        self.collapse_btn.setIcon(_make_tool_icon("collapse", _icon_color, _ICON_SZ))
-        self.collapse_btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
-        self.collapse_btn.setToolTip(tr("收起所有项"))
+        self.c_subnet_btn.setMinimumHeight(32)
 
         tb1.addWidget(self.local_subnet_btn)
-        tb1.addSpacing(2)
         tb1.addWidget(self.c_subnet_btn)
-        tb1.addSpacing(2)
-        tb1.addWidget(self.expand_btn)
-        tb1.addSpacing(2)
-        tb1.addWidget(self.collapse_btn)
-        tb1.addSpacing(6)
-        tb1.addStretch()  # 把第一行按钮全部压到左侧，右侧留白（对齐 AIP）
+
+        # 扫描预设（UI_REVIEW P1-3）：网段 + 级别 + 协议集 的命名组合。
+        # 网段虽然会持久化，但只有一份 —— 今天扫办公网、明天扫机房就得来回改。
+        tb1.addWidget(_vsep())
+        self.preset_btn = QToolButton()
+        self.preset_btn.setObjectName("presetBtn")
+        self.preset_btn.setText(tr("预设"))
+        self.preset_btn.setToolTip(tr("保存 / 切换扫描预设（网段 + 级别 + 协议）"))
+        self.preset_btn.setPopupMode(QToolButton.InstantPopup)
+        self.preset_btn.setMinimumHeight(32)
+        self._preset_menu = QMenu(self)
+        self.preset_btn.setMenu(self._preset_menu)
+        tb1.addWidget(self.preset_btn)
+
+        tb1.addStretch()  # 动作按钮压左，右侧留白
 
         # IP 范围输入
         self.range_input = QLineEdit()
@@ -216,7 +297,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         # 已添加网段计数 (已移到底部状态栏，工具栏上不再显示)
         self.range_list_label = QLabel("")
-        self.range_list_label.setStyleSheet("color: #0078D7; font-size: 11px; font-weight: bold;")
+        self.range_list_label.setObjectName("rangeCountLabel")
         self.range_list_label.setCursor(Qt.PointingHandCursor)
         self.range_list_label.setVisible(False)
 
@@ -240,13 +321,42 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb2.addWidget(QLabel(tr("搜索")))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(tr("IP / 主机名 / MAC ..."))
-        self.search_input.setFixedWidth(200)
+        # 用 min/max 而非 setFixedWidth：固定像素在高 DPI 下不会随字体放大，
+        # 文字会被裁掉。
+        self.search_input.setMinimumWidth(140)
+        self.search_input.setMaximumWidth(240)
         self.search_input.textChanged.connect(self._filter_results)
         tb2.addWidget(self.search_input)
 
-        tb2.addStretch()
+        # 结果筛选条（UI_REVIEW P1-4）：常驻可见 + 带计数。
+        # 旧实现把筛选藏在「视图 > 筛选」菜单里，工具栏只留一个隐藏的 combo
+        # 当值载体 —— 用户扫 /24 出 254 条却只看到 12 条时无从得知原因。
+        self.filter_bar = FilterChipBar()
+        self.filter_key = self.filter_bar.current_key()
+        self.filter_bar.filter_changed.connect(self._set_filter)
 
         main_layout.addLayout(tb2)
+
+        # ── 工具栏 Row 3: 结果筛选条（独占一行 + 横向滚动兜底）──
+        #
+        # 为什么不和「IP 范围 + 搜索」挤同一行：那一行光最小宽度就是
+        # 范围框 280 + 标签 + 搜索框 140 = 460px，而 8 个 chip 带 3 位计数时
+        # 中文约需 700px、英文约需 1200px —— 1024px 的最小窗口下根本放不下，
+        # Qt 会把每个 chip 压到 64px，`全部 254` 一律被截断成 `全部 2…`（实测）。
+        # 筛选条的价值全在"一眼看清有多少条"，截断就完全失去意义，
+        # 所以让它独占一行拿满宽度；万一仍然放不下（英文界面 + 窄窗口），
+        # 由 FilterChipScroll 提供横向滚动，而不是把文字压掉。
+        tb3 = QHBoxLayout()
+        tb3.setSpacing(8)
+        tb3.setContentsMargins(2, 0, 2, 2)
+        # 视图切换：概览 / 列表（UI_REVIEW P3-2）。放在筛选条左侧、与它同一行，
+        # 因为两者是同一件事的两面 —— "换个角度看这批结果"。
+        tb3.addWidget(self._build_view_toggle())
+        tb3.addWidget(_vsep())
+        # stretch=1：让滚动容器吃满整行宽度。若改成"容器 + 末尾 addStretch"，
+        # 容器只会拿到自己的 sizeHint（很窄），于是**永远**显示滚动条。
+        tb3.addWidget(FilterChipScroll(self.filter_bar), 1)
+        main_layout.addLayout(tb3)
 
         # ── 原工具栏上的扫描参数 / 筛选：改为菜单驱动（保留实例供设置与扫描读取） ──
         self.timeout_spin = QSpinBox()
@@ -267,17 +377,14 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.mdns_check = QAction(tr("mDNS 设备发现"), self, checkable=True)
         self.mdns_check.setToolTip(tr("扫描末尾向本地组播组发现 mDNS/DNS-SD 设备"))
 
-        # 筛选：保留 ComboBox 作为值载体，由「视图 > 筛选」子菜单驱动
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems([tr("全部"), tr("仅在线"), tr("仅离线"), tr("Excel已匹配"), tr("有服务")])
-        self.filter_combo.setCurrentText(tr("仅在线"))
-        self.filter_combo.currentIndexChanged.connect(self._filter_results)
+        # 筛选已由常驻的 FilterChipBar 承担（见上方 tb2），
+        # 「视图 > 筛选」菜单与 chip 共用 _set_filter() 这一个入口。
 
         # ── 分隔线 ──
         self.sep = QFrame()
+        self.sep.setObjectName("hSep")
         self.sep.setFrameShape(QFrame.HLine)
         self.sep.setFrameShadow(QFrame.Sunken)
-        self.sep.setStyleSheet("color: #CCCCCC;")
         self.sep.setFixedHeight(2)
         main_layout.addWidget(self.sep)
 
@@ -318,7 +425,39 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 右键上下文菜单：复制/重扫/WoL/地址库/内置工具（单连接，避免重复弹菜单）
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
 
-        main_layout.addWidget(self.table, 1)
+        # ── 结果区：空状态 ⇄ (表格 + 详情面板) 双页切换 (UI_REVIEW P0-1 / P0-2) ──
+        #
+        # 原实现是"工具栏 + 一张 13 列表格"的单面板结构，有两个真实缺陷：
+        #   1. 没有详情区域 —— WMI/NetBIOS/SNMP/共享 等富信息只能塞进 tooltip
+        #      和跨列子项，IP 列的 tip 会拼到 10 段以上，实际不可读；
+        #   2. 启动后是一张全空白表格 —— 没有引导、没有主 CTA。
+        # 这里用 QStackedWidget 分三页解决：
+        #   page 0 = EmptyStatePanel（无结果时的引导）
+        #   page 1 = QSplitter(表格 / 详情面板)，垂直可拖拽、可折叠
+        #   page 2 = OverviewPanel（概览仪表盘，UI_REVIEW P3-2）
+        self.detail_panel = DeviceDetailPanel()
+        self.detail_splitter = QSplitter(Qt.Vertical)
+        self.detail_splitter.setObjectName("detailSplitter")
+        self.detail_splitter.setChildrenCollapsible(True)
+        self.detail_splitter.addWidget(self.table)
+        self.detail_splitter.addWidget(self.detail_panel)
+        self.detail_splitter.setStretchFactor(0, 1)
+        self.detail_splitter.setStretchFactor(1, 0)
+        self.detail_splitter.setSizes([620, 168])
+
+        self.empty_state = EmptyStatePanel()
+        self.empty_state.scan_local_requested.connect(self._scan_local_subnet)
+        self.empty_state.scan_requested.connect(self._start_scan)
+
+        self.overview = OverviewPanel()
+
+        self.result_stack = QStackedWidget()
+        self.result_stack.addWidget(self.empty_state)       # index 0
+        self.result_stack.addWidget(self.detail_splitter)   # index 1
+        self.result_stack.addWidget(self.overview)          # index 2
+        self.result_stack.setCurrentIndex(0)
+
+        main_layout.addWidget(self.result_stack, 1)
 
         # ── 进度条 ──
         self.progress_bar = QProgressBar()
@@ -333,12 +472,12 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.status_bar.addPermanentWidget(self.status_label)
 
         self.status_stats_label = QLabel("")
-        self.status_stats_label.setStyleSheet("color: #333333; font-size: 12px;")
+        self.status_stats_label.setObjectName("statsLabel")
         self.status_bar.addPermanentWidget(self.status_stats_label)
 
         # 地址库状态（从工具栏移到底部状态栏）
         self.excel_label = QLabel(tr("地址库: 空"))
-        self.excel_label.setStyleSheet("color: #888888; font-size: 11px;")
+        self.excel_label.setObjectName("libraryLabel")
         self.status_bar.addPermanentWidget(self.excel_label)
 
     def _init_menu(self):
@@ -603,12 +742,23 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         settings_menu.addSeparator()
 
-        self.act_auto_theme = QAction(tr("跟随时间自动切换主题"), self)
-        self.act_auto_theme.setIcon(_mi(QStyle.SP_DialogApplyButton))
-        self.act_auto_theme.setCheckable(True)
-        self.act_auto_theme.setChecked(self.auto_time)
-        self.act_auto_theme.triggered.connect(self._toggle_auto_theme)
-        settings_menu.addAction(self.act_auto_theme)
+        # ── 主题：单选（跟随系统 / 浅色 / 深色 / 按时间）──
+        # 旧版是一个「跟随时间自动切换」的裸 checkbox，用户既看不出当前
+        # 到底是深色还是浅色，也无法显式指定 —— 只会在某天 18:00 突然变脸。
+        theme_menu = settings_menu.addMenu(tr("主题"))
+        theme_menu.setStyleSheet("")
+        theme_menu.setIcon(_mi(QStyle.SP_DesktopIcon))
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        self._theme_actions = {}
+        for _tkey, _tlabel in THEME_MODES:
+            _tact = QAction(tr(_tlabel), self, checkable=True)
+            _tact.setData(_tkey)
+            _tact.setChecked(_tkey == self.theme_mode)
+            _tact.triggered.connect(lambda _c, k=_tkey: self._set_theme_mode(k))
+            self._theme_group.addAction(_tact)
+            theme_menu.addAction(_tact)
+            self._theme_actions[_tkey] = _tact
 
         lang_menu = settings_menu.addMenu(tr("语言 / Language"))
         lang_menu.setStyleSheet("")
@@ -626,20 +776,34 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         view_menu = menubar.addMenu(tr("查看(&V)"))
         view_menu.setStyleSheet("")
 
+        # ── 显示列：预设 + 自定义（UI_REVIEW P1-2）──
         col_menu = view_menu.addMenu(tr("显示列"))
         col_menu.setStyleSheet("")
         col_menu.setIcon(_mi(QStyle.SP_FileDialogDetailedView))
+
+        # 预设（单选）：一键切到常见视图
+        self._col_preset_group = QActionGroup(self)
+        self._col_preset_group.setExclusive(True)
+        self._col_preset_actions = {}
+        for _key, _label, _cols in COLUMN_PRESETS:
+            _pact = QAction(tr(_label), self, checkable=True)
+            _pact.setData(_key)
+            _pact.setToolTip(tr("显示 {n} 列").format(n=len(_cols)))
+            _pact.triggered.connect(lambda _c, k=_key: self._apply_column_preset(k))
+            self._col_preset_group.addAction(_pact)
+            col_menu.addAction(_pact)
+            self._col_preset_actions[_key] = _pact
+
+        col_menu.addSeparator()
+
+        # 自定义（多选）：保留原有的逐列开关
         self._col_actions = {}
-        _col_labels = [
-            tr("IP地址"), tr("状态"), tr("主机名"), tr("MAC地址"), tr("制造商"),
-            tr("位置"), tr("使用者"), tr("响应时间(ms)"), tr("开放端口"), tr("服务"), tr("操作系统"), tr("设备类型"), tr("备注")
-        ]
-        for _ci, _name in enumerate(_col_labels):
-            _act = QAction(_name, self)
+        for _ci, _name in enumerate(COLUMN_LABELS):
+            _act = QAction(tr(_name), self)
             _act.setCheckable(True)
             _act.setChecked(not self.table.isColumnHidden(_ci))
             _act.toggled.connect(
-                lambda checked, c=_ci: self.table.setColumnHidden(c, not checked)
+                lambda checked, c=_ci: self._on_column_toggled(c, checked)
             )
             col_menu.addAction(_act)
             self._col_actions[_ci] = _act
@@ -647,16 +811,17 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         filter_menu = view_menu.addMenu(tr("筛选"))
         filter_menu.setStyleSheet("")
         filter_menu.setIcon(_mi(QStyle.SP_FileDialogContentsView))
-        _filter_opts = [tr("全部"), tr("仅在线"), tr("仅离线"), tr("Excel已匹配"), tr("有服务")]
-        _filter_group = QActionGroup(self)
-        _filter_group.setExclusive(True)
-        for _opt in _filter_opts:
-            _fact = _filter_group.addAction(QAction(_opt, self, checkable=True))
-            _fact.setChecked(self.filter_combo.currentText() == _opt)
-            _fact.triggered.connect(
-                lambda _checked, _o=_opt: self.filter_combo.setCurrentText(_o)
-            )
+        self._filter_group = QActionGroup(self)
+        self._filter_group.setExclusive(True)
+        self._filter_actions = {}
+        for _fkey, _flabel in FILTERS:
+            _fact = QAction(tr(_flabel), self, checkable=True)
+            _fact.setData(_fkey)
+            _fact.setChecked(_fkey == self.filter_key)
+            _fact.triggered.connect(lambda _checked, k=_fkey: self._set_filter(k))
+            self._filter_group.addAction(_fact)
             filter_menu.addAction(_fact)
+            self._filter_actions[_fkey] = _fact
 
         view_menu.addSeparator()
 
@@ -742,6 +907,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
 
+        # 扫描预设菜单（内容随预设增删重建）
+        self._rebuild_preset_menu()
+
     # ── 深色模式 ──
     def _apply_theme(self, dark: bool):
         """应用/取消深色主题：切换 Fusion 深色 QPalette + 对应样式表，并刷新内联样式标签。"""
@@ -762,64 +930,77 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
                 app.setStyle(orig)
             app.setPalette(app.style().standardPalette())
             app.setStyleSheet(STYLE_SHEET)
-        # 内联样式标签随主题重设颜色
-        _blue = "#4DA6FF" if dark else "#0078D7"
-        _muted = "#9AA0A6" if dark else "#888888"
-        _stats = "#C8C8C8" if dark else "#555555"
-        _sep = "#3F3F46" if dark else "#CCCCCC"
-        if hasattr(self, "range_list_label"):
-            self.range_list_label.setStyleSheet(f"color: {_blue}; font-size: 11px; font-weight: bold;")
-        if hasattr(self, "excel_label"):
-            self.excel_label.setStyleSheet(f"color: {_muted}; font-size: 11px;")
-        if hasattr(self, "sep"):
-            self.sep.setStyleSheet(f"color: {_sep};")
+        # 标签与分隔线的颜色已全部下沉到 QSS（objectName 选择器），
+        # 这里不再逐控件改色 —— 否则主题色会同时存在于 .qss 与本函数两处，
+        # 新增一个内联样式就会在深色下"漏白"（见 UI_REVIEW.md P2-2）。
         # 工具栏小图标随主题重绘线条颜色
         _icon_color = "#FFFFFF" if dark else "#555555"
         if hasattr(self, "local_subnet_btn"):
             _sz = self.local_subnet_btn.iconSize().width()
             self.local_subnet_btn.setIcon(_make_tool_icon("ip", _icon_color, _sz))
             self.c_subnet_btn.setIcon(_make_tool_icon("c", _icon_color, _sz))
-            self.expand_btn.setIcon(_make_tool_icon("expand", _icon_color, _sz))
-            self.collapse_btn.setIcon(_make_tool_icon("collapse", _icon_color, _sz))
             self.stop_btn.setIcon(_make_pause_icon(_icon_color, self.stop_btn.iconSize().width()))
-        # 已存在表格项的 IP 列前景色随主题刷新（冲突标记保持原色）
+        # 树项上由 Python 设色的部分随主题刷新（QSS 覆盖不到）：
+        # IP 列前景、状态列前景与预渲染图标、收藏星标
         if hasattr(self, "_ip_item_map"):
-            _fg = self._default_fg_color()
-            for ip, item in self._ip_item_map.items():
-                if ip not in getattr(self, "_conflict_ips", {}):
-                    item.setForeground(0, _fg)
+            self._refresh_theme_marks()
 
     def _should_be_dark_now(self) -> bool:
         """按时间判断当前是否应为深色：18:00–次日 06:00 视为深色时段。"""
-        _h = datetime.now().hour
-        return _h >= 18 or _h < 6
+        return system_theme.is_time_dark(datetime.now().hour)
+
+    def _resolve_dark(self) -> bool:
+        """把用户选择的 `theme_mode` 解析成"现在到底是不是深色"。
+
+        解析规则本身是纯函数（`system_theme.resolve_dark`），这里只负责
+        把当前状态喂进去 —— 这样"四种模式各自该出什么颜色"可以脱离 Qt 单测。
+        """
+        return system_theme.resolve_dark(
+            getattr(self, "theme_mode", DEFAULT_THEME_MODE),
+            current=getattr(self, "dark_mode", False),
+        )
+
+    def _set_theme_mode(self, mode: str, save: bool = True):
+        """切换主题模式并立即生效；save=True 时持久化。"""
+        if mode not in system_theme.VALID_MODES:
+            mode = DEFAULT_THEME_MODE
+        self.theme_mode = mode
+        self.auto_time = (mode == system_theme.MODE_TIME)  # 兼容旧字段
+        self._sync_theme_menu()
+        self._set_dark_mode(self._resolve_dark(), save=save)
 
     def _set_dark_mode(self, dark: bool, save: bool = True):
-        """底层设定主题并刷新 UI；save=True 时持久化到配置。"""
+        """底层设定实际明暗并刷新 UI；save=True 时持久化到配置。"""
         self.dark_mode = dark
         self._apply_theme(dark)
         if save:
             self._save_settings()
 
-    def _check_theme_by_time(self):
-        """定时器回调：开启自动模式且跨越时间边界时切换主题。"""
-        if not getattr(self, "auto_time", False):
-            return
-        _target = self._should_be_dark_now()
-        if _target != self.dark_mode:
-            self._set_dark_mode(_target, save=True)
+    def _check_theme_change(self):
+        """定时器回调：system/time 模式下偏好发生变化时跟随切换。
 
-    def _toggle_auto_theme(self, checked: bool):
-        """勾选「跟随时间自动切换」：开启时立即按当前时间校正一次主题。"""
-        self.auto_time = checked
-        if checked:
-            _target = self._should_be_dark_now()
-            if _target != self.dark_mode:
-                self._set_dark_mode(_target, save=True)
-            else:
-                self._save_settings()
-        else:
-            self._save_settings()
+        light / dark 是用户显式选择，不做任何自动干预。
+        """
+        mode = getattr(self, "theme_mode", DEFAULT_THEME_MODE)
+        if mode not in (system_theme.MODE_SYSTEM, system_theme.MODE_TIME):
+            return
+        _target = self._resolve_dark()
+        if _target != self.dark_mode:
+            app_logging.get_logger(__name__).info(
+                "主题随 %s 模式切换：%s → %s",
+                mode, "深色" if self.dark_mode else "浅色",
+                "深色" if _target else "浅色",
+            )
+            self._set_dark_mode(_target, save=False)
+
+    def _sync_theme_menu(self):
+        """把菜单勾选态同步到当前 theme_mode（构建期与载入配置后都要调）。"""
+        group = getattr(self, "_theme_group", None)
+        if group is None:
+            return
+        _act = self._theme_actions.get(getattr(self, "theme_mode", ""))
+        if _act is not None and not _act.isChecked():
+            _act.setChecked(True)
 
     def _switch_language(self, lang: str):
         """切换界面语言，保存偏好并提示重启。"""
@@ -841,15 +1022,190 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         """次要描述文字颜色，随主题变化。"""
         return QColor(150, 156, 166) if self.dark_mode else QColor(100, 116, 139)
 
+    # ── 扫描预设 (UI_REVIEW P1-3) ──
+
+    def _current_scan_config(self) -> dict:
+        """把当前扫描参数打包成可保存的预设内容。"""
+        return {
+            "ranges": list(self.ip_range_items),
+            "level": self.scan_level,
+            "protocols": list(self.selected_protocols),
+            "tcp_mode": self.tcp_scan_mode,
+            "port_scan": self.port_scan_check.isChecked(),
+            "mdns": self.mdns_check.isChecked(),
+        }
+
+    def _apply_scan_preset(self, name: str):
+        """套用一个命名预设。逐项做白名单校验，避免旧配置里的失效值被塞进控件。"""
+        cfg = self.scan_presets.get(name)
+        if cfg is None:
+            return
+        ranges = [r for r in (cfg.get("ranges") or [])
+                  if isinstance(r, str) and r.strip()]
+        if ranges:
+            self.ip_range_items = list(ranges)
+            self.range_input.clear()
+            self._update_range_list()
+        level = cfg.get("level", "quick")
+        if level in ("quick", "standard", "all"):
+            self.scan_level = level
+            self._sync_scan_level_menu()
+        mode = cfg.get("tcp_mode", "connect")
+        if mode in ("connect", "syn", "udp"):
+            self.tcp_scan_mode = mode
+            self._sync_tcp_mode_menu()
+        self.port_scan_check.setChecked(bool(cfg.get("port_scan", False)))
+        self.mdns_check.setChecked(bool(cfg.get("mdns", True)))
+        protos = [p for p in (cfg.get("protocols") or []) if p in PROTOCOL_PORTS]
+        if protos:
+            self.selected_protocols = protos
+        self._save_settings()
+        self._update_empty_hint()
+        self.status_bar.showMessage(tr("已应用预设") + ": " + name)
+
+    def _save_current_as_preset(self):
+        name, ok = QInputDialog.getText(self, tr("保存扫描预设"), tr("预设名称："))
+        if not ok:
+            return
+        try:
+            name = validate_name(name)
+            self.scan_presets.put(name, self._current_scan_config())
+        except PresetError as e:
+            QMessageBox.warning(self, tr("保存扫描预设"), str(e))
+            return
+        self._rebuild_preset_menu()
+        self.status_bar.showMessage(tr("已保存预设") + ": " + name)
+
+    def _delete_preset(self, name: str):
+        if self.scan_presets.delete(name):
+            self._rebuild_preset_menu()
+            self.status_bar.showMessage(tr("已删除预设") + ": " + name)
+
+    def _rebuild_preset_menu(self):
+        """重建预设下拉菜单（预设增删后调用）。"""
+        m = self._preset_menu
+        m.clear()
+        names = self.scan_presets.names()
+        if not names:
+            _empty = m.addAction(tr("（暂无预设）"))
+            _empty.setEnabled(False)
+        else:
+            for name in names:
+                m.addAction(name).triggered.connect(
+                    lambda _checked=False, n=name: self._apply_scan_preset(n)
+                )
+        m.addSeparator()
+        m.addAction(tr("保存当前设置为预设...")).triggered.connect(
+            self._save_current_as_preset
+        )
+        if names:
+            del_menu = m.addMenu(tr("删除预设"))
+            for name in names:
+                del_menu.addAction(name).triggered.connect(
+                    lambda _checked=False, n=name: self._delete_preset(n)
+                )
+
+    # ── 设备收藏 (UI_REVIEW P1-3) ──
+
+    def _toggle_favorite(self, result):
+        """切换设备收藏状态，并同步星标 / 计数 / 当前筛选。"""
+        if result is None:
+            return
+        now = self.favorites.toggle(result)
+        item = self._ip_item_map.get(result.ip)
+        if item is not None:
+            self._apply_favorite_mark(item, result)
+        self._refresh_filter_counts()
+        if self.filter_key == "favorite":
+            self._filter_results()
+        self.status_bar.showMessage(tr("已加入收藏") if now else tr("已取消收藏"))
+
+    # ── 结果筛选 (UI_REVIEW P1-4) ──
+
+    def _set_filter(self, key: str):
+        """切换结果筛选。筛选条 chip 与「视图 > 筛选」菜单共用这一个入口。"""
+        self.filter_key = key
+        if hasattr(self, "filter_bar"):
+            self.filter_bar.set_key(key)
+        self._sync_filter_menu()
+        self._filter_results()
+        self._save_settings()
+        # 筛选只对列表视图有意义：在概览页点「在线 112」的语义是"我要看这 112 台"，
+        # 而不是"把概览也过滤一遍"（概览本身就是全量统计）。所以顺带切回列表。
+        # 注意 `_load_settings` 也会调本函数，但那时 all_results 还是空的，
+        # 因此不会误触发切换。
+        if self.all_results and getattr(self, "view_mode", DEFAULT_VIEW_MODE) != "list":
+            self._set_view_mode("list", save=False)
+
+    def _sync_filter_menu(self):
+        """同步「视图 > 筛选」菜单的单选态到当前 filter_key。"""
+        for key, act in getattr(self, "_filter_actions", {}).items():
+            act.blockSignals(True)
+            act.setChecked(key == self.filter_key)
+            act.blockSignals(False)
+
+    # ── 列预设 (UI_REVIEW P1-2) ──
+
+    def _apply_column_preset(self, key: str):
+        """按预设切换可见列，并同步自定义勾选态。"""
+        preset = next((p for p in COLUMN_PRESETS if p[0] == key), None)
+        if preset is None:
+            return
+        _key, _label, cols = preset
+        visible = set(cols)
+        for ci in range(self.table.columnCount()):
+            self.table.setColumnHidden(ci, ci not in visible)
+        self._sync_col_actions()
+        self._sync_preset_selection()
+        self.status_bar.showMessage(tr("已应用列预设") + ": " + tr(_label))
+
+    def _on_column_toggled(self, col: int, checked: bool):
+        """自定义列勾选。手动改动后取消预设的单选态（已不再对应任何预设）。"""
+        self.table.setColumnHidden(col, not checked)
+        self._sync_preset_selection()
+
+    def _detect_active_preset(self):
+        """当前可见列恰好等于某个预设时返回其 key，否则 None。"""
+        visible = frozenset(
+            ci for ci in range(self.table.columnCount())
+            if not self.table.isColumnHidden(ci)
+        )
+        for key, _label, cols in COLUMN_PRESETS:
+            if frozenset(cols) == visible:
+                return key
+        return None
+
+    def _sync_col_actions(self):
+        """把 13 个自定义勾选框同步到当前隐藏状态（静默，避免递归触发）。"""
+        for _ci, _act in getattr(self, "_col_actions", {}).items():
+            _act.blockSignals(True)
+            _act.setChecked(not self.table.isColumnHidden(_ci))
+            _act.blockSignals(False)
+
+    def _sync_preset_selection(self):
+        """把预设单选态同步到当前可见列（不匹配任何预设时全部取消勾选）。"""
+        active = self._detect_active_preset()
+        for key, act in getattr(self, "_col_preset_actions", {}).items():
+            act.blockSignals(True)
+            act.setChecked(key == active)
+            act.blockSignals(False)
+
     # ── 配置持久化 (P2-2) ──
     def _load_settings(self):
         """载入持久化配置：主题 / 扫描参数 / 网段 / 窗口几何 / 列布局。"""
         s = self.settings
-        # 主题
-        self.dark_mode = s.value("theme/dark", False, type=bool)
-        self.auto_time = s.value("theme/auto_time", False, type=bool)
-        if hasattr(self, "act_auto_theme"):
-            self.act_auto_theme.setChecked(self.auto_time)
+        # 主题：优先读新的 theme/mode；旧配置只有 theme/dark + theme/auto_time，
+        # 迁移规则见 system_theme.migrate_mode（原则是"外观不变"）。
+        _mode = system_theme.migrate_mode(
+            s.value("theme/mode", "", type=str),
+            has_legacy_dark=s.contains("theme/dark"),
+            legacy_dark=s.value("theme/dark", False, type=bool),
+            legacy_auto=s.value("theme/auto_time", False, type=bool),
+        )
+        self.theme_mode = _mode
+        self.auto_time = (_mode == system_theme.MODE_TIME)
+        self.dark_mode = self._resolve_dark()
+        self._sync_theme_menu()
         # 语言
         _lang = s.value("ui/language", "")
         if hasattr(self, "act_lang_zh"):
@@ -899,6 +1255,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         state = s.value("window/state")
         if isinstance(state, QByteArray):
             self.restoreState(state)
+        # 详情面板高度
+        _split = s.value("ui/detail_splitter")
+        if isinstance(_split, QByteArray):
+            self.detail_splitter.restoreState(_split)
         # 列布局 (宽度 / 顺序 / 隐藏 / 排序指示)
         # 仅在列布局版本一致时恢复 header_state，避免列序变更后旧状态错位
         _CUR_LAYOUT_VER = 3  # v2=IP/序号/状态…; v3=新增"设备类型"列(设备指纹深度)
@@ -906,13 +1266,29 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         hdr_state = s.value("table/header_state")
         if saved_ver == _CUR_LAYOUT_VER and isinstance(hdr_state, QByteArray):
             self.table.header().restoreState(hdr_state)
-        # 同步"显示列"子菜单勾选态
-        for _ci, _act in getattr(self, "_col_actions", {}).items():
-            _act.setChecked(not self.table.isColumnHidden(_ci))
+        else:
+            # 首次运行（或列布局版本已变）：套用「巡检」预设。默认把 13 列
+            # 全铺出来会立刻横向滚动，且多数列在第一次扫描时都是空的。
+            self._apply_column_preset("inspect")
+        # 同步"显示列"菜单：自定义勾选态 + 预设单选态
+        self._sync_col_actions()
+        self._sync_preset_selection()
+        # 结果筛选（规范 key，与界面语言无关）
+        _fk = s.value("view/filter_key", "online", type=str)
+        self._set_filter(_fk if _fk in dict(FILTERS) else "online")
+        # 结果视图（列表 / 概览）
+        _vm = s.value("view/mode", DEFAULT_VIEW_MODE, type=str)
+        self.view_mode = _vm if _vm in dict(VIEW_MODES) else DEFAULT_VIEW_MODE
+        if hasattr(self, "_view_buttons"):
+            _btn = self._view_buttons.get(self.view_mode)
+            if _btn is not None:
+                _btn.setChecked(True)
 
     def _save_settings(self):
         """保存当前配置到 ipscanner.ini。"""
         s = self.settings
+        s.setValue("theme/mode", self.theme_mode)
+        # 保留旧键：① 旧版本回退时行为可预期；② 外部脚本/文档仍可能读它
         s.setValue("theme/dark", self.dark_mode)
         s.setValue("theme/auto_time", self.auto_time)
         s.setValue("scan/timeout_ms", self.timeout_spin.value())
@@ -927,6 +1303,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("window/state", self.saveState())
         s.setValue("table/header_state", self.table.header().saveState())
         s.setValue("table/layout_ver", 3)  # 列布局版本(v3=新增"设备类型"列)
+        # 详情面板高度（用户拖动分隔条后应保持）
+        s.setValue("ui/detail_splitter", self.detail_splitter.saveState())
+        s.setValue("view/filter_key", getattr(self, "filter_key", "online"))
+        s.setValue("view/mode", getattr(self, "view_mode", DEFAULT_VIEW_MODE))
         s.sync()
 
     def _connect_signals(self):
@@ -934,9 +1314,202 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.stop_btn.clicked.connect(self._stop_scan)
         self.local_subnet_btn.clicked.connect(self._scan_local_subnet)
         self.c_subnet_btn.clicked.connect(self._scan_c_class_subnet)
-        self.expand_btn.clicked.connect(self._expand_all_items)
-        self.collapse_btn.clicked.connect(self._collapse_all_items)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
+        # 详情面板随选区刷新（含键盘上下键切换）
+        self.table.currentItemChanged.connect(self._on_current_item_changed)
+        self.detail_panel.rescan_requested.connect(self._rescan_ip)
+        self.detail_panel.copy_requested.connect(self._copy_to_clipboard)
+        # 扫描参数变化时刷新空状态页的配置摘要
+        self.port_scan_check.toggled.connect(lambda _c: self._update_empty_hint())
+        self.mdns_check.toggled.connect(lambda _c: self._update_empty_hint())
+
+    def _build_view_toggle(self) -> QWidget:
+        """构建「列表 / 概览」视图切换控件（UI_REVIEW P3-2）。"""
+        box = QWidget()
+        box.setObjectName("viewToggle")
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self._view_group = QButtonGroup(self)
+        self._view_group.setExclusive(True)
+        self._view_buttons = {}
+        for key, label in VIEW_MODES:
+            btn = QPushButton(tr(label))
+            btn.setObjectName("viewBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.TabFocus)
+            btn.setChecked(key == self.view_mode)
+            btn.clicked.connect(lambda _c, k=key: self._set_view_mode(k))
+            self._view_group.addButton(btn)
+            lay.addWidget(btn)
+            self._view_buttons[key] = btn
+        return box
+
+    # ── 结果视图：列表 / 概览 (UI_REVIEW P3-2) ──
+
+    def _set_view_mode(self, key: str, save: bool = True):
+        """切换结果视图（列表 / 概览）。"""
+        if key not in dict(VIEW_MODES):
+            key = DEFAULT_VIEW_MODE
+        self.view_mode = key
+        btn = getattr(self, "_view_buttons", {}).get(key)
+        if btn is not None and not btn.isChecked():
+            btn.setChecked(True)
+        self._apply_view_mode(save=save)
+
+    def _apply_view_mode(self, save: bool = True):
+        """按当前 view_mode 切到对应页面；无结果时一律回到空状态引导页。"""
+        if not self.all_results:
+            self.result_stack.setCurrentIndex(0)
+            self._update_empty_hint()
+            return
+        if self.view_mode == "overview":
+            self._refresh_overview()
+            self.result_stack.setCurrentIndex(2)
+        else:
+            self.result_stack.setCurrentIndex(1)
+        if save:
+            self._save_settings()
+
+    def _refresh_overview(self):
+        """把最新结果推给概览页（统计逻辑在 ui_logic.build_overview）。"""
+        self.overview.set_data(ui_logic.build_overview(
+            self.all_results, self._changes, self._conflicts))
+
+    def _refresh_overview_if_visible(self):
+        """仅当概览页**正在显示**时刷新。
+
+        刻意做成惰性：概览统计要遍历全部结果（/16 网段是 6.5 万条），
+        而绝大多数用户根本不会打开概览 —— 每次扫描都白算一遍是纯浪费。
+        切到概览时 `_apply_view_mode` 会重新计算，所以不会看到旧数据。
+        """
+        if getattr(self, "view_mode", DEFAULT_VIEW_MODE) != "overview":
+            return
+        if self.result_stack.currentIndex() != 2:
+            return
+        self._refresh_overview()
+
+    # ── 空状态 / 结果页切换 (UI_REVIEW P0-2) ──
+
+    def _show_results_page(self, show_results: bool):
+        """在「空状态引导页」与「结果页」之间切换。
+
+        结果页有两张：列表（表格 + 详情面板）与概览，具体切到哪张由
+        `view_mode` 决定 —— 扫描开始时不该把正在看概览的用户硬拽回列表。
+        """
+        if not show_results:
+            self.result_stack.setCurrentIndex(0)
+            self._update_empty_hint()
+            return
+        self.result_stack.setCurrentIndex(
+            2 if getattr(self, "view_mode", DEFAULT_VIEW_MODE) == "overview" else 1)
+
+    def _update_empty_hint(self):
+        """刷新空状态页底部的「当前扫描配置」摘要 —— 让用户按下扫描前就知道会扫什么。"""
+        parts = []
+        if self.port_scan_check.isChecked():
+            parts.append(tr("级别") + " " + scan_level_label(self.scan_level))
+            parts.append(tr("端口数") + f" {len(get_ports_for_level(self.scan_level))}")
+        else:
+            parts.append(tr("未开启端口扫描"))
+        parts.append(tr("超时") + f" {self.timeout_spin.value()} ms")
+        if self.mdns_check.isChecked():
+            parts.append(tr("mDNS 发现已开启"))
+        self.empty_state.set_scan_hint(" · ".join(parts))
+
+    def _on_current_item_changed(self, current, _previous):
+        self._refresh_detail_panel(current)
+
+    def _refresh_detail_panel(self, item):
+        """把选中设备（服务子项会上溯到父设备）的完整信息推给详情面板。"""
+        if item is None:
+            self.detail_panel.clear()
+            return
+        ip = self._item_ip(item)
+        result = self._result_map.get(ip) if ip else None
+        if result is None:
+            self.detail_panel.clear()
+            return
+        self.detail_panel.set_device(
+            result,
+            self._conflict_notes_for(ip),
+            self._change_notes_for(ip),
+            self._device_timeline_for(result),
+        )
+
+    def _conflict_notes_for(self, ip) -> list:
+        """该 IP 命中的冲突描述（供详情面板「风险」分区展示）。"""
+        notes = []
+        for c in getattr(self, "_conflicts", []):
+            if ip in c.ips:
+                notes.append(f"[{c.severity_label}] {c.description}")
+        return notes
+
+    def _change_notes_for(self, ip) -> list:
+        """该 IP 命中的变更描述（供详情面板「变更」分区展示）。"""
+        notes = []
+        for c in getattr(self, "_changes", []):
+            if ip and c.ip == ip:
+                notes.append(f"[{c.type_label}] {c.description}")
+        return notes
+
+    # ── 变更索引 / 历史轨迹 (UI_REVIEW P3-1) ──
+
+    def _rebuild_change_index(self) -> dict:
+        """把 `self._changes` 折叠成 `{ip: [变更类型, ...]}` 并缓存。
+
+        折叠规则本身是纯函数（`ui_logic.build_change_index`），这里只负责
+        把当前状态喂进去并记到 `self._change_map`。
+        """
+        self._change_map = ui_logic.build_change_index(
+            self._changes, self.all_results)
+        return self._change_map
+
+    def _device_timeline_for(self, result, limit: int = 6) -> list:
+        """该设备在历史快照中的出现轨迹（最近 `limit` 次）。
+
+        结果按 (MAC 或 IP) 缓存：详情面板在"每选中一行"时刷新，而同一台设备
+        常被反复点开（看服务、看变更）。缓存只在**写入新快照后**失效 ——
+        快照没变，轨迹就不可能变。
+        """
+        if result is None:
+            return []
+        key = (result.mac or "").upper().strip() or f"ip:{(result.ip or '')}"
+        if not key:
+            return []
+        cache = getattr(self, "_timeline_cache", None)
+        if cache is None:
+            cache = self._timeline_cache = {}
+        if key in cache:
+            return cache[key]
+        try:
+            entries = history_store.device_timeline(
+                mac=result.mac, ip=result.ip,
+                db_path=self.history_db, limit=limit,
+            )
+        except Exception as exc:
+            # 轨迹是"锦上添花"：历史库损坏/被占用不应让详情面板整体打不开。
+            app_logging.get_logger(__name__).warning(
+                "读取设备历史轨迹失败（%s）: %s", result.ip, exc)
+            entries = []
+        cache[key] = entries
+        return entries
+
+    def _rescan_ip(self, ip: str):
+        """仅重扫指定 IP（详情面板「重新扫描」按钮）。"""
+        if not ip:
+            return
+        self.range_input.setText(ip)
+        self.ip_range_items = [ip]
+        self._update_range_list()
+        self._start_scan()
+
+    def _copy_to_clipboard(self, text: str):
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.status_bar.showMessage(tr("已复制设备详情"))
 
     def _update_status_stats(self, total_ips=None):
         """在底部状态栏右侧汇总显示已添加网段/IP 与扫描结果统计。"""

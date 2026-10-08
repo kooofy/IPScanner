@@ -280,6 +280,49 @@ class LanguagePackCompletenessTest(unittest.TestCase):
         )
 
 
+class TableDrivenLabelCoverageTest(unittest.TestCase):
+    """变量驱动的 tr() 标签同样必须有翻译。
+
+    `LanguagePackCompletenessTest` 走 AST 收集 **字面量** `tr("…")`，所以
+    `for key, label in TABLE: tr(label)` 这种写法是它的盲区。这个盲区真实咬过
+    一次：`FILTERS` / `COLUMN_PRESETS` 里 5 个标签（已匹配、巡检、资产、安全、
+    全量）漏了英文，测试却全绿，英文界面直接显示中文。
+
+    这里把"面向用户的标签表"显式列出来逐项校验 —— 新增此类表时记得登记。
+    """
+
+    def _label_tables(self):
+        from filter_bar import FILTERS
+        from main_window import (
+            COLUMN_PRESETS, COLUMN_LABELS, THEME_MODES, VIEW_MODES,
+        )
+        from main_window_tree import _CHANGE_LABEL
+        return {
+            "filter_bar.FILTERS": [label for _k, label in FILTERS],
+            "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
+            "main_window.COLUMN_LABELS": list(COLUMN_LABELS),
+            "main_window.THEME_MODES": [lbl for _k, lbl in THEME_MODES],
+            "main_window.VIEW_MODES": [lbl for _k, lbl in VIEW_MODES],
+            "main_window_tree._CHANGE_LABEL": list(_CHANGE_LABEL.values()),
+        }
+
+    def test_all_table_labels_are_translated(self):
+        with io.open(os.path.join(ROOT, "i18n", "en-US.json"),
+                     encoding="utf-8") as f:
+            pack = json.load(f)
+        missing = []
+        for name, labels in self._label_tables().items():
+            for label in labels:
+                has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in label)
+                if has_cjk and label not in pack:
+                    missing.append(f"{name}: {label!r}")
+        self.assertEqual(
+            missing, [],
+            msg="以下表驱动标签缺少英文翻译，英文界面会显示中文：\n  "
+                + "\n  ".join(missing),
+        )
+
+
 class MatchTablePurityTest(unittest.TestCase):
     """厂商/OUI 匹配关键词表必须是字面量，绝不能包 tr()。
 

@@ -2,7 +2,6 @@
 """对话框集合：设备编辑、地址库管理、历史对比、网络拓扑、冲突报告、子网利用率、审计日志。"""
 import os
 import math
-import ipaddress
 from datetime import datetime
 
 from PyQt5.QtCore import Qt, QDateTime
@@ -33,6 +32,7 @@ from scanner.snmp_v3 import (AUTH_NONE, AUTH_MD5, AUTH_SHA, PRIV_NONE, PRIV_AES,
                              snmp_v3_get_system)
 from app_logging import get_logger
 from i18n import tr
+import ui_logic
 
 _log = get_logger(__name__)
 
@@ -1247,51 +1247,13 @@ class SubnetUtilizationDialog(QDialog):
 
     @staticmethod
     def _analyze(results) -> list:
-        """按 /24 聚合扫描结果，返回子网统计列表（按利用率降序）。"""
-        # 按 /24 分组
-        groups: dict = {}  # subnet_str -> {"ips": set, "online": int, "offline": int, "devices": {}}
-        for r in results:
-            try:
-                # ip_network 本身就会对非法 IP 抛 ValueError，无需先做一次
-                # ip_address 校验（该校验结果此前赋给 addr 后从未使用）
-                net = ipaddress.ip_network(f"{r.ip}/24", strict=False)
-                key = str(net)
-            except ValueError:
-                continue
-            g = groups.setdefault(key, {
-                "ips": set(), "online": 0, "offline": 0, "devices": {}
-            })
-            g["ips"].add(r.ip)
-            if r.status == "online":
-                g["online"] += 1
-                # 设备类型统计
-                dtype = (device_class_label(getattr(r, "device_class", ""))
-                         or getattr(r, "device_type", "") or tr("未识别"))
-                g["devices"][dtype] = g["devices"].get(dtype, 0) + 1
-            else:
-                g["offline"] += 1
+        """按 /24 聚合扫描结果（按利用率降序）。
 
-        subnets = []
-        for subnet_str, g in groups.items():
-            total = len(g["ips"])
-            online = g["online"]
-            offline = g["offline"]
-            pct = (online / total * 100) if total else 0
-            # 设备分布文本
-            dev_parts = [f"{k}×{v}" for k, v in
-                         sorted(g["devices"].items(), key=lambda x: -x[1])]
-            subnets.append({
-                "subnet": subnet_str,
-                "total": total,
-                "online": online,
-                "offline": offline,
-                "utilization": pct,
-                "device_dist": ", ".join(dev_parts) if dev_parts else "—",
-            })
-
-        # 按利用率降序
-        subnets.sort(key=lambda s: -s["utilization"])
-        return subnets
+        逻辑已提到 `ui_logic.build_subnet_stats` —— 概览页（`overview.py`）
+        要用同一份数据，留两份实现迟早会跑偏。这里保留薄封装是为了不改动
+        既有的调用点与测试。
+        """
+        return ui_logic.build_subnet_stats(results)
 
     def _util_color(self, pct: float) -> QColor:
         if pct > 85:

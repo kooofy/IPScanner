@@ -5,7 +5,10 @@ from PyQt5.QtGui import (
     QColor, QPainter, QBrush, QPen, QPixmap, QIcon, QPalette, QImage
 )
 
-_PC_ICONS = None
+from theme_tokens import token
+
+#: {是否深色: (在线图标, 离线图标)} —— 按主题分别缓存
+_PC_ICONS = {}
 
 
 def _build_dark_palette() -> QPalette:
@@ -29,23 +32,43 @@ def _build_dark_palette() -> QPalette:
     return p
 
 
-def _make_pc_pixmap(online: bool) -> QPixmap:
-    """在安全的非 WM_PAINT 上下文中预渲染电脑图标 Pixmap。"""
-    pm = QPixmap(28, 26)
+def current_dpr() -> float:
+    """当前主屏的设备像素比。
+
+    预渲染的位图图标必须按它放大后再 `setDevicePixelRatio`，否则在 150%/200%
+    缩放下会被 Qt 拉伸插值，边缘发虚 —— `AA_UseHighDpiPixmaps` 只对"有对应
+    高分变率资源的 QIcon"生效，自绘 Pixmap 不在其列。
+    """
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return 1.0
+    screen = app.primaryScreen()
+    if screen is None:
+        return 1.0
+    dpr = screen.devicePixelRatio()
+    return float(dpr) if dpr else 1.0
+
+
+def _make_pc_pixmap(online: bool, dark: bool = False, dpr: float = 1.0) -> QPixmap:
+    """在安全的非 WM_PAINT 上下文中预渲染电脑图标 Pixmap。
+
+    颜色取自语义色令牌：深色主题下若沿用浅色版的深绿/深灰，图标在深底上会
+    糊成一团，因此按主题取不同色阶。dpr>1 时按物理像素渲染再标记 DPR。
+    """
+    pm = QPixmap(int(round(28 * dpr)), int(round(26 * dpr)))
+    pm.setDevicePixelRatio(dpr)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
+    p.scale(dpr, dpr)  # 之后一律用逻辑坐标绘制
     # 不启用抗锯齿 (部分环境下走 GDI+ 依赖 COM)
     w, h = 22, 17
     x0, y0 = 3, 1  # 居中偏移
 
-    if online:
-        screen = QColor(220, 252, 231)
-        edge = QColor(22, 163, 74)
-        base = QColor(22, 163, 74)
-    else:
-        screen = QColor(241, 245, 249)
-        edge = QColor(148, 163, 184)
-        base = QColor(148, 163, 184)
+    _edge = token("icon_online_edge" if online else "icon_offline_edge", dark)
+    screen = QColor(token("icon_online_screen" if online else "icon_offline_screen", dark))
+    edge = QColor(_edge)
+    base = QColor(_edge)
 
     # 显示器屏幕
     p.setPen(QPen(edge, 1.5))
@@ -66,12 +89,21 @@ def _make_pc_pixmap(online: bool) -> QPixmap:
     return pm
 
 
-def get_pc_icons():
-    """惰性返回 (在线图标, 离线图标)，首次调用时构造并缓存。"""
-    global _PC_ICONS
-    if _PC_ICONS is None:
-        _PC_ICONS = (QIcon(_make_pc_pixmap(True)), QIcon(_make_pc_pixmap(False)))
-    return _PC_ICONS
+def get_pc_icons(dark: bool = False, dpr: float = None):
+    """惰性返回 (在线图标, 离线图标)，按 (主题, DPR) 分别缓存。
+
+    主题切换后必须重取 —— 图标是预渲染位图，不会跟着 QSS 变色。
+    DPR 变化（窗口被拖到另一块缩放不同的显示器）同理。
+    """
+    if dpr is None:
+        dpr = current_dpr()
+    key = (bool(dark), round(float(dpr), 2))
+    icons = _PC_ICONS.get(key)
+    if icons is None:
+        icons = (QIcon(_make_pc_pixmap(True, dark, dpr)),
+                 QIcon(_make_pc_pixmap(False, dark, dpr)))
+        _PC_ICONS[key] = icons
+    return icons
 
 
 # ── 工具栏矢量图标（自 styles.py 迁入）─────────────────────────────

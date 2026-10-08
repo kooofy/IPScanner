@@ -49,6 +49,12 @@ def _init_db(conn):
             FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_dev_snapshot ON devices(snapshot_id);
+        -- device_timeline() 按 MAC/IP 查单台设备的历史轨迹，且该查询发生在
+        -- "每选中一行" 的热路径上。没有索引时 SQLite 要全表扫描 devices
+        -- （20 份快照 × /16 网段可达百万行），选中设备会明显卡顿。
+        -- mac 用 NOCASE 索引：MAC 大小写不敏感，但写入时未做归一化。
+        CREATE INDEX IF NOT EXISTS idx_dev_mac ON devices(mac COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_dev_ip ON devices(ip);
         """
     )
     conn.commit()
@@ -127,6 +133,51 @@ def load_all(db_path=None) -> list:
         full = get_snapshot(snap["id"], db_path)
         if full:
             out.append(full)
+    return out
+
+
+def device_timeline(mac="", ip="", db_path=None, limit=None) -> list:
+    """返回某台设备在各次快照中的出现记录，按快照 id 升序（旧 → 新）。
+
+    用于主界面详情面板的「历史轨迹」：把"这台机器以前在不在、在哪个 IP"
+    从"翻快照"变成一眼可见（见 UI_REVIEW.md P3-1）。
+
+    **匹配优先用 MAC**，没有 MAC 时才退回 IP。理由与收藏功能一致：IP 会被
+    DHCP 回收后分配给另一台机器，按 IP 追溯会把两台设备的记录串在一起；
+    MAC 才是设备身份。
+
+    Args:
+        mac:      设备 MAC（大小写不敏感）。
+        ip:       设备 IP（仅当 mac 为空时使用）。
+        db_path:  历史库路径；None 表示默认位置。
+        limit:    只取**最近** N 条（None 表示全部）。
+
+    Returns:
+        [{"snapshot_id", "time", "status", "ip", "mac", "hostname"}, ...]
+        没有任何记录时返回 []。
+    """
+    _mac = (mac or "").strip().upper()
+    _ip = (ip or "").strip()
+    if not _mac and not _ip:
+        return []
+
+    _cols = ("SELECT s.id AS snapshot_id, s.time AS time, d.status AS status, "
+             "d.ip AS ip, d.mac AS mac, d.hostname AS hostname "
+             "FROM snapshots s JOIN devices d ON d.snapshot_id = s.id ")
+    # COLLATE NOCASE 必须显式写：devices.mac 的默认排序规则是 BINARY，
+    # 只有比较式上也声明 NOCASE，才与 idx_dev_mac 的排序规则一致、索引才会被用上。
+    with _conn(db_path) as conn:
+        if _mac:
+            rows = conn.execute(
+                _cols + "WHERE d.mac = ? COLLATE NOCASE ORDER BY s.id ASC", (_mac,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                _cols + "WHERE d.ip = ? ORDER BY s.id ASC", (_ip,)
+            ).fetchall()
+    out = [dict(r) for r in rows]
+    if limit:
+        out = out[-int(limit):]
     return out
 
 

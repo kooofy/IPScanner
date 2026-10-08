@@ -379,9 +379,13 @@ class ScanMixin:
         self.act_clear.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        # 切到结果页：让用户立刻看到表格在填充（空状态页只服务于"尚无结果"）
+        self._show_results_page(True)
         self.table.setSortingEnabled(False)
         self.table.clear()
         self._ip_item_map.clear()
+        self._result_map.clear()
+        self.detail_panel.clear()
 
         self.scan_thread = ScanThread(
             self.ip_range_items,
@@ -500,8 +504,9 @@ class ScanMixin:
                     self._upsert_table_row(result)
                     result.mdns_updated = False
 
-            # 应用筛选（默认"仅在线"：扫描完成后隐藏离线终端）
+            # 应用筛选（默认"在线"：扫描完成后隐藏离线终端）并刷新筛选条计数
             self._filter_results()
+            self._refresh_filter_counts()
 
             # 端口探测方式回退告警（如 SYN/UDP 被系统拒绝后回退全连接）
             _warns = getattr(self.scan_thread.scanner, "warnings", []) if self.scan_thread else []
@@ -533,6 +538,8 @@ class ScanMixin:
             )
             # 扫描完成后自动执行冲突检测（静默，仅更新标记和状态栏）
             self._run_conflict_detection(silent=True)
+            # 概览页可见时同步刷新（不可见则跳过，避免白算一遍全量统计）
+            self._refresh_overview_if_visible()
             self.status_bar.showMessage(tr("扫描完成"))
         except Exception as e:
             sys.stderr.write(f"[ERR] _on_scan_finished 异常: {e}\n")
@@ -564,8 +571,11 @@ class ScanMixin:
         # 刷新树视图中所有行的冲突标记
         self._refresh_conflict_marks()
 
-        # 更新统计栏
+        # 更新统计栏与筛选条上的冲突计数
         self._update_stats()
+        self._refresh_filter_counts()
+        # 冲突数量是概览页「风险」区块的数据源，概览可见时一并刷新
+        self._refresh_overview_if_visible()
 
         # 审计：记录冲突检测结果
         _cf = ui_logic.count_conflicts(self._conflicts)
@@ -612,6 +622,7 @@ class ScanMixin:
             snapshots = history_store.list_snapshots(self.history_db)
             if not snapshots:
                 self._changes = []
+                self._apply_change_index()
                 if not silent:
                     QMessageBox.information(self, tr("变更检测"), tr("没有历史快照可供对比（首次扫描）。"))
                 return
@@ -622,11 +633,16 @@ class ScanMixin:
 
         if not prev_devices:
             self._changes = []
+            self._apply_change_index()
             if not silent:
                 QMessageBox.information(self, tr("变更检测"), tr("上次快照为空，无法对比。"))
             return
 
         self._changes = detect_changes(self.all_results, prev_devices)
+        # 把变更折叠成按 IP 的索引，供行内角标与「变更」筛选使用。
+        # 必须在扫描完成后的建行循环**之前**调用（_on_scan_finished 里
+        # _run_change_detection 早于建行），否则新设备的行建出来时索引还是空的。
+        self._apply_change_index()
 
         # 审计：记录变更检测
         summary = get_change_summary(self._changes)
@@ -653,6 +669,16 @@ class ScanMixin:
             return
         dlg = ChangeReportDialog(self._changes, parent=self, dark=self.dark_mode)
         dlg.exec_()
+
+    def _apply_change_index(self):
+        """重建变更索引，并刷新行内角标与筛选条计数。
+
+        只做"重建 + 刷新"，不碰 `self._changes` —— 便于在检测的各个提前
+        返回分支里复用（那些分支同样需要把旧角标清干净）。
+        """
+        self._rebuild_change_index()
+        self._refresh_change_marks()
+        self._refresh_filter_counts()
 
 
     def _show_subnet_utilization(self):

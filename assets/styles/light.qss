@@ -37,9 +37,10 @@ QPushButton:pressed {
 }
 QPushButton#primaryBtn {
     background-color: #F5F5F5;
-    color: #666666;
-    font-size: 20px;
-    padding: 6px 16px;
+    color: #333333;
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 4px 14px;
     border: 1px solid #CCCCCC;
     border-radius: 2px;
 }
@@ -56,11 +57,11 @@ QPushButton#primaryBtn:disabled {
 }
 QPushButton#stopBtn {
     background-color: #F5F5F5;
-    color: #666666;
+    color: #333333;
+    font-family: "Microsoft YaHei", "Segoe UI";
     font-weight: bold;
-    font-size: 20px;
-    letter-spacing: 2px;
-    padding: 6px 14px;
+    font-size: 13px;
+    padding: 4px 14px;
     border: 1px solid #CCCCCC;
     border-radius: 2px;
 }
@@ -77,8 +78,84 @@ QPushButton#stopBtn:disabled {
 }
 QPushButton#toolBtnGreen {
     background-color: #E8F5E9;
+    color: #1B5E20;
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 4px 12px;
     border: 1px solid #CCCCCC;
     border-radius: 2px;
+}
+QFrame#toolSep {
+    background-color: #D0D0D0;
+    border: none;
+}
+
+QToolButton#presetBtn {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 4px 10px;
+    border: 1px solid #ADADAD;
+    border-radius: 2px;
+    background-color: #E1E1E1;
+    color: #333333;
+}
+QToolButton#presetBtn:hover {
+    background-color: #D0D0D0;
+    border-color: #0078D7;
+}
+QToolButton#presetBtn::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 3px;
+}
+
+/* 结果筛选条 chip（UI_REVIEW P1-4） */
+QPushButton#filterChip {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    padding: 2px 6px;
+    min-height: 20px;
+    border: 1px solid #C4C4C4;
+    border-radius: 10px;
+    background-color: #F5F5F5;
+    color: #555555;
+}
+QPushButton#filterChip:hover {
+    background-color: #EAEAEA;
+    border-color: #0078D7;
+}
+QPushButton#filterChip:checked {
+    background-color: #0078D7;
+    border-color: #0078D7;
+    color: #FFFFFF;
+}
+QPushButton#filterChip:focus {
+    border-color: #0078D7;
+}
+
+/* 筛选条滚动容器（filter_bar.FilterChipScroll）：仅在 chip 放不下时出现。
+   高度与 FilterChipScroll._BAR_EXTENT 保持一致，否则滚动条会盖住 chip 文字。 */
+QScrollArea#filterScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#filterScroll > QWidget > QWidget {
+    background: transparent;
+}
+QScrollArea#filterScroll QScrollBar:horizontal {
+    height: 10px;
+    margin: 0;
+    background: transparent;
+}
+QScrollArea#filterScroll QScrollBar::handle:horizontal {
+    min-width: 24px;
+    border-radius: 3px;
+}
+QScrollArea#filterScroll QScrollBar::add-line:horizontal,
+QScrollArea#filterScroll QScrollBar::sub-line:horizontal {
+    width: 0;
+    border: none;
+    background: transparent;
 }
 QPushButton#toolBtnGreen:hover {
     background-color: #C8E6C9;
@@ -169,7 +246,14 @@ QTreeWidget {
     border-radius: 0px;
     selection-background-color: #CCE8FF;
     selection-color: #000000;
-    outline: 0;
+}
+/* 键盘用户必须看得出焦点在哪：去掉逐项的虚线框，改为容器级焦点边框
+   （原实现是 `outline: 0` 一刀切，键盘导航时完全没有视觉反馈） */
+QTreeWidget::item:focus {
+    outline: none;
+}
+QTreeWidget:focus {
+    border: 1px solid #0078D7;
 }
 QTreeWidget::item {
     padding: 4px 6px;
@@ -346,4 +430,240 @@ QToolTip {
     color: #333333;
     border: 1px solid #999999;
     padding: 3px 6px;
+}
+
+/* ── 结果区主从布局：详情面板 / 空状态 / 分隔条 (UI_REVIEW P0-1 / P0-2) ── */
+
+QSplitter#detailSplitter::handle {
+    background-color: #E4E4E4;
+    height: 4px;
+}
+QSplitter#detailSplitter::handle:hover {
+    background-color: #0078D7;
+}
+
+QWidget#detailPanel {
+    background-color: #FFFFFF;
+    border-top: 1px solid #CCCCCC;
+}
+QLabel#detailTitle {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    font-weight: bold;
+    color: #0078D7;
+}
+QFrame#detailSep {
+    background-color: #E4E4E4;
+    border: none;
+}
+QLabel#detailSection {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    font-weight: bold;
+    color: #0078D7;
+    padding-top: 4px;
+}
+QLabel#detailLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #8A8A8A;
+}
+QLabel#detailValue {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #222222;
+}
+QLabel#detailHint {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #9A9A9A;
+}
+QPushButton#detailAction {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    padding: 3px 10px;
+    min-height: 20px;
+    border: 1px solid #ADADAD;
+    border-radius: 2px;
+    background-color: #F0F0F0;
+    color: #333333;
+}
+QPushButton#detailAction:hover {
+    background-color: #E2E2E2;
+    border-color: #0078D7;
+}
+
+QWidget#emptyState {
+    background-color: #FFFFFF;
+    border: 1px solid #CCCCCC;
+}
+QLabel#emptyTitle {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 18px;
+    color: #333333;
+}
+QLabel#emptySubtitle {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    color: #666666;
+}
+QLabel#emptyHint {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #8A8A8A;
+}
+QPushButton#emptySecondary {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    padding: 5px 14px;
+    border: 1px solid #ADADAD;
+    border-radius: 2px;
+    background-color: #E1E1E1;
+    color: #333333;
+}
+QPushButton#emptySecondary:hover {
+    background-color: #D0D0D0;
+    border-color: #0078D7;
+}
+
+/* 状态栏 / 工具栏上的内联样式标签，统一收到 QSS（UI_REVIEW P2-2） */
+QLabel#rangeCountLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    font-weight: bold;
+    color: #0078D7;
+}
+QLabel#statsLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #555555;
+}
+QLabel#libraryLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #888888;
+}
+QFrame#hSep {
+    background-color: #CCCCCC;
+    border: none;
+}
+
+/* ── 结果视图切换（列表 / 概览）── */
+QWidget#viewToggle {
+    background: transparent;
+}
+QPushButton#viewBtn {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    padding: 2px 10px;
+    min-height: 20px;
+    border: 1px solid #C4C4C4;
+    border-radius: 2px;
+    background-color: #F5F5F5;
+    color: #555555;
+}
+QPushButton#viewBtn:hover {
+    background-color: #EAEAEA;
+    border-color: #0078D7;
+}
+QPushButton#viewBtn:checked {
+    background-color: #0078D7;
+    border-color: #0078D7;
+    color: #FFFFFF;
+}
+QPushButton#viewBtn:focus {
+    border-color: #0078D7;
+}
+
+/* ── 概览仪表盘（overview.py）── */
+QWidget#overviewPanel {
+    background-color: #FFFFFF;
+}
+QLabel#overviewTitle {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 15px;
+    font-weight: bold;
+    color: #333333;
+}
+QLabel#overviewScope {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #888888;
+}
+QFrame#statCard {
+    background-color: #F7F9FB;
+    border: 1px solid #E1E6EB;
+    border-radius: 4px;
+}
+QLabel#statValue {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 20px;
+    font-weight: bold;
+    color: #333333;
+}
+QLabel#statValue[tone="online"] {
+    color: #16A34A;
+}
+QLabel#statValue[tone="offline"] {
+    color: #DC2626;
+}
+QLabel#statValue[tone="accent"] {
+    color: #0078D7;
+}
+QLabel#statLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #64748B;
+}
+QFrame#overviewBlock {
+    background-color: #FBFCFD;
+    border: 1px solid #E8ECF0;
+    border-radius: 4px;
+}
+QLabel#overviewBlockTitle {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    font-weight: bold;
+    color: #555555;
+}
+QLabel#overviewName {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #333333;
+}
+QLabel#overviewCount {
+    font-family: "Consolas", "Microsoft YaHei";
+    font-size: 11px;
+    color: #333333;
+}
+QLabel#overviewCount[tone="warn"] {
+    color: #D97706;
+    font-weight: bold;
+}
+QLabel#overviewCount[tone="bad"] {
+    color: #DC2626;
+    font-weight: bold;
+}
+QLabel#overviewHint {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #888888;
+}
+QProgressBar#overviewBar {
+    background-color: #E8ECF0;
+    border: none;
+    border-radius: 4px;
+}
+QProgressBar#overviewBar::chunk {
+    background-color: #0078D7;
+    border-radius: 4px;
+}
+QProgressBar#overviewBar[tone="good"]::chunk {
+    background-color: #16A34A;
+}
+QProgressBar#overviewBar[tone="warn"]::chunk {
+    background-color: #D97706;
+}
+QProgressBar#overviewBar[tone="bad"]::chunk {
+    background-color: #DC2626;
 }

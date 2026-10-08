@@ -11,8 +11,14 @@ from scanner import (ScanResult, PROTOCOL_PORTS, format_ports_display,
                      SVC_SNMP, SVC_SMB, SVC_MDNS, service_label,
                      device_class_label, os_label)
 import audit_log
+from change_detector import (
+    CHANGE_NEW_DEVICE, CHANGE_DEVICE_GONE, CHANGE_IP_CHANGED,
+    CHANGE_MAC_CHANGED, CHANGE_HOSTNAME_CHANGED,
+)
 from conflict_detector import SEVERITY_HIGH
 from ui_icons import get_pc_icons
+from theme_tokens import token
+from favorites import favorite_key, star_icon
 from mac_library import MacMatcher
 from styles import _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9
 from ui_utils import _ip_to_int
@@ -26,6 +32,55 @@ from i18n import tr
 # 因此 +6 是安全的空槽。存在项自身上（而不是另开一个 dict）的好处是
 # 生命周期自动跟随项，清空表格时无需额外清理。
 _ROLE_SVC_SIG = Qt.UserRole + 6
+
+#: 顶层设备项的**规范 IP**（语言无关、且不受冲突标记前缀影响）。
+#
+# 为什么需要单独存：`_apply_conflict_mark` 会把 IP 列文本改成 `"⚠ 192.168.1.42"`，
+# 于是任何"读第 0 列文本当 IP 用"的代码（右键菜单、内置工具、重扫）都会拿到
+# 带前缀的脏字符串，进而在 `_launch_network_tool` / `_remote_power` 里拼出
+# 非法的目标地址。存一份原始 IP 到独立 role，读取方一律走 `_item_ip()`。
+_ROLE_DEV_IP = Qt.UserRole + 7
+
+#: 顶层设备项的收藏键（`mac:…` 或 `ip:…`，见 favorites.favorite_key）。
+#: 存在项上是为了让"收藏"筛选不必回查结果对象 —— 表格里只有渲染后的文本，
+#: 拿不到 MAC/IP 之外的字段。
+_ROLE_FAV_KEY = Qt.UserRole + 8
+
+#: 顶层设备项命中的**变更类型列表**（规范代码，见 change_detector.CHANGE_*）。
+#: 与 `_ROLE_FAV_KEY` 同理：筛选/角标只看行上已有的信息，不回查结果对象。
+_ROLE_CHANGE = Qt.UserRole + 9
+
+#: 顶层设备项的**基础 tooltip**（不含冲突/变更追加段）。
+#:
+#: 此前 `_apply_conflict_mark` 靠 `tip.split(tr(" | 冲突:"))[0]` 反向剥离自己
+#: 追加过的内容 —— 一旦文案改动或多方都想追加，就会把别人的段落一起切掉。
+#: 改为把 `_set_item_data` 生成的原始 tip 存进 role，最终 tooltip 由
+#: `_apply_row_marks()` 从「基础段 + 冲突段 + 变更段」重新拼出。
+_ROLE_BASE_TIP = Qt.UserRole + 10
+
+#: 变更类型 → 行内角标字形。
+#:
+#: 只放**一个字形**、不放文字标签：IP 列宽约 90–110px，`10.1.0.5 ＋新增`
+#: 会被直接截断成 `10.1.0.…`。完整描述交给 tooltip 与详情面板。
+#: 用全角 `＋` 而不是半角 `+`：半角加号在 Consolas 下与 IP 里的数字同宽，
+#: 视觉上会粘成一体。
+_CHANGE_GLYPH = {
+    CHANGE_NEW_DEVICE: "＋",
+    CHANGE_IP_CHANGED: "↑",
+    CHANGE_MAC_CHANGED: "⇄",
+    CHANGE_HOSTNAME_CHANGED: "✎",
+    CHANGE_DEVICE_GONE: "✗",
+}
+
+#: 变更类型的规范中文标签（与 `Change.type_label` 同源，但那边依赖 tr()，
+#: 这里需要在**拼接 tooltip 时**也能拿到，故单独存一份规范中文、由 tr() 包装）。
+_CHANGE_LABEL = {
+    CHANGE_NEW_DEVICE: "新增设备",
+    CHANGE_IP_CHANGED: "IP 变更",
+    CHANGE_MAC_CHANGED: "MAC 变更",
+    CHANGE_HOSTNAME_CHANGED: "主机名变更",
+    CHANGE_DEVICE_GONE: "设备消失",
+}
 
 class ResultTreeItem(QTreeWidgetItem):
     """结果树项：重写 < 以支持按列的数值排序（IP / 响应时间 / 序号）。
@@ -66,55 +121,102 @@ class TreeMixin:
         """收起所有结果项。"""
         self.table.collapseAll()
 
+    def _refresh_theme_marks(self):
+        """主题切换后刷新树项上**由 Python 设色**的部分。
+
+        QSS 覆盖不到 `QTreeWidgetItem` 的前景色，也覆盖不到预渲染的位图图标，
+        所以这几处必须显式重设，否则切到深色后它们仍是浅色版的颜色。
+        """
+        online_icon, offline_icon = get_pc_icons(self.dark_mode)
+        for ip, item in self._ip_item_map.items():
+            result = self._result_map.get(ip)
+            is_online = result.status == "online" if result is not None else None
+            # 第 0 列的前景色由 _apply_row_marks 统一决定（冲突红/橙、变更强调色、
+            # 否则默认色）。这里不要直接 setForeground(0, ...) —— 那会把变更角标
+            # 的颜色在切主题时抹成默认色。
+            self._apply_row_marks(item, ip)
+            if is_online is None:
+                continue
+            item.setForeground(1, QColor(token("online" if is_online else "offline",
+                                               self.dark_mode)))
+            item.setIcon(1, online_icon if is_online else offline_icon)
+            self._apply_favorite_mark(item, result)
+
     def _refresh_conflict_marks(self):
         """根据 _conflict_ips 刷新树视图中所有行的冲突标记。"""
         for ip, item in self._ip_item_map.items():
-            self._apply_conflict_mark(item, ip)
+            self._apply_row_marks(item, ip)
 
-    def _apply_conflict_mark(self, item, ip):
-        """为单个树项应用/清除冲突标记。"""
-        ctypes = self._conflict_ips.get(ip, [])
-        if ctypes:
-            # 有冲突：IP 列文字改为橙红色，状态列追加警告
+    def _refresh_change_marks(self):
+        """根据 _change_map 刷新树视图中所有行的变更角标。"""
+        for ip, item in self._ip_item_map.items():
+            self._apply_row_marks(item, ip)
+
+    def _change_types_for(self, ip) -> list:
+        """该 IP 命中的变更类型列表（规范代码，见 change_detector）。"""
+        return list(getattr(self, "_change_map", {}).get(ip, ()))
+
+    def _apply_row_marks(self, item, ip):
+        """合成第 0 列的文本 / 前景色 / tooltip。
+
+        冲突标记（`"⚠ "` 前缀）与变更角标（`"↑"` 后缀）都要改第 0 列文本，
+        此前两者各自 `setText`/`setToolTip`，后调用的那个会把前一个的结果
+        整个覆盖掉 —— 一台设备同时"有冲突"又"IP 变了"时必然丢一个标记。
+        本函数从 role 里读取各项标记、一次性合成，因此不会互相踩。
+
+        优先级：冲突（红/橙，更严重）> 变更（强调色）> 默认前景色。
+        """
+        base = item.data(0, _ROLE_DEV_IP) or ip or ""
+        if not base:
+            return
+        conflict_types = getattr(self, "_conflict_ips", {}).get(base, [])
+        change_types = self._change_types_for(base)
+
+        text = f"⚠ {base}" if conflict_types else base
+        glyph = "".join(_CHANGE_GLYPH.get(t, "") for t in change_types)
+        if glyph:
+            text += f" {glyph}"
+        item.setText(0, text)
+
+        if conflict_types:
             has_high = any(
                 c.severity == SEVERITY_HIGH
                 for c in self._conflicts
-                if ip in c.ips
+                if base in c.ips
             )
-            color = QColor(220, 38, 38) if has_high else QColor(217, 119, 6)
-            item.setForeground(0, color)
-            # 在 IP 列追加大括号标记
-            base_ip = ip
-            item.setText(0, f"⚠ {base_ip}")
-            # 工具提示追加冲突信息
-            tips = []
-            for c in self._conflicts:
-                if ip in c.ips:
-                    tips.append(f"[{c.severity_label}] {c.description}")
-            existing_tip = item.toolTip(0) or ip
-            # 去掉旧的冲突提示（如果有）
-            if tr(" | 冲突:") in existing_tip:
-                existing_tip = existing_tip.split(tr(" | 冲突:"))[0]
-            item.setToolTip(0, f"{existing_tip} | 冲突: {'; '.join(tips)}")
+            item.setForeground(0, QColor(token("danger" if has_high else "warn",
+                                               self.dark_mode)))
+        elif change_types:
+            item.setForeground(0, QColor(token("accent", self.dark_mode)))
         else:
-            # 无冲突：恢复正常
-            item.setText(0, ip)
             item.setForeground(0, self._default_fg_color())
-            existing_tip = item.toolTip(0) or ip
-            if tr(" | 冲突:") in existing_tip:
-                existing_tip = existing_tip.split(tr(" | 冲突:"))[0]
-                item.setToolTip(0, existing_tip)
+
+        # tooltip 整体重算：基础段 + 冲突段 + 变更段。不做"追加/剥离"，
+        # 因此不存在残留上一次标记的问题。
+        parts = [item.data(0, _ROLE_BASE_TIP) or base]
+        if conflict_types:
+            tips = [f"[{c.severity_label}] {c.description}"
+                    for c in self._conflicts if base in c.ips]
+            parts.append(tr("冲突") + ": " + "; ".join(tips))
+        if change_types:
+            parts.append(
+                tr("变更") + ": "
+                + "; ".join(tr(_CHANGE_LABEL.get(t, t)) for t in change_types)
+            )
+        item.setToolTip(0, " | ".join(p for p in parts if p))
 
     def _default_fg_color(self):
-        """返回当前主题的默认前景色。"""
-        if self.dark_mode:
-            return QColor(255, 255, 255)
-        return QColor(0, 0, 0)
+        """返回当前主题的默认前景色（取自语义色令牌，见 theme_tokens）。"""
+        return QColor(token("fg", self.dark_mode))
 
     # --- 表格操作 ---
 
     def _upsert_table_row(self, result: ScanResult):
         """新增或更新指定 IP 的项，避免同一 IP 重复显示"""
+        # 详情面板按 IP 取回完整结果对象。维护成字典而非线性扫 all_results：
+        # /16 网段下 all_results 可达 6.5 万条，键盘上下键切换选区时逐条线性
+        # 查找会让选中反馈明显卡顿。
+        self._result_map[result.ip] = result
         if result.ip in self._ip_item_map:
             item = self._ip_item_map[result.ip]
             self._update_item_data(item, result)
@@ -344,6 +446,7 @@ class TreeMixin:
         # IP地址列 (col 0) — 同时是树列(tree column)，展开三角在此列
         item.setText(0, result.ip)
         item.setData(0, Qt.UserRole, _ip_to_int(result.ip))  # IP 数值排序键
+        item.setData(0, _ROLE_DEV_IP, result.ip)             # 规范 IP（防冲突前缀污染）
         item.setFont(0, _FONT_CONSOLAS_10)
         item.setForeground(0, self._default_fg_color())
 
@@ -383,18 +486,21 @@ class TreeMixin:
                 tip += f" · MAC: {result.netbios_mac}"
         elif getattr(result, "netbios_error", ""):
             tip += f" · NetBIOS: 失败（{result.netbios_error}）"
+        # 存一份**基础 tooltip**：最终显示的 tooltip 由 `_apply_row_marks()`
+        # 在它之上拼接冲突段/变更段，避免多方各自"追加-剥离"同一段文本。
+        item.setData(0, _ROLE_BASE_TIP, tip)
         item.setToolTip(0, tip)
 
         # 状态列 (col 1)：预渲染电脑图标 (在线绿 / 离线灰) + 文字
         item.setData(1, Qt.UserRole, result.status)
         item.setData(1, Qt.DisplayRole, tr("在线") if result.status == "online" else tr("离线"))
         item.setTextAlignment(1, Qt.AlignCenter)
-        online_icon, offline_icon = get_pc_icons()
+        online_icon, offline_icon = get_pc_icons(self.dark_mode)
         if result.status == "online":
-            item.setForeground(1, QColor(22, 163, 74))
+            item.setForeground(1, QColor(token("online", self.dark_mode)))
             item.setIcon(1, online_icon)
         else:
-            item.setForeground(1, QColor(220, 38, 38))
+            item.setForeground(1, QColor(token("offline", self.dark_mode)))
             item.setIcon(1, offline_icon)
 
         item.setText(2, result.hostname or "—")
@@ -439,7 +545,12 @@ class TreeMixin:
         item.setToolTip(8, ports_full if ports_full != "—" else tr("无开放端口"))
         item.setFont(8, _FONT_CONSOLAS_9)
 
+        # 服务列必须与展开子项、详情面板同源：优先 services，缺失时回退
+        # service_details 的 proto 列表。否则会出现"详情面板里明明有 SMB、
+        # 但'有服务'筛选把该设备排除"这种自相矛盾的表现。
         svc = result.services or []
+        if not svc and result.service_details:
+            svc = [d.get("proto", "") for d in result.service_details if d.get("proto")]
         services_text = ", ".join(service_label(x) for x in svc) if svc else "—"
         item.setText(9, services_text)
         item.setData(9, Qt.UserRole, list(svc))
@@ -461,37 +572,116 @@ class TreeMixin:
 
         item.setText(12, result.remark or "—")
 
+        # 收藏星标（画在 IP 列的图标位，不污染文本 —— IP 列已经有冲突标记
+        # 会加 "⚠ " 前缀，再叠一个 "★" 会既难读又难解析）
+        self._apply_favorite_mark(item, result)
+
+        # 变更角标：把命中的变更类型写到 role，再统一合成第 0 列文本。
+        # 必须放在最后 —— `_apply_row_marks` 会重写第 0 列文本与前景色，
+        # 早于上面那些 setText/setForeground 调用就会被它们覆盖。
+        item.setData(0, _ROLE_CHANGE, self._change_types_for(result.ip))
+        self._apply_row_marks(item, result.ip)
+
+    def _apply_favorite_mark(self, item, result):
+        """刷新单个设备项的收藏键与星标。"""
+        item.setData(0, _ROLE_FAV_KEY, favorite_key(result))
+        store = getattr(self, "favorites", None)
+        if store is not None and store.is_favorite(result):
+            item.setIcon(0, star_icon())
+        else:
+            item.setIcon(0, QIcon())
+
+    def _refresh_favorite_marks(self):
+        """收藏变更后刷新所有行的星标。"""
+        for ip, item in self._ip_item_map.items():
+            result = self._result_map.get(ip)
+            if result is not None:
+                self._apply_favorite_mark(item, result)
+
 
     def _item_matches_filter(self, item):
-        """判断单个顶层项是否满足当前搜索/筛选条件"""
+        """判断单个顶层项是否满足当前搜索 + 筛选条件。
+
+        筛选身份是**规范 key**（见 `filter_bar.FILTERS`），不是翻译后的文本。
+        旧实现拿 `tr("仅在线")` 的翻译结果去比较，英文界面下每次比较都要重新
+        查表，且语言包一旦缺词条就会静默失配（筛选永远不生效）。
+        """
+        if not self._item_matches_key(item, getattr(self, "filter_key", "all")):
+            return False
         search_text = self.search_input.text().lower().strip()
-        filter_type = self.filter_combo.currentText()
+        if not search_text:
+            return True
+        row_text = ""
+        for col in [0, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]:
+            row_text += item.text(col).lower() + " "
+        return search_text in row_text
 
-        show = True
-        if filter_type == tr("仅在线"):
-            status = item.data(1, Qt.UserRole)
-            show = show and (status == "online")
-        elif filter_type == tr("仅离线"):
-            status = item.data(1, Qt.UserRole)
-            show = show and (status == "offline")
-        elif filter_type == tr("Excel已匹配"):
-            type_text = item.text(4)
-            show = show and (type_text != "—")
-        elif filter_type == tr("有服务"):
-            services_text = item.text(9)
-            show = show and (services_text != "—")
+    def _item_matches_key(self, item, key: str) -> bool:
+        """单个筛选项的匹配规则（与界面语言无关）。"""
+        if key == "online":
+            return item.data(1, Qt.UserRole) == "online"
+        if key == "offline":
+            return item.data(1, Qt.UserRole) == "offline"
+        if key == "services":
+            return item.text(9) not in ("", "—")
+        if key == "library":
+            return item.text(4) not in ("", "—")
+        if key == "conflict":
+            ip = item.data(0, _ROLE_DEV_IP)
+            return bool(ip and getattr(self, "_conflict_ips", {}).get(ip))
+        if key == "change":
+            # 读 role 而不是第 0 列文本：文本里是 `"↑"` 这类字形，既可能被
+            # 语言/字体影响，也与"是否变更"不是一对一（可能有多个角标）。
+            return bool(item.data(0, _ROLE_CHANGE))
+        if key == "favorite":
+            store = getattr(self, "favorites", None)
+            fav = item.data(0, _ROLE_FAV_KEY)
+            return bool(store is not None and fav and fav in store.keys())
+        return True  # "all"
 
-        if show and search_text:
-            row_text = ""
-            for col in [0, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]:
-                row_text += item.text(col).lower() + " "
-            show = search_text in row_text
+    def _compute_filter_counts(self) -> dict:
+        """统计每个筛选项命中的行数（供筛选条上的计数）。
 
-        return show
+        刻意**不**考虑搜索框内容：搜索是"在当前筛选里再搜"，计数若跟着每次
+        按键重算，/16 网段下每敲一个字符都要遍历 6.5 万行。
+        """
+        total = self.table.topLevelItemCount()
+        counts = {"all": total, "online": 0, "offline": 0,
+                  "services": 0, "conflict": 0, "change": 0,
+                  "library": 0, "favorite": 0}
+        store = getattr(self, "favorites", None)
+        fav_keys = store.keys() if store is not None else set()
+        for i in range(total):
+            item = self.table.topLevelItem(i)
+            if item.data(1, Qt.UserRole) == "online":
+                counts["online"] += 1
+            else:
+                counts["offline"] += 1
+            if item.text(9) not in ("", "—"):
+                counts["services"] += 1
+            if item.text(4) not in ("", "—"):
+                counts["library"] += 1
+            if item.data(0, _ROLE_CHANGE):
+                counts["change"] += 1
+            ip = item.data(0, _ROLE_DEV_IP)
+            if ip and getattr(self, "_conflict_ips", {}).get(ip):
+                counts["conflict"] += 1
+            fav = item.data(0, _ROLE_FAV_KEY)
+            if fav and fav in fav_keys:
+                counts["favorite"] += 1
+        return counts
 
+    def _refresh_filter_counts(self):
+        """把最新计数推给筛选条（仅在粗粒度事件后调用，见 _compute_filter_counts）。"""
+        bar = getattr(self, "filter_bar", None)
+        if bar is None:
+            return
+        counts = self._compute_filter_counts()
+        bar.set_counts_visible(counts["all"] > 0)
+        bar.set_counts(counts)
 
     def _filter_results(self):
-        """根据搜索和筛选条件显示/隐藏顶层项（默认"仅在线"：扫描时只显示在线终端）"""
+        """根据搜索和筛选条件显示/隐藏顶层项（默认"在线"：扫描时只显示在线终端）"""
         for i in range(self.table.topLevelItemCount()):
             item = self.table.topLevelItem(i)
             item.setHidden(not self._item_matches_filter(item))
@@ -515,11 +705,19 @@ class TreeMixin:
     # ── 内置网络工具 (P2) ──
 
     def _item_ip(self, item) -> str:
-        """取树项对应的顶层设备 IP（服务子项上溯到父设备）。"""
+        """取树项对应的顶层设备 IP（服务子项上溯到父设备）。
+
+        优先读 `_ROLE_DEV_IP`：冲突设备第 0 列文本是 `"⚠ <ip>"`，直接读文本会
+        把警告前缀当成 IP 的一部分。
+        """
         if item is None:
             return None
         while item.parent() is not None:
             item = item.parent()
+        ip = item.data(0, _ROLE_DEV_IP)
+        if ip:
+            return ip
+        # 回退：极少数手工构造、未走 _set_item_data 的项
         ip = item.text(0).strip()
         return ip or None
 
@@ -536,10 +734,17 @@ class TreeMixin:
             self._audit(audit_log.CAT_RESULT, tr("清空结果"), f"清除 {len(self.all_results)} 条扫描结果")
         self.table.clear()
         self._ip_item_map.clear()
+        self._result_map.clear()
         self.all_results.clear()
         self._conflicts.clear()
         self._conflict_ips.clear()
         self._changes.clear()
+        getattr(self, "_change_map", {}).clear()
+        # 清空后回到空状态引导页，并复位详情面板（否则会残留上一台设备的信息）
+        self.detail_panel.clear()
+        self.overview.clear()
+        self._show_results_page(False)
+        self._refresh_filter_counts()
         self._update_stats()
         self.act_export.setEnabled(False)
         self.act_clear.setEnabled(False)
@@ -558,81 +763,104 @@ class TreeMixin:
             return
 
         # 提前计算关键信息 (供复制 / 唤醒 / 地址库操作复用)
-        ip = self._item_text(top_item, 0)   # col 0 = IP地址
+        # 走 _item_ip 而非读第 0 列文本：冲突设备的第 0 列是 "⚠ <ip>"，
+        # 直接读文本会把警告前缀带进目标地址。
+        ip = self._item_ip(top_item) or ""
         mac = self._item_text(top_item, 3)  # col 3 = MAC地址
         lib_dev = self.library.match(ip, mac)
         if not mac and lib_dev:
             mac = (lib_dev.get("mac") or "").strip()
 
+        # 菜单按"动作语义"分组（UI_REVIEW P2-3）。
+        # 旧实现把 20+ 个动作平铺成一层：复制 4 项、工具 8 项、地址库 3 项…
+        # 用户要在一条长菜单里逐行扫，且"复制 MAC"和"远程关机"视觉权重相同。
         menu = QMenu(self)
 
-        act_copy_ip = QAction(tr("复制 IP"), self)
-        act_copy_ip.triggered.connect(lambda: self._copy_item_cell(top_item, 0))
-        menu.addAction(act_copy_ip)
-
-        act_copy_mac = QAction(tr("复制 MAC"), self)
-        act_copy_mac.triggered.connect(lambda: self._copy_item_cell(top_item, 3))
-        menu.addAction(act_copy_mac)
-
-        act_copy_host = QAction(tr("复制主机名"), self)
-        act_copy_host.triggered.connect(lambda: self._copy_item_cell(top_item, 2))
-        menu.addAction(act_copy_host)
-
-
-        act_copy_row = QAction(tr("复制整行"), self)
-        act_copy_row.triggered.connect(lambda: self._copy_item_row(top_item))
-        menu.addAction(act_copy_row)
-
+        _result = self._result_map.get(ip) if ip else None
 
         act_rescan = QAction(tr("重新扫描此 IP"), self)
         act_rescan.triggered.connect(lambda: self._rescan_single_item(top_item))
         menu.addAction(act_rescan)
 
-        if mac:
-            act_wol = QAction(tr("唤醒 (WoL)"), self)
-            act_wol.triggered.connect(lambda: self._wake_on_lan(mac))
-            menu.addAction(act_wol)
+        # 收藏（UI_REVIEW P1-3）：轻量"常看这几台"，与 MAC 地址库（资产台账）不同
+        if _result is not None:
+            _is_fav = self.favorites.is_favorite(_result)
+            act_fav = QAction(tr("取消收藏") if _is_fav else tr("加入收藏"), self)
+            act_fav.triggered.connect(lambda: self._toggle_favorite(_result))
+            menu.addAction(act_fav)
 
-        act_wmi_dev = QAction(tr("WMI 识别 (管理员)..."), self)
-        act_wmi_dev.triggered.connect(lambda: self._run_wmi_identification([ip]))
-        menu.addAction(act_wmi_dev)
+        menu.addSeparator()
 
-        act_netbios_dev = QAction(tr("NetBIOS 识别（轻量）"), self)
-        act_netbios_dev.triggered.connect(lambda: self._run_netbios_identification([ip]))
-        menu.addAction(act_netbios_dev)
+        # ── 复制 ▸ ──
+        copy_menu = menu.addMenu(tr("复制"))
+        for _label, _col in ((tr("IP 地址"), 0), (tr("MAC 地址"), 3), (tr("主机名"), 2)):
+            copy_menu.addAction(_label).triggered.connect(
+                lambda _checked=False, c=_col: self._copy_item_cell(top_item, c)
+            )
+        copy_menu.addSeparator()
+        copy_menu.addAction(tr("整行")).triggered.connect(
+            lambda: self._copy_item_row(top_item)
+        )
 
-        # 工具子菜单：快速启动内置网络工具
-        tool_menu = menu.addMenu(tr("工具"))
-        for label, tool in [
-            (tr("Ping (持续)"), "ping"),
-            (tr("Tracert (路由追踪)"), "tracert"),
-            (tr("Telnet"), "telnet"),
-            (tr("SSH"), "ssh"),
-            (tr("远程桌面 (RDP)"), "rdp"),
-            (tr("打开命令提示符"), "cmd"),
-            (tr("远程关机"), "shutdown"),
-            (tr("远程重启"), "reboot"),
-        ]:
-            tool_menu.addAction(label).triggered.connect(
-                lambda _checked=False, t=tool: (
-                    self._remote_power(t) if t in ("shutdown", "reboot")
-                    else self._launch_network_tool(t, ip)
+        # ── 连接 ▸：只列出该设备**确实开放**的服务，避免一屏点不通的入口 ──
+        conn_menu = menu.addMenu(tr("连接"))
+        _open_ports = set(_result.open_ports) if _result is not None else set()
+        for _proto, _port in (("HTTP", 80), ("HTTPS", 443), ("FTP", 21)):
+            if _port in _open_ports:
+                conn_menu.addAction(_proto).triggered.connect(
+                    lambda _checked=False, p=_proto: self._open_service(p, ip)
                 )
+        if 3389 in _open_ports:
+            conn_menu.addAction(tr("远程桌面 (RDP)")).triggered.connect(
+                lambda: self._open_service("RDP", ip)
+            )
+        for _label, _tool in ((tr("SSH"), "ssh"), (tr("Telnet"), "telnet"),
+                              (tr("打开命令提示符"), "cmd")):
+            conn_menu.addAction(_label).triggered.connect(
+                lambda _checked=False, t=_tool: self._launch_network_tool(t, ip)
             )
 
+        # ── 诊断 ▸ ──
+        diag_menu = menu.addMenu(tr("诊断"))
+        for _label, _tool in ((tr("Ping (持续)"), "ping"),
+                              (tr("Tracert (路由追踪)"), "tracert")):
+            diag_menu.addAction(_label).triggered.connect(
+                lambda _checked=False, t=_tool: self._launch_network_tool(t, ip)
+            )
 
+        # ── 管理 ▸ ──
+        admin_menu = menu.addMenu(tr("管理"))
+        if mac:
+            admin_menu.addAction(tr("唤醒 (WoL)")).triggered.connect(
+                lambda: self._wake_on_lan(mac)
+            )
+        admin_menu.addAction(tr("WMI 识别 (管理员)...")).triggered.connect(
+            lambda: self._run_wmi_identification([ip])
+        )
+        admin_menu.addAction(tr("NetBIOS 识别（轻量）")).triggered.connect(
+            lambda: self._run_netbios_identification([ip])
+        )
+        admin_menu.addSeparator()
+        admin_menu.addAction(tr("远程关机")).triggered.connect(
+            lambda: self._remote_power("shutdown")
+        )
+        admin_menu.addAction(tr("远程重启")).triggered.connect(
+            lambda: self._remote_power("reboot")
+        )
+
+        # ── 地址库 ▸ ──
+        lib_menu = menu.addMenu(tr("地址库"))
         if lib_dev:
-            act_edit_lib = QAction(tr("编辑地址库条目"), self)
-            act_edit_lib.triggered.connect(lambda: self._edit_library_entry(lib_dev["id"]))
-            menu.addAction(act_edit_lib)
-
-            act_del_lib = QAction(tr("从地址库删除"), self)
-            act_del_lib.triggered.connect(lambda: self._delete_library_entry(lib_dev["id"]))
-            menu.addAction(act_del_lib)
+            lib_menu.addAction(tr("编辑地址库条目")).triggered.connect(
+                lambda: self._edit_library_entry(lib_dev["id"])
+            )
+            lib_menu.addAction(tr("从地址库删除")).triggered.connect(
+                lambda: self._delete_library_entry(lib_dev["id"])
+            )
         else:
-            act_add_lib = QAction(tr("加入地址库..."), self)
-            act_add_lib.triggered.connect(lambda: self._add_to_library(ip, mac))
-            menu.addAction(act_add_lib)
+            lib_menu.addAction(tr("加入地址库...")).triggered.connect(
+                lambda: self._add_to_library(ip, mac)
+            )
 
         menu.exec_(self.table.viewport().mapToGlobal(pos))
 
@@ -656,7 +884,7 @@ class TreeMixin:
 
 
     def _rescan_single_item(self, item):
-        ip = item.text(0)  # col 0 = IP地址
+        ip = self._item_ip(item)
         if not ip:
             return
         self.range_input.setText(ip)

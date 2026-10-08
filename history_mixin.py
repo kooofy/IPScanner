@@ -40,6 +40,10 @@ class HistoryMixin:
                 snap["devices"], ts=snap["time"], max_keep=max_keep,
                 db_path=self.history_db,
             )
+            # 新快照入库后，详情面板缓存的"历史轨迹"就过期了（见
+            # MainWindow._device_timeline_for）。不清的话本次扫描新增的这条
+            # 永远不会出现在轨迹里，直到重启程序。
+            getattr(self, "_timeline_cache", {}).clear()
         except Exception as e:
             print(tr("保存历史快照失败:"), e)
 
