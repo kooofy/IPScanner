@@ -126,6 +126,17 @@ class TreeMixin:
 
         QSS 覆盖不到 `QTreeWidgetItem` 的前景色，也覆盖不到预渲染的位图图标，
         所以这几处必须显式重设，否则切到深色后它们仍是浅色版的颜色。
+
+        需要覆盖的位置必须与 `_set_item_data()` / `_add_service_children()` 对齐：
+
+        - 顶层项第 0 列（`_apply_row_marks`：冲突红/橙、变更强调色、默认色）
+        - 顶层项第 1 列（状态色 + 预渲染电脑图标）
+        - 顶层项第 4 列（制造商列，仅地址库命中时才是链接色）
+        - **所有子项**的第 0 列（服务 / WMI / NetBIOS，统一链接色）
+
+        漏掉后两项就是 P0-1：深色下它们仍是浅色蓝 `#2563EB`，在 `#252526` 上只有
+        2.96:1。回归测试 `tests/test_theme_marks.py` 用"切主题后的渲染结果必须与
+        直接以深色构建逐点一致"守这个不变量 —— 以后新增列/子项类型会被自动覆盖。
         """
         online_icon, offline_icon = get_pc_icons(self.dark_mode)
         for ip, item in self._ip_item_map.items():
@@ -135,12 +146,38 @@ class TreeMixin:
             # 否则默认色）。这里不要直接 setForeground(0, ...) —— 那会把变更角标
             # 的颜色在切主题时抹成默认色。
             self._apply_row_marks(item, ip)
-            if is_online is None:
-                continue
-            item.setForeground(1, QColor(token("online" if is_online else "offline",
-                                               self.dark_mode)))
-            item.setIcon(1, online_icon if is_online else offline_icon)
-            self._apply_favorite_mark(item, result)
+            if is_online is not None:
+                item.setForeground(1, QColor(token("online" if is_online else "offline",
+                                                   self.dark_mode)))
+                item.setIcon(1, online_icon if is_online else offline_icon)
+                self._apply_favorite_mark(item, result)
+                self._apply_manufacturer_mark(item, result)
+            # 子项刷新**不能**受上面的条件限制：即使拿不到 result 也要把颜色刷回来。
+            self._refresh_child_marks(item)
+
+    def _apply_manufacturer_mark(self, item, result):
+        """第 4 列（制造商）的链接色与字重。
+
+        判据只有"地址库命中"一处，初次渲染与切主题刷新共用 —— 两处判据一旦漂移，
+        切主题时就不知道该刷哪一行（漏刷即 P0-1，错刷会把未命中的行也标成链接色）。
+        未命中时**不设**前景色：`_set_item_data()` 也从没设过，让 QSS 的默认文字色生效。
+        """
+        if result is not None and result.excel_matched and result.device_type:
+            item.setForeground(4, self._link_color())
+            item.setFont(4, _FONT_YAHEI_BOLD_9)
+
+    def _refresh_child_marks(self, item):
+        """把子项（服务 / WMI / NetBIOS）的前景色刷到当前主题。
+
+        `_apply_row_marks()` 只管顶层项的第 0 列，不会递归到子项，所以必须单独走
+        一遍。子项文本都画在第 0 列（`setFirstColumnSpanned` 跨列显示）且统一用
+        链接色，因此这里不必区分类型。
+        """
+        color = self._link_color()
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child is not None:
+                child.setForeground(0, color)
 
     def _refresh_conflict_marks(self):
         """根据 _conflict_ips 刷新树视图中所有行的冲突标记。"""
@@ -521,9 +558,9 @@ class TreeMixin:
                 manufacturer_text = result.device_type
                 has_manufacturer = True
         item.setText(4, manufacturer_text)
-        if result.excel_matched and result.device_type:
-            item.setForeground(4, self._link_color())
-            item.setFont(4, _FONT_YAHEI_BOLD_9)
+        # 链接色与字重的判据集中在 _apply_manufacturer_mark()，与切主题刷新共用，
+        # 避免两处判据漂移（漂移的后果见该函数的说明）。
+        self._apply_manufacturer_mark(item, result)
 
         item.setText(5, result.location or "—")
 

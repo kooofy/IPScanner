@@ -27,6 +27,7 @@ from conflict_detector import SEVERITY_HIGH, SEVERITY_WARNING
 import ui_logic
 
 from styles import STYLE_SHEET, DARK_STYLE_SHEET
+from theme_tokens import token
 from main_window_tree import TreeMixin
 from detail_panel import DeviceDetailPanel
 from empty_state import EmptyStatePanel
@@ -63,6 +64,18 @@ COLUMN_PRESETS = (
     ("security", "安全", (0, 1, 8, 9, 10)),
     ("all", "全量", tuple(range(len(COLUMN_LABELS)))),
 )
+
+#: 列布局版本。**改动默认列布局（列序 / 默认可见列 / 默认列宽）时必须 +1。**
+#:
+#: `table/header_state` 是按**像素**持久化的整份表头状态（列宽、列序、隐藏列、
+#: 排序指示），载入时只在版本号一致时才恢复。版本号不跟着变的话，老用户会永远
+#: 沿用自己 ini 里那份旧状态 —— 新装的默认值对他们**完全无效**。P0-3 就是这么
+#: 来的：新装 6 列共 730px 放得下，老配置 10 列共 1264px 在 1024 宽的窗口里溢出
+#: 262px。代价是用户的自定义列宽会被重置一次，值得。
+#:
+#: v2=IP/序号/状态…; v3=新增「设备类型」列（设备指纹深度）;
+#: v4=新增「巡检」默认列宽预设。
+CURRENT_LAYOUT_VER = 4
 
 #: 主题模式：key → 规范中文标签。
 #:
@@ -1015,12 +1028,21 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         )
 
     def _link_color(self) -> QColor:
-        """服务链接/可点击文字颜色，随主题变化 (深色下提亮以保证对比度)。"""
-        return QColor(77, 166, 255) if self.dark_mode else QColor(37, 99, 235)
+        """服务链接/可点击文字颜色，随主题变化。
+
+        取值一律来自语义色令牌（`theme_tokens`），不要再写字面量 —— 这套蓝此前在
+        `main_window.py` / `main_window_tree.py` / `ui_icons.py` 里各硬编码了一份，
+        改一处漏一处就是"深色下某个标签还是浅色"。
+
+        深色下必须换成更亮的蓝：浅色蓝 `#2563EB` 在深色树底 `#252526` 上只有
+        2.96:1，低于 WCAG AA 的 4.5:1；`#4DA6FF` 是 5.99:1。这条量化口径由
+        `tests/test_theme_marks.py::LinkColorContrastTest` 守着。
+        """
+        return QColor(token("link", self.dark_mode))
 
     def _muted_color(self) -> QColor:
-        """次要描述文字颜色，随主题变化。"""
-        return QColor(150, 156, 166) if self.dark_mode else QColor(100, 116, 139)
+        """次要描述文字颜色，随主题变化（同样取自语义色令牌）。"""
+        return QColor(token("muted", self.dark_mode))
 
     # ── 扫描预设 (UI_REVIEW P1-3) ──
 
@@ -1260,16 +1282,21 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         if isinstance(_split, QByteArray):
             self.detail_splitter.restoreState(_split)
         # 列布局 (宽度 / 顺序 / 隐藏 / 排序指示)
-        # 仅在列布局版本一致时恢复 header_state，避免列序变更后旧状态错位
-        _CUR_LAYOUT_VER = 3  # v2=IP/序号/状态…; v3=新增"设备类型"列(设备指纹深度)
+        # 仅在列布局版本一致时恢复 header_state，避免列序变更后旧状态错位。
+        # 版本号的含义与"为什么改动默认布局必须 +1"见 CURRENT_LAYOUT_VER 的定义。
         saved_ver = int(s.value("table/layout_ver", 0) or 0)
         hdr_state = s.value("table/header_state")
-        if saved_ver == _CUR_LAYOUT_VER and isinstance(hdr_state, QByteArray):
+        if saved_ver == CURRENT_LAYOUT_VER and isinstance(hdr_state, QByteArray):
             self.table.header().restoreState(hdr_state)
         else:
             # 首次运行（或列布局版本已变）：套用「巡检」预设。默认把 13 列
             # 全铺出来会立刻横向滚动，且多数列在第一次扫描时都是空的。
             self._apply_column_preset("inspect")
+            # 排序指示也要显式定死。`QHeaderView` 的默认排序方向是**降序**，
+            # 而恢复出来的 header_state 里存的是用户上次点的方向 —— 于是同一个
+            # 版本会出现"新装 IP 从大到小、老配置从小到大"的行为不一致。
+            # 只在没有可恢复状态时才设，避免覆盖用户自己的排序选择。
+            self.table.sortByColumn(0, Qt.AscendingOrder)
         # 同步"显示列"菜单：自定义勾选态 + 预设单选态
         self._sync_col_actions()
         self._sync_preset_selection()
@@ -1302,7 +1329,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("window/geometry", self.saveGeometry())
         s.setValue("window/state", self.saveState())
         s.setValue("table/header_state", self.table.header().saveState())
-        s.setValue("table/layout_ver", 3)  # 列布局版本(v3=新增"设备类型"列)
+        s.setValue("table/layout_ver", CURRENT_LAYOUT_VER)
         # 详情面板高度（用户拖动分隔条后应保持）
         s.setValue("ui/detail_splitter", self.detail_splitter.saveState())
         s.setValue("view/filter_key", getattr(self, "filter_key", "online"))
@@ -1512,28 +1539,37 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.status_bar.showMessage(tr("已复制设备详情"))
 
     def _update_status_stats(self, total_ips=None):
-        """在底部状态栏右侧汇总显示已添加网段/IP 与扫描结果统计。"""
+        """在底部状态栏右侧汇总显示已添加网段/IP 与扫描结果统计。
+
+        每条统计都走 `tr()`。此前这里是裸 f-string —— f-string 天然躲过
+        `LanguagePackCompletenessTest`（它只收 `tr("…")` 的字面量参数），于是英文
+        界面下状态栏整段是中文，测试却全绿。参数化文案统一用 `{占位符}` 模板 +
+        `.format()`，与项目里其它带参数的文案保持一致。
+        """
         parts = []
         if self.ip_range_items:
             if total_ips is None:
                 total_ips = self._total_ips()
-            parts.append(f"已添加: {len(self.ip_range_items)} 个网段, {total_ips} 个IP")
+            parts.append(tr("已添加: {ranges} 个网段, {ips} 个IP").format(
+                ranges=len(self.ip_range_items), ips=total_ips))
         if self.all_results:
             total = len(self.all_results)
             online = sum(1 for r in self.all_results if r.status == "online")
             offline = sum(1 for r in self.all_results if r.status == "offline")
             unknown = total - online - offline
-            parts.append(f"{online} 开机状态, {offline} 关机状态, {unknown} 未知状态")
+            parts.append(
+                tr("{online} 开机状态, {offline} 关机状态, {unknown} 未知状态").format(
+                    online=online, offline=offline, unknown=unknown))
             matched = sum(1 for r in self.all_results if r.excel_matched)
             if self.library.is_loaded() and matched:
-                parts.append(f"{matched} 已匹配")
+                parts.append(tr("{n} 已匹配").format(n=matched))
             # 冲突计数
             high = sum(1 for c in self._conflicts if c.severity == SEVERITY_HIGH)
             warn = sum(1 for c in self._conflicts if c.severity == SEVERITY_WARNING)
             if high:
-                parts.append(f"⚠ {high} 冲突")
+                parts.append(tr("⚠ {n} 冲突").format(n=high))
             elif warn:
-                parts.append(f"⚠ {warn} 警告")
+                parts.append(tr("⚠ {n} 警告").format(n=warn))
         self.status_stats_label.setText("  |  ".join(parts))
 
     def _update_range_list(self):
@@ -1541,7 +1577,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             total_ips = self._total_ips()
             # 紧凑显示: 网段数 + IP总数 (保留兼容，但控件已隐藏)
             self.range_list_label.setText(
-                f"已添加: {len(self.ip_range_items)} 个网段, {total_ips} 个IP"
+                tr("已添加: {ranges} 个网段, {ips} 个IP").format(
+                    ranges=len(self.ip_range_items), ips=total_ips)
             )
             # Tooltip 显示完整列表
             tip = "\n".join(self.ip_range_items)
@@ -1549,7 +1586,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             self.range_input.setToolTip(tip)
             # 内部存储 (保持兼容)
             display = "\n".join(self.ip_range_items)
-            display += f"\n— 共 {len(self.ip_range_items)} 个网段, {total_ips} 个IP"
+            display += tr("\n— 共 {ranges} 个网段, {ips} 个IP").format(
+                ranges=len(self.ip_range_items), ips=total_ips)
             self.range_list.setPlainText(display)
             self._update_status_stats(total_ips)
         else:
