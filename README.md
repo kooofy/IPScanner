@@ -155,6 +155,30 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Windows 上的「未知发布者」与杀软误报
+
+发行版**未做代码签名**（EV 证书需要企业资质与年费），所以从 Release 下载的 zip 解压后
+首次运行，Windows 大概率弹出 **「Windows 已保护你的电脑」/ 未知发布者**。这是
+SmartScreen 对"没有签名记录的新程序"的默认反应，**不代表程序有问题**。
+
+继续运行：
+
+1. 在蓝色提示框里点「更多信息」→「仍要运行」；
+2. 若被浏览器先拦下，在下载项上右键 →「保留」。
+
+杀软 / EDR 误报是同一类原因：本工具要主动发送 ICMP / ARP / TCP / UDP 报文、读取 WMI、
+调用 `net view`，这些行为特征与恶意软件高度重叠，启发式引擎容易误判。被隔离时：
+
+- **Microsoft Defender**：`Windows 安全中心 → 病毒和威胁防护 → 保护历史记录`，
+  选中对应条目 →「允许在设备上」；也可向
+  [Microsoft 提交误报](https://www.microsoft.com/en-us/wdsi/filesubmission)。
+- **第三方杀软**：各家都有误报申诉入口（卡巴斯基 OpenTIP、火绒论坛、VirusTotal 的
+  引擎页面等），提交时附上本仓库地址能显著加快处理。
+
+想彻底绕开分发链上的信誉问题，也可以**从源码运行**（见上文「方式二：手动」），或
+自行执行 `pyinstaller IPScanner.spec` 构建 —— 自己编译的产物没有"未签名的新下载文件"
+这个触发条件。
+
 ### 使用流程
 
 1. 在顶部输入框填入网段（如 `192.168.1.0/24`），点「添加」或直接回车加入待扫列表；
@@ -316,7 +340,7 @@ IPScanner/
 │  ├─ dns.py                  #   mDNS / DNS-SD
 │  ├─ netbios.py              #   NetBIOS NBSTAT
 │  ├─ wmi.py                  #   WMI 远程识别
-│  ├─ snmp.py                 #   SNMP v1/v2c（团体字）
+│  ├─ snmp.py                 #   SNMP v2c（团体字）
 │  ├─ snmp_v3.py              #   SNMPv3 / USM（认证与加密）
 │  ├─ aes.py                  #   AES-128-CFB128（纯标准库，供 SNMPv3 加密）
 │  └─ constants.py            #   常量与语言无关的规范代码

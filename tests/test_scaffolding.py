@@ -273,6 +273,17 @@ class ReadmeTest(unittest.TestCase):
         self.assertIn("授权", self.readme)
         self.assertIn("免责声明", self.readme)
 
+    def test_snmp_version_claim_matches_the_implementation(self):
+        """README 不得声称支持 SNMP v1 —— 实现里没有这条路径。
+
+        `scanner/snmp.py` 构造报文时硬编码 `version=1`，那是 **v2c**（v1 应为 0），
+        全项目不存在任何 v1 代码路径。此前 README 的「项目结构」里写着
+        `snmp.py # SNMP v1/v2c`，与同文件「已知限制」里的「v1 不支持」自相矛盾 ——
+        用户读到哪一句完全取决于他先翻到哪一段。
+        """
+        self.assertNotIn("v1/v2c", self.readme)
+        self.assertIn("SNMP v2c", self.readme)
+
     def test_ci_badge_points_at_real_workflow(self):
         """README 的 CI 徽章必须指向**真实存在**的 workflow 文件。
 
