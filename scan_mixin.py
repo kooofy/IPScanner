@@ -214,36 +214,68 @@ class ScanMixin:
         return None
 
     def _scan_local_subnet(self):
-        """扫描本机所在子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
-        subnet = self._get_local_subnet()
-        if subnet:
-            self._fill_subnet_range(subnet)
-        else:
-            msg_warn(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
+        """扫描本机所在子网：填入网段并**立即开始扫描**。"""
+        self._scan_detected_subnet(
+            self._get_local_subnet(), tr("无法获取本机 IP，请手动输入扫描范围。"))
 
     def _scan_c_class_subnet(self):
-        """扫描 C 类子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
-        subnet = self._get_c_class_subnet()
-        if subnet:
-            self._fill_subnet_range(subnet)
-        else:
-            msg_warn(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
+        """扫描 C 类子网：填入网段并**立即开始扫描**。"""
+        self._scan_detected_subnet(
+            self._get_c_class_subnet(), tr("无法获取本机 IP，请手动输入扫描范围。"))
 
-    def _fill_subnet_range(self, subnet: str):
-        """将网段填入范围输入框并静默加入待扫列表（不弹重复提示、不自动扫描）。
+    def _scan_detected_subnet(self, subnet, missing_msg: str):
+        """探测到的网段 → 填入输入框 → 立即开扫（三个快捷入口共用）。
 
-        仿 Advanced IP Scanner：点击快捷按钮只是把 IP 范围放进输入框，
-        用户确认后再点"扫描"按钮才开始。
+        🔴 改造前这里**只填不扫**（原注释写"仿 AIP"），结果是空状态主 CTA、
+        工具栏「本机子网」、菜单项这三个入口点下去**界面上零变化**：
+
+        - 启动时 `_auto_detect_subnet()` 已经把同一个网段填进输入框了，
+          `setText()` 同样的文本不产生任何可见变化；
+        - 唯一的反馈写进 `range_list_label`，而它在创建时就
+          `setVisible(False)`（"保留兼容，但控件已隐藏"）；
+        - 状态栏也不动。
+
+        而按钮文案是「扫描本机所在子网」、空状态副标题写着"或**直接扫描**本机
+        所在子网" —— 承诺与实现相反，用户只能以为程序坏了。现在按文案来：
+        填好就开扫，可见反馈由扫描态摘要条（阶段 / 已扫 / 在线 / 用时 / 停止）提供。
+        """
+        if not subnet:
+            msg_warn(self, tr("提示"), missing_msg)
+            return
+        if not self._fill_subnet_range(subnet):
+            return          # 超出规模上限，`_fill_subnet_range` 已给出提示
+        self._start_scan()
+
+    def _fill_subnet_range(self, subnet: str) -> bool:
+        """把网段填入范围输入框并加入待扫列表；返回**是否已进入待扫列表**。
+
+        返回 False（网段非法、或超出规模上限）时网段**仍会填进输入框**，
+        方便用户手工拆小后再扫 —— 但调用方不应继续开扫。
+
+        ⚠️ 规模超限的提示必须在这里给。留给 `_start_scan` 的话，用户会连吃两个
+        弹窗（"范围过大" + "请先添加至少一个 IP 范围"），后者会把真正的原因盖住。
         """
         self.range_input.setText(subnet)
-        # 若尚未在列表中则静默添加；已存在则不重复添加、不弹窗。
-        # 本机所在网段可能异常大（如 /8 的园区网），超出规模上限时只填不加入。
-        if (subnet not in self.ip_range_items
-                and is_valid_range(subnet)
-                and count_ip_range(subnet) <= MAX_IPS_PER_RANGE):
-            self.ip_range_items.append(subnet)
-            self._update_range_list()
+        self.range_input.selectAll()
+        if subnet in self.ip_range_items:
+            self.range_input.setFocus()
+            return True
+        n = count_ip_range(subnet) if is_valid_range(subnet) else 0
+        if n == 0:
+            return False
+        # 本机所在网段可能异常大（如 /8 的园区网）：超出上限时只填不加入。
+        if n > MAX_IPS_PER_RANGE or self._total_ips() + n > MAX_IPS_TOTAL:
+            msg_warn(
+                self, tr("范围过大"),
+                tr("本机网段 {subnet} 有 {n} 个 IP，超过单次上限 {limit} 个，"
+                   "未加入待扫列表。\n\n请在输入框中拆成更小的范围"
+                   "（如按 /24 分批）后再扫描。").format(
+                    subnet=subnet, n=n, limit=MAX_IPS_PER_RANGE))
+            return False
+        self.ip_range_items.append(subnet)
+        self._update_range_list()
         self.range_input.setFocus()
+        return True
 
     def _total_ips(self) -> int:
         """待扫列表中的 IP 总数（只计数不构建列表，避免反复生成大列表）。"""
@@ -352,7 +384,26 @@ class ScanMixin:
         self.ip_range_items.clear()
         self._update_range_list()
 
+    def _scan_in_progress(self) -> bool:
+        """是否已有扫描在跑。
+
+        ⚠️ 不能只看 `self.scan_thread is not None` —— 它在 `__init__` 里是 None、
+        开扫时被赋值，但**扫描结束不会置回 None**，所以"非空"只说明"本进程扫过
+        至少一次"。只有 `isRunning()` 才是当前状态。
+        """
+        thread = getattr(self, "scan_thread", None)
+        return bool(thread is not None and thread.isRunning())
+
     def _start_scan(self):
+        # 🔴 防重复开扫。`_start_scan` 有 F5 / 菜单「开始扫描」/ 工具栏「扫描」/
+        # 空状态两个 CTA / 「本机子网」/「C 类子网」等多个入口，而扫描期间**只有
+        # 「扫描」按钮被禁用**，其余入口照样点得到。改造前那些入口最多只是
+        # "填一下输入框"（无害），现在它们会真的开扫 —— 少了这道闸门就会并发跑
+        # 两个 ScanThread，同一份结果表被两个线程同时 upsert。
+        if self._scan_in_progress():
+            self.status_bar.showMessage(tr("扫描正在进行中，请先停止或等待完成"))
+            return
+
         if not self.ip_range_items:
             text = self.range_input.text().strip()
             if text:

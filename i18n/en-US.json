@@ -807,5 +807,8 @@
   "不在地址库中的设备": "Device not in the address library",
 
   "未发现明显的服务暴露风险": "No obvious service exposure found",
-  "风险评分 {n}/100": "Risk score {n}/100"
+  "风险评分 {n}/100": "Risk score {n}/100",
+
+  "扫描正在进行中，请先停止或等待完成": "A scan is already running; stop it or wait for it to finish",
+  "本机网段 {subnet} 有 {n} 个 IP，超过单次上限 {limit} 个，未加入待扫列表。\n\n请在输入框中拆成更小的范围（如按 /24 分批）后再扫描。": "The local subnet {subnet} has {n} IPs, above the per-scan limit of {limit}; it was not added to the scan list.\n\nSplit it into smaller ranges (e.g. by /24) in the input box and scan again."
 }
