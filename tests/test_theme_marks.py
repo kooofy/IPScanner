@@ -74,13 +74,12 @@ def contrast_ratio(fg: str, bg: str) -> float:
 class _Harness(TreeMixin, QTreeWidget):
     """最小宿主：真实 `TreeMixin` + 真实的 `MainWindow` 取色方法。
 
-    把 `MainWindow._link_color` / `_muted_color` 以未绑定函数的形式挂上来，
+    把 `MainWindow._link_color` 以未绑定函数的形式挂上来，
     就能在**不构造整个 MainWindow** 的前提下测到真实取色逻辑 ——
-    如果它们哪天不再跟随主题，这里的断言会直接失败。
+    如果它哪天不再跟随主题，这里的断言会直接失败。
     """
 
     _link_color = MainWindow._link_color
-    _muted_color = MainWindow._muted_color
 
     def __init__(self, dark: bool = False):
         QTreeWidget.__init__(self)
@@ -276,14 +275,6 @@ class ThemeMarkPropagationTest(unittest.TestCase):
         self.assertEqual(host._link_color().name(), token("link", False).lower())
         host.dark_mode = True
         self.assertEqual(host._link_color().name(), token("link", True).lower())
-
-    def test_muted_color_comes_from_tokens(self):
-        host = _Harness(dark=False)
-        self._hosts.append(host)
-        host.dark_mode = False
-        self.assertEqual(host._muted_color().name(), token("muted", False).lower())
-        host.dark_mode = True
-        self.assertEqual(host._muted_color().name(), token("muted", True).lower())
 
 
 class LinkColorContrastTest(unittest.TestCase):

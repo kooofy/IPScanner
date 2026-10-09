@@ -1087,10 +1087,6 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         """
         return QColor(token("link", self.dark_mode))
 
-    def _muted_color(self) -> QColor:
-        """次要描述文字颜色，随主题变化（同样取自语义色令牌）。"""
-        return QColor(token("muted", self.dark_mode))
-
     # ── 扫描预设 (UI_REVIEW P1-3) ──
 
     def _current_scan_config(self) -> dict:
