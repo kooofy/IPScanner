@@ -810,5 +810,8 @@
   "风险评分 {n}/100": "Risk score {n}/100",
 
   "扫描正在进行中，请先停止或等待完成": "A scan is already running; stop it or wait for it to finish",
-  "本机网段 {subnet} 有 {n} 个 IP，超过单次上限 {limit} 个，未加入待扫列表。\n\n请在输入框中拆成更小的范围（如按 /24 分批）后再扫描。": "The local subnet {subnet} has {n} IPs, above the per-scan limit of {limit}; it was not added to the scan list.\n\nSplit it into smaller ranges (e.g. by /24) in the input box and scan again."
+  "本机网段 {subnet} 有 {n} 个 IP，超过单次上限 {limit} 个，未加入待扫列表。\n\n请在输入框中拆成更小的范围（如按 /24 分批）后再扫描。": "The local subnet {subnet} has {n} IPs, above the per-scan limit of {limit}; it was not added to the scan list.\n\nSplit it into smaller ranges (e.g. by /24) in the input box and scan again.",
+
+  "当前筛选下没有可导出的结果。请切换筛选条件，或清空搜索框。": "No results to export under the current filter. Switch to another filter, or clear the search box.",
+  "已按当前筛选跳过 {n} 条不可见记录（导出内容与界面所见一致）。": "Skipped {n} record(s) hidden by the current filter (the export matches what is on screen)."
 }

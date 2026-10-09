@@ -94,6 +94,16 @@ class ExportMixin:
             msg_warn(self, tr("提示"), tr("没有可导出的结果"))
             return
 
+        # 🔴 导出**跟随当前筛选**（与「打印」同一口径，见 `_visible_results`）。
+        # 以前这里直接传全量 `all_results`，而默认筛选是「仅在线」—— 屏幕上只有
+        # 在线设备、导出的文件里却塞满离线行。四种格式行为必须一致。
+        results = self._visible_results()
+        if not results:
+            msg_warn(
+                self, tr("提示"),
+                tr("当前筛选下没有可导出的结果。请切换筛选条件，或清空搜索框。"))
+            return
+
         default_name = f"扫描结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self, tr("导出扫描结果"), default_name,
@@ -117,25 +127,33 @@ class ExportMixin:
                 path += ".xlsx"
 
         if path.lower().endswith(".csv"):
-            success, msg = export_csv(self.all_results, path)
+            success, msg = export_csv(results, path)
             _fmt = "CSV"
         elif path.lower().endswith(".html"):
-            success, msg = export_html(self.all_results, path)
+            success, msg = export_html(results, path)
             _fmt = "HTML"
         elif path.lower().endswith(".json"):
-            success, msg = export_json(self.all_results, path)
+            success, msg = export_json(results, path)
             _fmt = "JSON"
         else:
-            success, msg = export_results(self.all_results, path)
+            success, msg = export_results(results, path)
             _fmt = "Excel"
 
         if success:
             self._audit(
                 audit_log.CAT_EXPORT, tr("导出扫描结果"),
-                f"{_fmt} · {len(self.all_results)} 条 · {os.path.basename(path)}",
+                f"{_fmt} · {len(results)} 条 · {os.path.basename(path)}",
             )
             self.status_bar.showMessage(msg)
-            msg_info(self, tr("导出成功"), msg)
+            # 有行被筛掉时补一句，否则"导出 71 条"与"扫到 1023 台"对不上，
+            # 用户会以为程序丢数据了。
+            skipped = len(self.all_results) - len(results)
+            note = ""
+            if skipped:
+                note = "\n\n" + tr(
+                    "已按当前筛选跳过 {n} 条不可见记录（导出内容与界面所见一致）。"
+                ).format(n=skipped)
+            msg_info(self, tr("导出成功"), msg + note)
         else:
             msg_warn(self, tr("导出失败"), msg)
 

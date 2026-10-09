@@ -692,6 +692,28 @@ class TreeMixin:
             row_text += item.text(col).lower() + " "
         return search_text in row_text
 
+    def _visible_results(self) -> list:
+        """当前筛选 + 搜索下**可见**的扫描结果 —— 界面上真正显示的那些行。
+
+        「打印」一直是"所见即所得"（`_print_results` 跳过 `item.isHidden()`），
+        但「导出」以前直接导出全量 `all_results`。默认筛选是「仅在线」，于是
+        屏幕上只有在线设备、导出的文件里却塞满离线行 —— 用户完全无从理解
+        （实测一次 `10.193.28.0/22` 扫描导出 1023 行，其中 952 行是离线）。
+        现在两处统一走本方法，口径不会再分叉。
+
+        顺序沿用 `all_results`（= 扫描顺序），而不是表格当前的排序：导出是数据
+        产物，顺序稳定比"跟屏幕上一致"更重要。
+        """
+        out = []
+        for result in self.all_results:
+            item = self._ip_item_map.get(result.ip)
+            # 表里没有对应行时无从判断可见性 —— 按"可见"处理，宁可多导出，
+            # 也不因为一次映射缺失就静默丢掉用户的数据。
+            if item is not None and item.isHidden():
+                continue
+            out.append(result)
+        return out
+
     def _item_matches_key(self, item, key: str) -> bool:
         """单个筛选项的匹配规则（与界面语言无关）。"""
         if key == "online":
