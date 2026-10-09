@@ -13,6 +13,7 @@
 3. **「设备消失」角标可能错贴到别的设备**。消失的设备本次没有行，若按它的
    旧 IP 归并、而该 IP 已被新设备占用，角标就会贴到那台在线的新设备上。
 """
+import datetime
 import os
 import sys
 import tempfile
@@ -389,11 +390,18 @@ class DetailPanelChangeTest(unittest.TestCase):
                         "最近的记录应排在上面")
 
     def test_timeline_entry_shows_state_and_ip(self):
+        # 时间戳按**本地时区**渲染（产品行为：用户要看自己机器上的时间），
+        # 所以期望值必须由同一时区推导。硬编码 "2023-11-15" 只对 UTC+8 成立：
+        # 1700000000 在 UTC 是 11-14 22:13、在 UTC+8 是 11-15 06:13，
+        # 于是断言在 CI（UTC runner）上必挂、在开发机上必过。
+        ts = 1700000000
         line = DeviceDetailPanel._format_timeline_entry(
-            {"time": 1700000000, "status": "online", "ip": "10.0.0.4"})
+            {"time": ts, "status": "online", "ip": "10.0.0.4"})
         self.assertIn(i18n.tr("在线"), line)
         self.assertIn("10.0.0.4", line)
-        self.assertIn("2023-11-15", line)
+        self.assertIn(datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d"), line)
+        # 再钉住格式：光断言"包含某日期"的话，把时间整段删掉也未必立刻暴露。
+        self.assertRegex(line, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
 
     def test_timeline_entry_survives_bad_timestamp(self):
         """时间戳坏了只丢时间，不该整行消失 —— 状态和 IP 仍有价值。"""
