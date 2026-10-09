@@ -342,7 +342,16 @@ IPScanner/
 │  ├─ network_tool_mixin.py   #   内置网络工具
 │  └─ main_window_tree.py     #   结果树构建与刷新
 │
-├─ ui_dialogs.py              # 各类对话框（含拓扑视图）
+├─ ui_dialogs/                # 各类对话框（按用途拆包，见 docs/refactor/）
+│  ├─ __init__.py             #   re-export 门面（from ui_dialogs import X 不变）
+│  ├─ _shared.py              #   对话框公共助手（截断 / 半透明 / 按主题取色）
+│  ├─ library.py              #   设备编辑 + 地址库管理
+│  ├─ credentials.py          #   WMI / SNMPv3 凭据采集
+│  ├─ history.py              #   历史快照对比 + 条件查询
+│  ├─ topology.py             #   网络拓扑视图（LLDP / CDP / 转发表）
+│  ├─ reports.py              #   冲突 / 子网利用率 / 变更报告
+│  ├─ audit.py                #   审计日志查看器
+│  └─ switch_port.py          #   交换机端口映射
 ├─ ui_logic.py                # 与 UI 解耦的纯业务逻辑（便于单测）
 ├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / OUI 更新）
 ├─ ui_icons.py                # 图标与调色板工具（PC 图标预渲染、工具栏矢量图标、深色 QPalette）
@@ -409,10 +418,11 @@ IPScanner/
 ├─ version.py                 # 版本号唯一来源（__version__）
 ├─ i18n.py + i18n/            # 国际化（zh-CN / en-US，语言包为 JSON）
 │
-├─ tests/                     # 单元测试（标准库 unittest，57 个文件）
+├─ tests/                     # 单元测试（标准库 unittest，58 个文件）
 ├─ docs/                      # 文档
 │  ├─ reviews/                #   历次代码 / 界面评审归档（均已关闭，只作历史记录）
-│  └─ ui-review-round2/       #   第二轮界面验收截图（18 张）
+│  ├─ ui-review-round2/       #   第二轮界面验收截图（18 张）
+│  └─ refactor/               #   重构方案（ui_dialogs 拆包等）
 │
 ├─ IPScanner.spec             # GUI 版 PyInstaller 配方（onedir，产物名带版本号）
 ├─ IPScanner_cli.spec         # CLI 版 PyInstaller 配方（onefile）

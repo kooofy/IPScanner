@@ -5,6 +5,8 @@
 > 发现新问题请另开一份新文档，**不要**往这里的文件追加条目。
 
 归档时间：2026-10-09 ｜ 归档时版本：v1.7.4
+更正：2026-10-09（v1.7.5）修正 P2-4 的错误结论 —— 三平台 CI 实为 `db84b58` 已落地，详见 §3。
+更新：2026-10-10 P1-4（`ui_dialogs.py` 拆分）落地 —— 已拆为 `ui_dialogs/` 包，详见 §3。
 
 ---
 
@@ -34,9 +36,9 @@
 
 ## 3. CODE_REVIEW.md 落地对照
 
-12 项意见中 **8 项已落地**，4 项明确未做（**已确认，不要再当"遗漏"重提**）。
+12 项意见中 **10 项已落地**，2 项明确未做（**已确认，不要再当"遗漏"重提**）。
 
-### 已落地（8 项）
+### 已落地（10 项）
 
 | 编号 | 事项 | 落地位置 |
 |---|---|---|
@@ -46,17 +48,28 @@
 | P1-1 | 端口扫描线程池反复新建（最坏 3200+ 线程） | `bounded_pool.py` |
 | P1-2 | ping 走子进程，与竞品有速度代差 | `scanner/ping.py`（原生 ICMP） |
 | P1-3 | `scan()` 400 行，扩展需改核心 | `scanner/engine.py` 重构 + `models.py` / `constants.py` 拆分 |
+| P1-4 | `ui_dialogs.py` 拆分（评审时 1747 行） | 已拆为 `ui_dialogs/` 包（8 子模块 + `__init__` re-export 门面），方案见 `docs/refactor/ui_dialogs_split_plan.md` |
 | P2-1 | 定时扫描 + 变更告警 | `scheduler.py` / `change_detector.py` / `notifier.py` |
 | P2-2 | 服务版本指纹库 | `service_fingerprints.py` |
+| P2-4 | macOS / Linux CI | `ci.yml` 的 `test-cross-platform` job（`ubuntu-latest` + `macos-latest`），由 `db84b58` 落地 |
 
-### 未落地（4 项）
+### 未落地（2 项）
 
 | 编号 | 事项 | 现状 |
 |---|---|---|
-| P1-4 | `ui_dialogs.py` 拆分（评审时 1747 行） | **未做**；已长到 **1898 行**，是全仓最大文件，列为下一轮结构改造目标 |
 | P2-3 | 插件 / Fetcher 机制 | **未做**；仍无 `plugins/` 目录 |
-| P2-4 | macOS / Linux CI | **未做**；`.github/workflows/ci.yml` 仍只有 `windows-latest` |
 | P2-5 | `oui.db` 入 Git LFS | **未做**；`.gitattributes` 无 lfs 条目 |
+
+> **更正（2026-10-09，v1.7.5）**：归档时把 **P2-4 记为「未做」是错的**。
+> `ci.yml` 早已有 `test-cross-platform` job（`ubuntu-latest` + `macos-latest`），
+> 由 `db84b58`（「代码评审后的一轮改进」）加入 —— 正是关闭其余 8 项的那个提交
+> （`git merge-base --is-ancestor f15341a db84b58` = YES，证明它在评审之后）。
+> 本次已把它移入「已落地」。其余 3 项「未做」经逐条核实属实。
+>
+> **更新（2026-10-10）**：**P1-4 已落地** —— `ui_dialogs.py`（1995 行）拆为
+> `ui_dialogs/` 包（8 子模块 + re-export 门面，最大文件 484 行），
+> 4 个 Mixin 与全部测试的导入面保持不变。方案与验证见
+> `docs/refactor/ui_dialogs_split_plan.md`。未落地项从 3 → **2**（P2-3 / P2-5）。
 
 ---
 

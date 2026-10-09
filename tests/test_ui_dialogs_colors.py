@@ -11,7 +11,7 @@
 
 本文件守三件事：
 
-1. **结构** —— `ui_dialogs.py` 里不得再出现色值字面量（`#hex` 或不透明的
+1. **结构** —— `ui_dialogs/` 包里不得再出现色值字面量（`#hex` 或不透明的
    `QColor(r, g, b)`）。带 alpha 的 4 参数 `QColor` 允许：那是半透明装饰
    （节点高光/描边），压在浅深两种画布上都只是"淡一点的边"，与主题无关，
    而令牌表刻意只存不透明色。
@@ -57,27 +57,40 @@ def _src(name):
         return fh.read()
 
 
+def _pkg_src():
+    """`ui_dialogs` 包内全部 `.py` 源码的拼接。
+
+    本文件原先直接读单个 `ui_dialogs.py`。拆成 `ui_dialogs/` 包后，色值字面量
+    与令牌引用散布在各子模块，只扫 `__init__.py`（门面）会让这些守卫**静默失效**，
+    因此统一改成扫描整个包。
+    """
+    pkg = os.path.join(ROOT, "ui_dialogs")
+    return "\n".join(
+        _src(os.path.join("ui_dialogs", fn))
+        for fn in sorted(os.listdir(pkg)) if fn.endswith(".py")
+    )
+
+
 def _qss(name):
     return _src(os.path.join("assets", "styles", name))
 
 
 class NoColorLiteralTest(unittest.TestCase):
-    """`ui_dialogs.py` 不得再出现色值字面量。"""
+    """`ui_dialogs/` 包不得再出现色值字面量。"""
 
     def test_no_hex_literal(self):
-        found = sorted(set(re.findall(r"#[0-9A-Fa-f]{3,8}\b",
-                                      _src("ui_dialogs.py"))))
+        found = sorted(set(re.findall(r"#[0-9A-Fa-f]{3,8}\b", _pkg_src())))
         self.assertEqual(
             found, [],
-            "ui_dialogs.py 里仍有色值字面量 %s。自绘/单元格着色请用 "
+            "ui_dialogs 包里仍有色值字面量 %s。自绘/单元格着色请用 "
             "theme_tokens.token()，普通控件请把配色收进 QSS。" % found)
 
     def test_no_opaque_qcolor_literal(self):
         found = sorted(set(re.findall(
-            r"QColor\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)", _src("ui_dialogs.py"))))
+            r"QColor\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)", _pkg_src())))
         self.assertEqual(
             found, [],
-            "ui_dialogs.py 里仍有不透明 QColor 字面量 %s，请改用 _theme_color()"
+            "ui_dialogs 包里仍有不透明 QColor 字面量 %s，请改用 _theme_color()"
             % found)
 
 
@@ -85,7 +98,7 @@ class TokenReferenceTest(unittest.TestCase):
     """引用的令牌名必须存在（拼错会静默返回空串）。"""
 
     def test_every_referenced_token_exists(self):
-        src = _src("ui_dialogs.py")
+        src = _pkg_src()
         names = set(re.findall(r"_theme_color\(\s*\"([a-z_]+)\"", src))
         names |= set(re.findall(r"\btoken\(\s*\"([a-z_]+)\"", src))
         unknown = sorted(n for n in names if n not in all_tokens())
@@ -139,7 +152,7 @@ class ThemeAwareTest(unittest.TestCase):
 
     def test_legend_keeps_the_colour_out_of_the_translation_key(self):
         """图例的色值不能再写进 `tr()` 的键 —— 否则改配色要同步改语言包。"""
-        src = _src("ui_dialogs.py")
+        src = _pkg_src()
         self.assertNotIn("tr(\"<span", src,
                          "图例仍把 HTML/颜色塞进了 tr() 的词条")
 

@@ -369,20 +369,22 @@ class GitAttributesTest(unittest.TestCase):
 class GraphicsItemImportTest(unittest.TestCase):
     """F821 回归守卫。
 
-    历史缺陷：`ui_dialogs.py` 的 `_add_switch_node()` 使用了
-    `QGraphicsRectItem`，但该名字从未被导入 —— 任何包含交换机的拓扑图
-    一点「绘制拓扑」就抛 NameError。ruff 的 F821 现在会拦住这类问题，
-    这里再补一道不依赖 CI 的直接断言。
+    历史缺陷：拓扑绘制的 `_add_switch_node()` 使用了 `QGraphicsRectItem`，
+    但该名字从未被导入 —— 任何包含交换机的拓扑图一点「绘制拓扑」就抛
+    NameError。ruff 的 F821 现在会拦住这类问题，这里再补一道不依赖 CI 的
+    直接断言。
+
+    （拆分后拓扑绘制位于 `ui_dialogs/topology.py`，断言随之指向该子模块。）
     """
 
     def test_topology_graphics_items_are_imported(self):
-        import ui_dialogs
+        from ui_dialogs import topology as _topo
         for name in ("QGraphicsRectItem", "QGraphicsEllipseItem",
                      "QGraphicsTextItem", "QGraphicsScene", "QGraphicsView"):
             with self.subTest(name=name):
                 self.assertTrue(
-                    hasattr(ui_dialogs, name),
-                    f"ui_dialogs 未导入 {name}，对应代码路径会抛 NameError",
+                    hasattr(_topo, name),
+                    f"ui_dialogs/topology.py 未导入 {name}，对应代码路径会抛 NameError",
                 )
 
 
