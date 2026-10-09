@@ -20,6 +20,7 @@ from ui_icons import get_pc_icons
 from theme_tokens import token
 from favorites import favorite_key, star_icon
 from mac_library import MacMatcher
+import risk_rules
 from styles import _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9
 from ui_utils import _ip_to_int
 from scanner.wmi import transport_label
@@ -241,6 +242,38 @@ class TreeMixin:
                 + "; ".join(tr(_CHANGE_LABEL.get(t, t)) for t in change_types)
             )
         item.setToolTip(0, " | ".join(p for p in parts if p))
+
+        # 风险列（P3-4）必须跟着这里一起刷：冲突一变，风险分数就变，而冲突正是
+        # 本函数读的 `_conflict_ips`。放在别处就会出现"IP 列标红了、风险列还写着
+        # 低风险"这种自相矛盾。切主题也走这条路径，所以自动跟上。
+        self._apply_risk_mark(item, self._result_map.get(base))
+
+    def _apply_risk_mark(self, item, result):
+        """第 13 列（风险）：等级 + 分数，按等级取语义色。
+
+        算法全在 `risk_rules.score_risk()`（纯逻辑、零 PyQt），这里只负责取色
+        与落字。
+
+        `result` 为 None 时**直接返回，不清空单元格** —— 首次渲染时
+        `_result_map` 可能还没登记（生产路径先登记再建行，但测试夹具与将来的
+        调用方未必），清空会把 `_set_item_data()` 刚写好的分数抹掉。
+
+        ⚠️ 这一列是**由 Python 设色**的，所以 `_refresh_theme_marks()` 必须能刷到
+        它。本函数只从 `_apply_row_marks()` 调用，初次渲染与切主题刷新共用同一条
+        路径 —— `tests/test_theme_marks.py` 的「切主题 == 直接以深色构建」守着。
+        """
+        if result is None:
+            return
+        conflicts = [c for c in getattr(self, "_conflicts", [])
+                     if result.ip in c.ips]
+        risk = risk_rules.score_risk(result, conflicts)
+        col = risk_rules.RISK_COLUMN
+        item.setText(col, risk_rules.format_risk(risk))
+        item.setToolTip(col, risk_rules.format_risk_tooltip(risk))
+        item.setTextAlignment(col, Qt.AlignCenter)
+        name = risk_rules.RISK_LEVEL_TOKEN.get(risk["level"])
+        if name:
+            item.setForeground(col, QColor(token(name, self.dark_mode)))
 
     def _default_fg_color(self):
         """返回当前主题的默认前景色（取自语义色令牌，见 theme_tokens）。"""
@@ -618,6 +651,10 @@ class TreeMixin:
         # 早于上面那些 setText/setForeground 调用就会被它们覆盖。
         item.setData(0, _ROLE_CHANGE, self._change_types_for(result.ip))
         self._apply_row_marks(item, result.ip)
+        # 风险列在这里**再**写一次：`_apply_row_marks` 是拿 `_result_map` 里的对象
+        # 算分的，而首次渲染时调用方未必已经登记（见 `_apply_risk_mark` 的说明）。
+        # 幂等，生产路径上两次结果相同。
+        self._apply_risk_mark(item, result)
 
     def _apply_favorite_mark(self, item, result):
         """刷新单个设备项的收藏键与星标。"""
@@ -649,6 +686,8 @@ class TreeMixin:
         if not search_text:
             return True
         row_text = ""
+        # 搜索列**刻意不含**第 1 列（状态，图标列）与第 13 列（风险，派生分数）：
+        # 搜"高"会命中所有高风险主机、搜"在线"会命中每一行，都是噪声而不是线索。
         for col in [0, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]:
             row_text += item.text(col).lower() + " "
         return search_text in row_text

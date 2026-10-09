@@ -53,6 +53,7 @@ from oui_mixin import OuiMixin
 COLUMN_LABELS = (
     "IP地址", "状态", "主机名", "MAC地址", "制造商", "位置", "使用者",
     "响应时间(ms)", "开放端口", "服务", "操作系统", "设备类型", "备注",
+    "风险",
 )
 
 #: 列预设：key → (规范中文标签, 可见列索引)。
@@ -60,13 +61,15 @@ COLUMN_LABELS = (
 #: 标签存**规范中文**、构建菜单时才 `tr()` —— 模块级调用 tr() 会因语言包
 #: 尚未加载而被冻结成中文（见 i18n 的惰性翻译约定）。
 #:
-#: 13 列同时铺开在 1366 宽的屏幕上必然横向滚动，而"哪几列该一起看"是有
+#: 14 列同时铺开在 1366 宽的屏幕上必然横向滚动，而"哪几列该一起看"是有
 #: 场景答案的：巡检看连通性、资产看归属、安全看暴露面。预设把这层知识
-#: 固化下来，用户不必自己拼 13 个 checkbox。
+#: 固化下来，用户不必自己拼 14 个 checkbox。
 COLUMN_PRESETS = (
     ("inspect", "巡检", (0, 1, 2, 3, 4, 7)),
     ("asset", "资产", (0, 1, 2, 3, 4, 5, 6, 11, 12)),
-    ("security", "安全", (0, 1, 8, 9, 10)),
+    # 「安全」= 暴露面视角：端口 / 服务 / 系统 / **风险**（P3-4）。
+    # 风险列必须跟着这一档，否则"看暴露面"的预设里恰恰缺了那句结论。
+    ("security", "安全", (0, 1, 8, 9, 10, 13)),
     ("all", "全量", tuple(range(len(COLUMN_LABELS)))),
 )
 
@@ -79,17 +82,20 @@ COLUMN_PRESETS = (
 #: 262px。代价是用户的自定义列宽会被重置一次，值得。
 #:
 #: v2=IP/序号/状态…; v3=新增「设备类型」列（设备指纹深度）;
-#: v4=新增「巡检」默认列宽预设。
+#: v4=新增「巡检」默认列宽预设;
+#: v5=新增「风险」列（P3-4），并把它加进「安全」列预设。
 #:
 #: ⚠️ 列宽还跟**语言**有关（见 `_COLUMN_WIDTH_OVERRIDES`），所以载入时除了版本号
 #: 还要比对 `table/header_lang`。语言变化**不需要** bump 版本号 —— 单独比对语言键
 #: 就够了，这样不会让所有老用户再被重置一次列布局。
-CURRENT_LAYOUT_VER = 4
+CURRENT_LAYOUT_VER = 5
 
 #: 默认列宽基线（中文）。索引对应 COLUMN_LABELS。
 _BASE_COLUMN_WIDTHS = {
     0: 130, 1: 78, 2: 140, 3: 220, 4: 100, 5: 120, 6: 90, 7: 90,
     8: 160, 9: 200, 10: 150, 11: 120, 12: 180,
+    # 13「风险」：单元格是「高 65」这种短文本，78px 够放下中英文两档。
+    13: 78,
 }
 
 #: 按语言覆盖的列宽 —— 只列**需要变**的列，其余沿用基线。
@@ -459,7 +465,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.sep.setFixedHeight(2)
         main_layout.addWidget(self.sep)
 
-        # ── 结果表格 (QTreeWidget, 13列, 支持展开/收起服务) ──
+        # ── 结果表格 (QTreeWidget, 支持展开/收起服务) ──
         self.table = QTreeWidget()
         # objectName 供 QSS 按行高档位选中它（见 design_tokens.ROW_HEIGHT）
         self.table.setObjectName("resultTable")
@@ -467,11 +473,15 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 这里先落默认值，真正的用户配置在 `_load_settings` 里读取并重新应用。
         self.row_density = DEFAULT_DENSITY
         self._apply_row_density()
-        self.table.setColumnCount(13)
-        self.table.setHeaderLabels([
-            tr("IP地址"), tr("状态"), tr("主机名"), tr("MAC地址"),
-            tr("制造商"), tr("位置"), tr("使用者"), tr("响应时间(ms)"), tr("开放端口"), tr("服务"), tr("操作系统"), tr("设备类型"), tr("备注")
-        ])
+        # 🔴 列数与表头**必须**从 `COLUMN_LABELS` 派生，不要再写一份字面量。
+        # 曾经两处各写一份 13 列表头，v5 加「风险」列时只改了 `COLUMN_LABELS` ——
+        # 于是列宽表（14 项）去 `resizeSection(13, 78)`，而表头只有 13 节，
+        # Qt 越界写直接搞坏堆：**表现为随机的段错误**（同一组用例有时第 1 个崩、
+        # 有时第 3 个崩，堆栈每次都指在不同行），排查代价极高。
+        # 派生之后这类不一致在结构上不可能再发生；`test_column_widths` 的
+        # `test_column_count_matches_labels` 会把它钉住。
+        self.table.setColumnCount(len(COLUMN_LABELS))
+        self.table.setHeaderLabels([tr(_name) for _name in COLUMN_LABELS])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -487,8 +497,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 隐藏服务列（服务通过展开子项显示，仿 Advanced IP Scanner）
         self.table.hideColumn(9)
 
-        # 列宽设置 (0=IP地址, 1=状态, 2=主机名, 3=MAC地址, 4=制造商, 5=位置, 6=使用者,
-        #            7=响应时间, 8=开放端口, 9=服务, 10=操作系统, 11=设备类型, 12=备注)
+        # 列宽设置（列索引见 `COLUMN_LABELS`：0=IP地址 … 12=备注, 13=风险）
         header = self.table.header()
         header.setStretchLastSection(False)
         # 宽度**按语言分流** —— 中文下够宽的列在英文下会省略（见
@@ -503,7 +512,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         # ── 结果区：空状态 ⇄ (表格 + 详情面板) 双页切换 (UI_REVIEW P0-1 / P0-2) ──
         #
-        # 原实现是"工具栏 + 一张 13 列表格"的单面板结构，有两个真实缺陷：
+        # 原实现是"工具栏 + 一张宽表格"的单面板结构，有两个真实缺陷：
         #   1. 没有详情区域 —— WMI/NetBIOS/SNMP/共享 等富信息只能塞进 tooltip
         #      和跨列子项，IP 列的 tip 会拼到 10 段以上，实际不可读；
         #   2. 启动后是一张全空白表格 —— 没有引导、没有主 CTA。
@@ -1249,7 +1258,18 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         `Online`，会省略成 `Onl…`）。
         """
         header = self.table.header()
+        count = self.table.columnCount()
         for _col, _w in column_widths_for(current_lang()).items():
+            # 🔴 越界护栏。`QHeaderView.resizeSection()` / `setSectionResizeMode()`
+            # 拿到超出列数的索引时**不报错，而是越界写坏堆** —— 症状是"随机某条
+            # 无关用例段错误"，堆栈每次都不一样（v5 加「风险」列时实测：同一组
+            # 用例有时第 1 条崩、有时第 3 条崩）。宁可少设一列宽度并告警，也不要
+            # 让整个进程随机崩掉。真正的护栏是
+            # `tests/test_column_widths.py::test_column_count_matches_labels`。
+            if _col >= count:
+                app_logging.get_logger(__name__).warning(
+                    "列宽表含不存在的列 %d（当前 %d 列），已跳过", _col, count)
+                continue
             header.setSectionResizeMode(_col, QHeaderView.Interactive)
             header.resizeSection(_col, _w)
 
@@ -1435,7 +1455,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
                 and isinstance(hdr_state, QByteArray)):
             self.table.header().restoreState(hdr_state)
         else:
-            # 首次运行（或列布局版本已变）：套用「巡检」预设。默认把 13 列
+            # 首次运行（或列布局版本已变）：套用「巡检」预设。默认把全部列
             # 全铺出来会立刻横向滚动，且多数列在第一次扫描时都是空的。
             self._apply_column_preset("inspect")
             self._apply_default_column_widths()

@@ -59,18 +59,20 @@ class ColumnWidthTableTest(unittest.TestCase):
     """默认列宽表本身。"""
 
     #: 中文基线 —— 与改造前逐字一致（中文用户的默认外观**不该**因为这次改动而变）。
+    #: 13「风险」是 v5 新增列（P3-4），单元格是「高 65」这种短文本，78px 够用。
     ZH_BASELINE = {
         0: 130, 1: 78, 2: 140, 3: 220, 4: 100, 5: 120, 6: 90, 7: 90,
-        8: 160, 9: 200, 10: 150, 11: 120, 12: 180,
+        8: 160, 9: 200, 10: 150, 11: 120, 12: 180, 13: 78,
     }
 
     def test_chinese_baseline_is_unchanged(self):
         self.assertEqual(column_widths_for("zh-CN"), self.ZH_BASELINE)
 
     def test_every_column_has_a_width(self):
+        n = len(COLUMN_LABELS)
         for lang in ("zh-CN", "en-US"):
-            self.assertEqual(sorted(column_widths_for(lang)), list(range(13)),
-                             msg="%s 的列宽表没有覆盖全部 13 列" % lang)
+            self.assertEqual(sorted(column_widths_for(lang)), list(range(n)),
+                             msg="%s 的列宽表没有覆盖全部 %d 列" % (lang, n))
 
     def test_english_is_wider_where_the_text_is_longer(self):
         zh = column_widths_for("zh-CN")
@@ -246,6 +248,86 @@ class NoWriteBackWhileLoadingTest(unittest.TestCase):
             self.assertEqual(after, before, msg="载入配置时改写了 ini")
         finally:
             mw2.close()
+
+
+class ColumnCountWiringTest(unittest.TestCase):
+    """🔴 表格实际列数必须与 `COLUMN_LABELS` 一致 —— 这条守着一个**段错误**。
+
+    背景（2026-10-09，v5 加「风险」列时实测）：`COLUMN_LABELS` 加到 14 项，
+    但 `_init_ui` 里另写了一份字面量 `setColumnCount(13)` 和 13 项表头。于是
+    `_apply_default_column_widths()` 对只有 13 节的表头调 `resizeSection(13, 78)`
+    —— Qt **不报错，直接越界写坏堆**，症状是**随机**段错误：同一组用例有时第 1
+    条崩、有时第 3 条崩，`faulthandler` 每次指在不同行（`isColumnHidden` /
+    `setChecked` …），排查代价极高，而且 unittest **连 `Ran N tests` 汇总行都
+    打不出来**（进程在汇总前就死了）。
+
+    修法是让列数与表头都从 `COLUMN_LABELS` **派生**（不再有第二份字面量）；
+    本测试把它钉住，另加 `_apply_default_column_widths()` 里的越界护栏兜底。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ipscanner_cc_")
+        self._orig_data_dir = main_window.data_dir
+        main_window.data_dir = lambda: self.tmp
+
+    def tearDown(self):
+        main_window.data_dir = self._orig_data_dir
+        i18n.init("zh-CN")
+
+    def _build(self, lang):
+        i18n.init(lang)
+        mw = main_window.MainWindow()
+        mw.show()
+        QApplication.processEvents()
+        return mw
+
+    def test_column_count_matches_labels(self):
+        mw = self._build("zh-CN")
+        try:
+            self.assertEqual(
+                mw.table.columnCount(), len(COLUMN_LABELS),
+                msg="表格列数与 COLUMN_LABELS 不一致 —— 列宽表会对不存在的列"
+                    "调 resizeSection，越界写坏堆（随机段错误）")
+            self.assertEqual(mw.table.header().count(), len(COLUMN_LABELS))
+        finally:
+            mw.close()
+
+    def test_header_labels_are_exactly_the_labels_table(self):
+        mw = self._build("zh-CN")
+        try:
+            got = tuple(mw.table.headerItem().text(i)
+                        for i in range(mw.table.columnCount()))
+            self.assertEqual(got, COLUMN_LABELS,
+                             msg="表头与 COLUMN_LABELS 不是一一对应（列序或名称漂了）")
+        finally:
+            mw.close()
+
+    def test_header_labels_follow_the_language(self):
+        """表头必须**惰性**取自 `COLUMN_LABELS` 的 `tr()`，不能是又一份字面量。"""
+        mw = self._build("en-US")
+        try:
+            got = tuple(mw.table.headerItem().text(i)
+                        for i in range(mw.table.columnCount()))
+            self.assertEqual(got, tuple(i18n.tr(n) for n in COLUMN_LABELS),
+                             msg="英文界面下表头没有按语言翻译")
+            self.assertNotEqual(got, COLUMN_LABELS,
+                                msg="英文界面下表头仍是中文，翻译没生效")
+        finally:
+            mw.close()
+
+    def test_risk_column_is_reachable_and_visible_in_security_preset(self):
+        """v5 的「风险」列必须真能显示出来（列数对不上时它会静默消失）。"""
+        from risk_rules import RISK_COLUMN
+
+        mw = self._build("zh-CN")
+        try:
+            self.assertLess(RISK_COLUMN, mw.table.columnCount(),
+                            msg="风险列的索引超出实际列数，单元格写不进去")
+            mw._apply_column_preset("security")
+            self.assertFalse(mw.table.isColumnHidden(RISK_COLUMN),
+                             msg="「安全」预设里没有把风险列显示出来")
+        finally:
+            mw.close()
 
 
 if __name__ == "__main__":

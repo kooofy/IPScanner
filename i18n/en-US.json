@@ -789,5 +789,23 @@
   "<p>本工具会主动向目标主机发送 ICMP、ARP、TCP、UDP 报文并进行服务探测。</p>": "<p>This tool actively sends ICMP, ARP, TCP and UDP packets to target hosts and probes their services.</p>",
   "<p><b>请仅对你自己拥有、或已获得明确书面授权的网络使用。</b></p>": "<p><b>Use it only on networks you own, or for which you have explicit written authorization.</b></p>",
   "<p>未经授权扫描他人网络在多数国家和地区属于违法行为（例如中国《网络安全法》《刑法》第 285 条、美国《计算机欺诈与滥用法》CFAA、英国《计算机滥用法》）。使用者需自行承担全部法律责任，作者不对任何误用或由此造成的损失负责。</p>": "<p>Scanning networks without authorization is illegal in most countries and regions (for example China's Cybersecurity Law and Article 285 of its Criminal Law, the US Computer Fraud and Abuse Act (CFAA), and the UK Computer Misuse Act). You bear full legal responsibility for your own use; the author is not liable for any misuse or any loss caused by it.</p>",
-  "我已获得授权，继续使用": "I have authorization — continue"
+  "我已获得授权，继续使用": "I have authorization — continue",
+
+  "高": "High",
+  "中": "Medium",
+  "低": "Low",
+  "—": "—",
+
+  "Telnet 明文管理": "Telnet (cleartext management)",
+  "VNC 远程桌面（常无认证）": "VNC remote desktop (often unauthenticated)",
+  "FTP 明文凭据": "FTP (cleartext credentials)",
+  "TFTP 无认证文件传输": "TFTP (unauthenticated file transfer)",
+  "SNMP v2c 团体字明文": "SNMP v2c (cleartext community string)",
+  "HTTP 明文管理面": "HTTP (cleartext web management)",
+  "MAC 地址冲突": "MAC address conflict",
+  "主机名冲突": "Hostname conflict",
+  "不在地址库中的设备": "Device not in the address library",
+
+  "未发现明显的服务暴露风险": "No obvious service exposure found",
+  "风险评分 {n}/100": "Risk score {n}/100"
 }

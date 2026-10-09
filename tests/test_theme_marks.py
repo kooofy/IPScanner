@@ -32,7 +32,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QTreeWidget
 
 import i18n
-from main_window import MainWindow
+from main_window import COLUMN_LABELS, MainWindow
 from main_window_tree import TreeMixin
 from scanner.models import ScanResult
 from theme_tokens import token
@@ -83,7 +83,10 @@ class _Harness(TreeMixin, QTreeWidget):
 
     def __init__(self, dark: bool = False):
         QTreeWidget.__init__(self)
-        self.setColumnCount(13)
+        # 列数跟 `COLUMN_LABELS` 走 —— 写死 13 会在加列时让 `_snapshot()` 少采一格，
+        # 采样点列表（`tracked`）里的新列就会 KeyError。列数本身另有
+        # `test_column_widths` 的 `test_column_count_matches_labels` 守着。
+        self.setColumnCount(len(COLUMN_LABELS))
         self.table = self
         self.dark_mode = dark
         # `_refresh_theme_marks` / `_apply_row_marks` 依赖的这些状态，
@@ -205,10 +208,11 @@ class ThemeMarkPropagationTest(unittest.TestCase):
             "采样点太少（%d 个），说明夹具没造出子项或列数不对，测试形同虚设"
             % len(light))
 
-        # 只比对**确实由 Python 设色**的位置：第 0 / 1 / 4 列与全部子项。
+        # 只比对**确实由 Python 设色**的位置：第 0 / 1 / 4 / 13 列与全部子项。
+        # 第 13 列是 v5 新增的「风险」列（P3-4），按等级取语义色（含 `—` 的 muted）。
         # 其余列（主机名、位置、备注…）刻意不设前景色，交给 QSS —— 它们在
         # `foreground()` 上读回来都是未设的默认黑，本就不该随主题变化。
-        tracked = ["top[0]", "top[1]", "top[4]"]
+        tracked = ["top[0]", "top[1]", "top[4]", "top[13]"]
         tracked += [k for k in light if k.startswith("child[")]
         for key in tracked:
             self.assertNotEqual(
