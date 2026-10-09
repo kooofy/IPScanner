@@ -243,5 +243,115 @@ class TooltipTest(_DialogCase):
         self.assertIn("10.0.0.1", tips[0])
 
 
+class RealTopologyViewTest(_DialogCase):
+    """真实拓扑（LLDP/CDP/转发表）的绘制。
+
+    历史缺陷：`_build_real_topology` 里 `unassigned` 存的是**节点对象**、比较用的
+    却是 id 字符串，永远匹配不上，最后 `node_pos[node]` 对不可哈希的 dataclass
+    直接抛 TypeError —— 只要有一台设备没挂在交换机上，整个视图就崩。
+    本类同时守住"图例只列真的出现过的链路种类"。
+    """
+
+    def _topology(self, links, nodes):
+        from topology_discovery import TopoLink, TopoNode, Topology
+        topo = Topology()
+        for nid, kw in nodes:
+            topo.nodes.append(TopoNode(id=nid, label=kw.pop("label", nid), **kw))
+        topo.links = [TopoLink(*l) for l in links]
+        return topo
+
+    def _dialog_with(self, topo):
+        results = [ScanResult(ip=n.ip or n.id, status="online", hostname=n.label)
+                   for n in topo.nodes]
+        dlg = ui_dialogs.TopologyDialog(results, "10.0.0.1", False, topology=topo)
+        self.addCleanup(dlg.deleteLater)
+        return dlg
+
+    @staticmethod
+    def _boxes(dlg):
+        from PyQt5.QtWidgets import QGraphicsRectItem
+        return [i for i in dlg.scene.items() if isinstance(i, QGraphicsRectItem)]
+
+    @staticmethod
+    def _dots(dlg):
+        return [i for i in dlg.scene.items()
+                if isinstance(i, QGraphicsEllipseItem)
+                and abs(i.rect().width() - 20.0) < 0.5]
+
+    def _small_topo(self):
+        return self._topology(
+            [("10.0.0.1", "10.0.0.2", "GE0/0", "", "LLDP"),
+             ("10.0.0.2", "10.0.0.50", "GE1/0/1", "", "FDB"),
+             ("10.0.0.2", "10.0.0.51", "GE1/0/2", "", "FDB")],
+            [("10.0.0.1", {"is_switch": True, "kind": "gateway",
+                           "is_gateway": True, "label": "gw"}),
+             ("10.0.0.2", {"is_switch": True, "kind": "switch",
+                           "label": "core-sw"}),
+             ("10.0.0.50", {"label": "pc-50"}),
+             ("10.0.0.51", {"label": "pc-51"})])
+
+    def test_real_topology_is_rendered_not_the_star(self):
+        dlg = self._dialog_with(self._small_topo())
+        self.assertTrue(dlg._real_rendered)
+        self.assertEqual(len(self._boxes(dlg)), 2, "网关 + 交换机两个方块")
+        self.assertEqual(len(self._dots(dlg)), 2, "两台终端")
+        self.assertEqual(len(self._lines(dlg)), 3, "三条链路")
+
+    def test_unattached_hosts_do_not_crash_the_view(self):
+        """没有挂在任何交换机上的设备必须被画出来，而不是抛 TypeError。"""
+        topo = self._small_topo()
+        from topology_discovery import TopoNode
+        topo.nodes.append(TopoNode(id="10.0.0.99", label="orphan"))
+        dlg = self._dialog_with(topo)      # 旧实现在这里抛 TypeError
+        self.assertTrue(dlg._real_rendered)
+        self.assertEqual(len(self._dots(dlg)), 3)
+
+    def test_gateway_box_sits_above_the_switch(self):
+        dlg = self._dialog_with(self._small_topo())
+        boxes = sorted(self._boxes(dlg), key=lambda i: i.rect().top())
+        self.assertLess(boxes[0].rect().top(), boxes[1].rect().top())
+
+    def test_legend_only_lists_protocols_that_actually_appear(self):
+        from theme_tokens import token
+        dlg = self._dialog_with(self._small_topo())
+        text = dlg.legend.text()
+        self.assertIn("LLDP", text)
+        # 转发表的图例文案是翻译过的（中文"转发表"/英文 FDB），
+        # 所以按**色值**断言 —— 色值语言无关，且能证明用的是 fdb 令牌
+        self.assertIn(token("fdb", False), text)
+        self.assertNotIn("CDP", text, "没有任何 CDP 链路却在图例里写了 CDP")
+
+    def test_legend_shows_cdp_when_cdp_links_exist(self):
+        topo = self._topology(
+            [("10.0.0.2", "10.0.0.50", "Fa0/1", "", "CDP")],
+            [("10.0.0.2", {"is_switch": True, "kind": "switch"}),
+             ("10.0.0.50", {})])
+        dlg = self._dialog_with(topo)
+        self.assertIn("CDP", dlg.legend.text())
+
+    def test_no_links_falls_back_to_star_and_explains_why(self):
+        from topology_discovery import Topology
+        topo = Topology(note="没有链路的原因")
+        results = [ScanResult(ip="10.0.0.1", status="online"),
+                   ScanResult(ip="10.0.0.9", status="online")]
+        dlg = ui_dialogs.TopologyDialog(results, "10.0.0.1", False, topology=topo)
+        self.addCleanup(dlg.deleteLater)
+        self.assertFalse(dlg._real_rendered)
+        self.assertIn("没有链路的原因", dlg.legend.text(),
+                      "回退星型时必须说明原因，否则用户只会以为工具识别不出来")
+
+    def test_isolated_infrastructure_node_is_still_drawn(self):
+        """被识别出来的交换机即使一条链路都没有，也不能从图上消失。"""
+        topo = self._topology(
+            [],
+            [("10.0.0.2", {"is_switch": True, "kind": "switch",
+                           "label": "core-sw"})])
+        from topology_discovery import TopoLink
+        topo.links = [TopoLink("10.0.0.2", "10.0.0.2")]   # 自环：只为进入真实路径
+        dlg = self._dialog_with(topo)
+        self.assertTrue(dlg._real_rendered)
+        self.assertEqual(len(self._boxes(dlg)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

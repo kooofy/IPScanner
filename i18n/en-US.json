@@ -816,5 +816,22 @@
   "已按当前筛选跳过 {n} 条不可见记录（导出内容与界面所见一致）。": "Skipped {n} record(s) hidden by the current filter (the export matches what is on screen).",
 
   "已隐藏 {n} 台离线设备": "{n} offline device(s) hidden",
-  "另有 {n} 台在线设备未显示": "{n} more online device(s) not shown"
+  "另有 {n} 台在线设备未显示": "{n} more online device(s) not shown",
+
+  "LLDP/CDP 发现: {ip}": "LLDP/CDP discovery: {ip}",
+  "候选设备均无 SNMP 响应，改为逐台探测...": "No candidate answered SNMP; probing every online device instead...",
+  "另有 {n} 个 MAC 未匹配到扫描结果": "{n} more MAC address(es) did not match any scan result",
+  "拓扑发现完成: {nodes} 节点, {links} 链路": "Topology discovery complete: {nodes} nodes, {links} links",
+  "未发现可管理的交换机/路由器（需在其上开启 SNMP），已按 /24 网段分层展示": "No manageable switch/router found (SNMP must be enabled on it); showing a /24 subnet hierarchy instead",
+  "未发现真实链路：请在交换机/路由器上开启 SNMP（v2c 团体字或 SNMPv3 用户）并启用 LLDP/CDP，拓扑才能按实际连接绘制": "No real link discovered: enable SNMP on the switch/router (a v2c community string or an SNMPv3 user) and turn on LLDP/CDP so the topology can be drawn from actual connections",
+  "正在识别网络设备（SNMP）...": "Identifying network devices (SNMP)...",
+  "网络设备识别: {ip}/{total}": "Network device identification: {ip}/{total}",
+  "识别到 {n} 台可管理的网络设备": "Found {n} manageable network device(s)",
+  "识别到 {n} 台网络设备": "{n} network device(s) identified",
+  "读取转发表: {ip}": "Reading forwarding table: {ip}",
+  "转发表": "FDB",
+
+  "已通过 SNMP 识别到 {n} 台网络设备，但它们没有上报 LLDP/CDP 邻居、转发表也不可用，因此无法还原实际连接": "SNMP identified {n} network device(s), but they reported no LLDP/CDP neighbors and their forwarding tables are unavailable, so the actual connections cannot be reconstructed",
+
+  "另有 {n} 台设备接入位置未知（已排在画布底部）": "{n} device(s) with unknown attachment (placed at the bottom of the canvas)"
 }

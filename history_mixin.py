@@ -63,7 +63,7 @@ class HistoryMixin:
             return
         gw_ip = _detect_gateway()
 
-        # 尝试 LLDP/CDP 拓扑发现（后台线程，避免卡界面）
+        # 尝试 LLDP/CDP/转发表拓扑发现（后台线程，避免卡界面）
         self._topo_result = None
         self._topo_progress = QProgressDialog(
             tr("正在发现网络拓扑 (LLDP/CDP)..."), tr("跳过"), 0, 0, self
@@ -72,20 +72,34 @@ class HistoryMixin:
         self._topo_progress.setWindowModality(Qt.WindowModal)
         self._topo_progress.setMinimumDuration(0)
 
+        # SNMPv3 用户（若已配置）：拓扑发现必须和扫描走同一套凭据，
+        # 否则会出现"扫描能识别、拓扑识别不了"这种自相矛盾的表现。
+        snmp_v3_user = None
+        try:
+            creds = getattr(self, "snmp_v3_creds", None)
+            if creds is not None and creds.has_creds():
+                snmp_v3_user = creds.to_user()
+        except Exception as e:      # noqa: BLE001 - 凭据不可用不该挡住拓扑
+            _log.warning("读取 SNMPv3 凭据失败，本次拓扑发现使用 v2c: %s", e)
+
         class TopoThread(QThread):
             finished_signal = pyqtSignal(object)
             log_signal = pyqtSignal(str)
 
-            def __init__(self, results):
+            def __init__(self, results, gateway_ip, v3_user):
                 super().__init__()
                 self.results = results
+                self.gateway_ip = gateway_ip
+                self.v3_user = v3_user
 
             def run(self):
                 try:
                     from topology_discovery import discover_topology
                     topo = discover_topology(
                         self.results,
-                        progress_callback=lambda p, c, t, m: self.log_signal.emit(m)
+                        progress_callback=lambda p, c, t, m: self.log_signal.emit(m),
+                        gateway_ip=self.gateway_ip,
+                        snmp_v3_user=self.v3_user,
                     )
                     self.finished_signal.emit(topo)
                 except Exception as e:  # noqa: BLE001
@@ -99,7 +113,7 @@ class HistoryMixin:
             dlg = TopologyDialog(self.all_results, gw_ip, self.dark_mode, self, topology=topo)
             dlg.exec_()
 
-        self._topo_thread = TopoThread(self.all_results)
+        self._topo_thread = TopoThread(self.all_results, gw_ip, snmp_v3_user)
         self._topo_thread.log_signal.connect(lambda m: self._topo_progress.setLabelText(m))
         self._topo_thread.finished_signal.connect(on_finished)
         self._topo_progress.canceled.connect(lambda: None)  # 跳过 = 快进到显示

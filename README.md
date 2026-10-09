@@ -26,7 +26,8 @@ Key capabilities:
   model inference, OS fingerprinting, mDNS/DNS-SD discovery, NetBIOS names, and optional
   credential-based WMI interrogation.
 - Asset history snapshots with change diffing, IP-conflict detection, subnet utilisation
-  analysis, and CDP/LLDP topology mapping via SNMP.
+  analysis, and topology mapping via SNMP: CDP/LLDP for the switch backbone plus
+  BRIDGE-MIB forwarding tables for per-port device attachment.
 - Bilingual UI (简体中文 / English), Excel / CSV / HTML / JSON export.
 
 Licensed under **GPL-3.0** (required because PyQt5 is used under its GPL terms).
@@ -97,7 +98,21 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
   （零第三方依赖；敏感值支持 `env:` 间接引用，不落盘）。
 - **IP 冲突检测**：识别同一 IP 对应多个 MAC 等异常，按严重级别分级。
 - **子网利用率**：按 `/24` 聚合统计在线/离线数量与利用率。
-- **拓扑发现**：基于 CDP/LLDP + SNMP 交换机端口映射绘制链路图。
+- **拓扑发现**：按"真实数据优先、逐级退化"还原真实连接，全程不画假链路；每一档退化都会
+  在图例里写明原因。四档退化链路：
+  - **第 1 档 · 骨干链路（LLDP / CDP）**：优先用 **LLDP**（IEEE 802.1AB，多厂商）发现交换机
+    之间的互联；Cisco 系则退回 **CDP**（专有），且能直接报出对端是交换机还是路由器。
+    要看交换机之间的骨干链路，设备需启用 LLDP 或 CDP。
+  - **第 2 档 · 接入层兜底（BRIDGE-MIB 转发表）**：只要交换机**开了 SNMP 且支持 BRIDGE-MIB**，
+    即使没开 LLDP/CDP，也能还原「每台终端挂在哪台交换机的哪个物理口」，并据此反推交换机
+    之间的上联关系（转发表是交换机自己学到的数据，不依赖终端配合）。
+  - **第 3 档 · 已识别但无链路**：设备已被 SNMP 识别为交换机/路由器，但没上报 LLDP/CDP、
+    转发表也不可用 —— 图例说明原因，不编造链路。
+  - **第 4 档 · 网段分层**：SNMP 完全不可达、一条链路都发现不了时，按 `/24` 网段分层展示
+    （网关识别为路由器），图例同样说明原因（通常是交换机没开 SNMP）。
+  前提：交换机/路由器上开启 SNMP（v2c 团体字，或配置 SNMPv3 用户；**v3 优先、仅无响应才回退 v2c**）。
+  扫描时**不必**勾选「SNMP 协议」——拓扑发现会自己主动发 SNMP GET / 遍历去确认，不依赖扫描是否先识别过 SNMP。
+  （效果示意：[拓扑视图预览](docs/reviews/topology_preview.png)，由模拟网络数据渲染）
 - **地址库匹配**：导入 Excel 设备清单（`设备清单模板.xlsx`），扫描时自动匹配设备归属
   （位置 / 使用人 / 备注）。
 - **审计日志**：记录扫描、导出、设置变更等关键操作，可按分类与关键字检索。
@@ -317,6 +332,7 @@ python cli.py schedule --unregister
 IPScanner/
 ├─ main.py                    # GUI 入口（含全局异常兜底）
 ├─ cli.py                     # 无头 CLI 入口
+│
 ├─ main_window.py             # 主窗口（由下列 Mixin 组合而成）
 │  ├─ scan_mixin.py           #   扫描流程编排
 │  ├─ history_mixin.py        #   历史快照 / 审计日志 / 拓扑
@@ -325,52 +341,88 @@ IPScanner/
 │  ├─ oui_mixin.py            #   OUI 更新
 │  ├─ network_tool_mixin.py   #   内置网络工具
 │  └─ main_window_tree.py     #   结果树构建与刷新
-├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / OUI 更新）
+│
 ├─ ui_dialogs.py              # 各类对话框（含拓扑视图）
 ├─ ui_logic.py                # 与 UI 解耦的纯业务逻辑（便于单测）
-├─ overview.py                # 概览仪表盘（渲染层，统计在 ui_logic.build_overview）
+├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / OUI 更新）
+├─ ui_icons.py                # 图标与调色板工具（PC 图标预渲染、工具栏矢量图标、深色 QPalette）
+├─ ui_msg.py                  # 对话框统一入口（顺带本地化 Qt 内置按钮文案）
+├─ ui_utils.py                # 通用工具（网关探测、快照对比、IP 校验与排序键）
 ├─ detail_panel.py            # 设备详情面板
 ├─ empty_state.py             # 未扫描时的空状态引导页
+├─ overview.py                # 概览仪表盘（渲染层，统计在 ui_logic.build_overview）
 ├─ filter_bar.py              # 结果筛选条（带计数、放不下时横向滚动）
 ├─ favorites.py               # 设备收藏（按 MAC 优先，退化为 IP）
 ├─ scan_presets.py            # 扫描预设（网段 + 深度）
+├─ scan_status.py             # 扫描态摘要条（阶段 / 已扫 / 在线 / 有服务 / 用时 / 停止）
+├─ risk_rules.py              # 风险评分规则（风险列的数据来源）
+│
 ├─ theme_tokens.py            # 语义色单一来源（零 PyQt，供内联取色）
+├─ design_tokens.py           # 设计令牌：圆角 / 间距 / 行高的唯一刻度
 ├─ system_theme.py            # 读取系统深浅色偏好（Windows / macOS / Linux）
+├─ styles.py                  # QSS 样式表加载与预渲染字体常量
+├─ assets/                    # 静态资源
+│  ├─ styles/light.qss        #   浅色主题（与 dark.qss 选择器 + 属性名双向对称）
+│  ├─ styles/dark.qss         #   深色主题
+│  ├─ app_icon.ico / .png     #   应用图标
+│  └─ play_icon.png           #   工具栏「开始扫描」图标
+│
 ├─ scanner/                   # 扫描引擎（不依赖 PyQt，可独立复用）
 │  ├─ engine.py               #   扫描编排（ScanContext + 可插拔的 DiscoveryPhase）
 │  ├─ ping.py                 #   ICMP / ARP / 本机网段探测
 │  ├─ ports.py                #   端口探测（connect / syn / udp，进程内单例有界池）
 │  ├─ banners.py              #   扩展服务 banner 探测（Telnet/MySQL/Redis/VNC…）
+│  ├─ http.py                 #   HTTP / HTTPS / UPnP / SSH / FTP banner 与品牌提取
 │  ├─ classify.py             #   设备类型与型号推断
 │  ├─ osfp.py                 #   操作系统指纹
 │  ├─ dns.py                  #   mDNS / DNS-SD
 │  ├─ netbios.py              #   NetBIOS NBSTAT
-│  ├─ wmi.py                  #   WMI 远程识别
+│  ├─ wmi.py                  #   WMI / WinRM 远程识别（需管理员凭据）
 │  ├─ snmp.py                 #   SNMP v2c（团体字）
 │  ├─ snmp_v3.py              #   SNMPv3 / USM（认证与加密）
 │  ├─ aes.py                  #   AES-128-CFB128（纯标准库，供 SNMPv3 加密）
-│  └─ constants.py            #   常量与语言无关的规范代码
-├─ topology_discovery.py      # 拓扑发现
-├─ switch_mapper.py           # SNMP 交换机端口映射
+│  ├─ cred_store.py           #   凭据存储（口令走环境变量，绝不进 argv）
+│  ├─ range.py                #   IP 范围解析（仅 IPv4，显式拒绝 IPv6）
+│  ├─ models.py               #   ScanResult 数据模型
+│  ├─ constants.py            #   常量与语言无关的规范代码
+│  └─ util.py                 #   子进程执行 / ICMP 校验和 / 本机出口 IP
+│
+├─ topology_discovery.py      # 拓扑发现：LLDP/CDP 邻居 + 转发表接入关系 + 分层布局（纯函数，零 PyQt）
+├─ switch_mapper.py           # SNMP 交换机端口映射（BRIDGE-MIB 转发表 → MAC/端口）
 ├─ conflict_detector.py       # IP 冲突检测
 ├─ change_detector.py         # 资产变更检测
-├─ notifier.py                # 变更告警通知渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
+├─ notifier.py                # 变更告警渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
 ├─ scheduler.py               # 定时扫描调度（schtasks / crontab，命令构造为纯函数）
 ├─ history_store.py           # 历史快照存储（SQLite）
 ├─ audit_log.py               # 审计日志（SQLite）
-├─ mac_library.py             # MAC 地址库
+├─ mac_library.py             # MAC 地址库（mac_library.db）
+├─ oui_database.py            # MAC OUI 厂商库查询（oui.db）
+├─ oui_updater.py             # OUI 库在线更新
+├─ parse_ieee_oui.py          # 解析 IEEE oui.txt，生成 OUI 厂商数据库
 ├─ service_fingerprints.py    # 服务版本指纹库（规则在 service_fingerprints.json）
-├─ excel_handler.py           # Excel 导入 / 导出
-├─ i18n.py + i18n/            # 国际化（zh-CN / en-US）
+├─ excel_handler.py           # Excel 导入 / 导出（模板：设备清单模板.xlsx）
+│
+├─ db_util.py                 # 线程安全的 SQLite 单例连接管理器
+├─ bounded_pool.py            # 有界并发执行工具
 ├─ app_paths.py               # 开发态 / 打包态路径解析
 ├─ app_logging.py             # 统一日志（轮转文件）
-├─ bounded_pool.py            # 有界并发执行工具
-├─ tests/                     # 单元测试（标准库 unittest）
+├─ version.py                 # 版本号唯一来源（__version__）
+├─ i18n.py + i18n/            # 国际化（zh-CN / en-US，语言包为 JSON）
+│
+├─ tests/                     # 单元测试（标准库 unittest，57 个文件）
 ├─ docs/                      # 文档
 │  ├─ reviews/                #   历次代码 / 界面评审归档（均已关闭，只作历史记录）
 │  └─ ui-review-round2/       #   第二轮界面验收截图（18 张）
-└─ IPScanner.spec             # GUI 版 PyInstaller 打包配方（onedir，名字不带版本号）
-└─ IPScanner_cli.spec         # CLI 版打包配方（onefile）
+│
+├─ IPScanner.spec             # GUI 版 PyInstaller 配方（onedir，产物名带版本号）
+├─ IPScanner_cli.spec         # CLI 版 PyInstaller 配方（onefile）
+├─ .github/workflows/ci.yml   # CI：Windows × Python 3.10 / 3.11 / 3.12 / 3.13
+├─ pyproject.toml             # ruff 配置（版本号一致性由 test_scaffolding 断言）
+├─ requirements.txt           # 运行期依赖
+├─ requirements-dev.txt       # 开发 / 打包依赖
+├─ run.bat / run.ps1          # Windows 启动脚本
+├─ run_tests.py               # 测试入口（等价 python -m unittest discover）
+└─ LICENSE                    # GPL-3.0
 ```
 
 ---
@@ -505,6 +557,10 @@ python -m ruff check .
   ubuntu / macOS 上跑单版本矩阵，用于覆盖 `platform.system()` 分支。
   WMI 相关的实机用例在非 Windows 上会自动跳过。
 - 打包体积较大：GUI 版（onedir）磁盘占用约 114 MB，压缩分发约 46 MB。
+- **拓扑发现依赖被管设备**：交换机/路由器必须开启 SNMP 且团体字（或 SNMPv3 用户）
+  正确，否则只能退化成网关星型 / 网段层次图。未开 LLDP/CDP 时靠 BRIDGE-MIB 转发表
+  仍能还原"终端挂在哪个口"；两者都取不到时不会编造链路。拓扑视图会把"为什么没有
+  真实链路"写进图例。
 
 **后续计划**
 
