@@ -40,7 +40,7 @@ from scan_status import ScanStatusBar
 from favorites import FavoriteStore
 from scan_presets import ScanPresetStore, PresetError, validate_name
 import system_theme
-from ui_msg import msg_about, msg_info, msg_warn
+from ui_msg import msg_about, msg_consent, msg_info, msg_warn
 from i18n import current_lang, tr
 from scan_mixin import ScanMixin
 from export_mixin import ExportMixin
@@ -1463,6 +1463,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.row_density = _rd if _rd in DENSITIES else DEFAULT_DENSITY
         self._apply_row_density()
         self._sync_density_actions()
+        # 首次启动授权声明（CODE_REVIEW P2-14）。0 = 从没确认过。
+        self.authorization_notice_ack = s.value("legal/notice_ack", 0, type=int)
 
     def _save_settings(self):
         """保存当前配置到 ipscanner.ini。"""
@@ -1475,6 +1477,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             return
         s = self.settings
         s.setValue("theme/mode", self.theme_mode)
+        s.setValue("legal/notice_ack",
+                   getattr(self, "authorization_notice_ack", 0))
         # 保留旧键：① 旧版本回退时行为可预期；② 外部脚本/文档仍可能读它
         s.setValue("theme/dark", self.dark_mode)
         s.setValue("theme/auto_time", self.auto_time)
@@ -1784,6 +1788,52 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
     # --- 扫描 ---
 
+
+    # ── 首次启动授权声明（CODE_REVIEW P2-14）──
+
+    def _authorization_notice_text(self) -> str:
+        """授权声明的正文（HTML）。
+
+        单独抽成方法而不是内联在弹窗里：`test_authorization_notice` 要断言
+        「授权 / 法律责任 / 你自己拥有」这些合规要点**还在**。文案漏掉"授权"
+        二字，这个弹窗就白弹了，而那种退化**不会有任何测试失败**。
+        """
+        return (
+            tr("<h3>使用前请确认授权范围</h3>")
+            + tr("<p>本工具会主动向目标主机发送 ICMP、ARP、TCP、UDP 报文并进行服务探测。</p>")
+            + tr("<p><b>请仅对你自己拥有、或已获得明确书面授权的网络使用。</b></p>")
+            + tr("<p>未经授权扫描他人网络在多数国家和地区属于违法行为（例如中国《网络安全法》"
+                 "《刑法》第 285 条、美国《计算机欺诈与滥用法》CFAA、英国《计算机滥用法》）。"
+                 "使用者需自行承担全部法律责任，作者不对任何误用或由此造成的损失负责。</p>")
+        )
+
+    def maybe_show_authorization_notice(self) -> bool:
+        """首次启动弹一次授权声明；返回 False = 用户未同意（调用方应退出）。
+
+        ⚠️ **故意不在 `__init__` 里调用**：`msg_consent()` 内部是模态 `exec_()`，
+        会一直阻塞到用户点按钮为止。放进构造函数，所有"建一个 MainWindow 看行为"
+        的测试都会在无头环境（没人点按钮）里**永久挂死** —— 表现为 CI 卡住而不是
+        失败，是最难查的一类故障。改由 `main.py` 在 `show()` 之后显式调用；测试
+        可以单独调它。
+
+        确认后写 `legal/notice_ack = NOTICE_VERSION`，之后不再弹。改声明文案必须
+        同步把 `ui_logic.NOTICE_VERSION` +1（见那里的说明），否则新增条款对已装
+        用户永远不可见。
+        """
+        acked = getattr(self, "authorization_notice_ack", 0)
+        if not ui_logic.needs_authorization_notice(acked):
+            return True
+        if not msg_consent(
+            self,
+            tr("使用前请确认授权范围"),
+            self._authorization_notice_text(),
+            tr("我已获得授权，继续使用"),
+            tr("退出"),
+        ):
+            return False
+        self.authorization_notice_ack = ui_logic.NOTICE_VERSION
+        self._save_settings()
+        return True
 
     def _show_about(self):
         _data_info = tr("数据目录：") + data_dir() + "\n" + tr("存放方式：") + data_dir_label()

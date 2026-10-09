@@ -9,6 +9,7 @@
 - 识别完成消息构造
 - 冲突分级计数
 - 历史快照构建
+- 首次启动授权声明的版本判定
 """
 import ipaddress
 import time
@@ -328,3 +329,26 @@ def build_overview(results, changes=None, conflicts=None,
         "vendor_kinds": len(vendors),
         "class_kinds": len(classes),
     }
+
+
+# ── 首次启动授权声明（CODE_REVIEW P2-14）──────────────────────────────
+
+#: 授权声明的**版本号**。🔴 改动声明文案（哪怕只加一句）就必须 +1 —— 否则已经
+#: 确认过旧版本的用户永远看不到新增的免责条款，而那往往正是最要紧的一句。
+NOTICE_VERSION = 1
+
+
+def needs_authorization_notice(acknowledged) -> bool:
+    """是否需要弹首次启动的授权声明。
+
+    `acknowledged` 是用户已确认过的版本号（`0` / `None` / 非数字 = 从没确认过）。
+
+    判据用 `<` 而不是 `!=`：声明升到第 2 版时，确认过第 1 版的用户要**重新看
+    一次**；而用户若回退了旧版本程序，`acknowledged(2) > NOTICE_VERSION(1)`
+    不该再弹 —— 他已经同意过更新的条款了。
+    """
+    try:
+        acked = int(acknowledged)
+    except (TypeError, ValueError):
+        acked = 0
+    return acked < NOTICE_VERSION

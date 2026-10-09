@@ -103,3 +103,28 @@ def msg_ask(parent, title, text, buttons=QMessageBox.Yes | QMessageBox.No,
 def msg_about(parent, title, text) -> int:
     """对应 `QMessageBox.about()`（无标准按钮可选，固定一个「确定」）。"""
     return _show(QMessageBox.Information, parent, title, text, QMessageBox.Ok, None)
+
+
+def msg_consent(parent, title, text, accept_text, decline_text) -> bool:
+    """合规声明确认框：两个**自定义**按钮，返回 True 表示用户选了 accept。
+
+    为什么不用 `msg_ask` 的 Yes/No：授权声明要问的是「我已获得授权，继续使用」
+    与「退出」—— 用「是 / 否」答非所问，用户看不出点哪个会发生什么。
+
+    自定义按钮的文案由**调用方**给：`localize_buttons` 刻意不碰自定义按钮
+    （它们的文案是调用方决定的，见 `test_custom_buttons_are_left_alone`），
+    所以调用方要自己过 `tr()`。
+
+    ⚠️ 用户按 Esc / 点标题栏关闭时 `clickedButton()` 返回 `None` —— 这里按
+    **未同意**处理（返回 False）。合规弹窗宁可保守。
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle(title)
+    box.setText(text)
+    accept = box.addButton(accept_text, QMessageBox.AcceptRole)
+    box.addButton(decline_text, QMessageBox.RejectRole)
+    box.setDefaultButton(accept)
+    localize_buttons(box)
+    box.exec_()
+    return box.clickedButton() is accept

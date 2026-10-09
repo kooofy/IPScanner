@@ -782,5 +782,12 @@
 
   "行高": "Row height",
   "舒适": "Comfortable",
-  "紧凑": "Compact"
+  "紧凑": "Compact",
+
+  "使用前请确认授权范围": "Confirm your authorization before use",
+  "<h3>使用前请确认授权范围</h3>": "<h3>Confirm your authorization before use</h3>",
+  "<p>本工具会主动向目标主机发送 ICMP、ARP、TCP、UDP 报文并进行服务探测。</p>": "<p>This tool actively sends ICMP, ARP, TCP and UDP packets to target hosts and probes their services.</p>",
+  "<p><b>请仅对你自己拥有、或已获得明确书面授权的网络使用。</b></p>": "<p><b>Use it only on networks you own, or for which you have explicit written authorization.</b></p>",
+  "<p>未经授权扫描他人网络在多数国家和地区属于违法行为（例如中国《网络安全法》《刑法》第 285 条、美国《计算机欺诈与滥用法》CFAA、英国《计算机滥用法》）。使用者需自行承担全部法律责任，作者不对任何误用或由此造成的损失负责。</p>": "<p>Scanning networks without authorization is illegal in most countries and regions (for example China's Cybersecurity Law and Article 285 of its Criminal Law, the US Computer Fraud and Abuse Act (CFAA), and the UK Computer Misuse Act). You bear full legal responsibility for your own use; the author is not liable for any misuse or any loss caused by it.</p>",
+  "我已获得授权，继续使用": "I have authorization — continue"
 }

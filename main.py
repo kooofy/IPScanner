@@ -177,6 +177,13 @@ def main():
             app.setWindowIcon(QIcon(pixmap))
     
     window.show()
+    # 首次启动的一次性授权声明（CODE_REVIEW P2-14）。**必须放在这里，不能放进
+    # `MainWindow.__init__`**：`msg_consent()` 内部是模态 `exec_()`，会一直阻塞到
+    # 用户点按钮；放进构造函数会让所有"建一个 MainWindow 看行为"的测试在无头环境
+    # （没人点按钮）里永久挂死。用户未同意授权就直接退出，不进入事件循环。
+    if not window.maybe_show_authorization_notice():
+        _log.info("用户未确认授权声明，退出")
+        sys.exit(0)
     sys.exit(app.exec_())
 
 
