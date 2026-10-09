@@ -34,22 +34,44 @@ from app_logging import get_logger
 from ui_msg import localize_buttons, msg_ask, msg_info, msg_warn
 from i18n import tr
 import ui_logic
+from theme_tokens import token
 
 _log = get_logger(__name__)
+
+
+def _theme_color(name: str, dark: bool) -> QColor:
+    """按主题取语义色（`theme_tokens` 的 hex → `QColor`）。
+
+    对话框里的**自绘图形**（拓扑画布）与**表格单元格着色**走这里 —— 这两类
+    QSS 都覆盖不到，原先只能把同一套语义色硬编码在本文件里，深色主题下必然
+    漏掉几处：摘要文字用的深灰在深色底上几乎不可见，严重级别用的红色在深色底
+    上只有约 2.5:1 对比度（AA 要求 4.5:1）。
+
+    统一从令牌取色后，"深色下这一处忘了改"这类问题从根上消失。
+    `tests/test_ui_dialogs_colors.py` 会扫描本文件，禁止再出现色值字面量。
+    """
+    return QColor(token(name, dark))
 
 
 class DeviceEditDialog(QDialog):
     """新增 / 编辑单条设备"""
 
-    FIELDS = [
-        ("ip", tr("IP 地址"), tr("例如 192.168.1.10")),
-        ("mac", tr("MAC 地址"), tr("例如 AA:BB:CC:DD:EE:FF")),
-        ("device_type", tr("设备类型"), tr("例如 PC / 打印机 / 一体机")),
-        ("location", tr("位置"), tr("例如 3楼-301办公室")),
-        ("user", tr("使用者"), tr("例如 张三 / 财务科")),
-        ("remark", tr("备注"), tr("选填")),
-        ("vendor", tr("厂商"), tr("选填")),
-    ]
+    @property
+    def FIELDS(self):
+        """表单字段 (key, 标签, 占位提示)。
+
+        ⚠️ 必须写成 property：类体在 **import 期**求值，那时语言包还没加载，
+        写成类属性会把中文永久冻住（英文界面下表单标签仍是中文）。
+        """
+        return [
+            ("ip", tr("IP 地址"), tr("例如 192.168.1.10")),
+            ("mac", tr("MAC 地址"), tr("例如 AA:BB:CC:DD:EE:FF")),
+            ("device_type", tr("设备类型"), tr("例如 PC / 打印机 / 一体机")),
+            ("location", tr("位置"), tr("例如 3楼-301办公室")),
+            ("user", tr("使用者"), tr("例如 张三 / 财务科")),
+            ("remark", tr("备注"), tr("选填")),
+            ("vendor", tr("厂商"), tr("选填")),
+        ]
 
     def __init__(self, library: MacLibrary, parent=None, device_id=None, ip="", mac=""):
         super().__init__(parent)
@@ -96,7 +118,11 @@ class DeviceEditDialog(QDialog):
 class MacLibraryDialog(QDialog):
     """地址库管理：浏览 / 搜索 / 增 / 删 / 改 / 导出"""
 
-    COLS = ["ID", tr("IP地址"), tr("MAC地址"), tr("设备类型"), tr("位置"), tr("使用者"), tr("备注"), tr("来源文件")]
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return ["ID", tr("IP地址"), tr("MAC地址"), tr("设备类型"), tr("位置"),
+                tr("使用者"), tr("备注"), tr("来源文件")]
 
     def __init__(self, library: MacLibrary, parent=None):
         super().__init__(parent)
@@ -268,8 +294,10 @@ class HistoryCompareDialog(QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table, 1)
 
+        # 配色交给 QSS（`QLabel#dialogHintSmall`）—— 本对话框拿不到主题标志，
+        # 而硬编码的深灰在深色底上几乎不可见。
         self.summary_label = QLabel("")
-        self.summary_label.setStyleSheet("color: #555555; font-size: 11px;")
+        self.summary_label.setObjectName("dialogHintSmall")
         layout.addWidget(self.summary_label)
 
         close_btn = QPushButton(tr("关闭"))
@@ -345,10 +373,15 @@ class HistoryQueryDialog(QDialog):
     首见时间与末见时间，按末见时间降序。
     """
 
-    COLS = [tr("IP 地址"), tr("状态"), tr("类型"), tr("主机名"), "MAC", tr("首见"), tr("末见")]
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return [tr("IP 地址"), tr("状态"), tr("类型"), tr("主机名"), "MAC",
+                tr("首见"), tr("末见")]
 
-    def __init__(self, parent=None, db_path=None):
+    def __init__(self, parent=None, db_path=None, dark=False):
         super().__init__(parent)
+        self.dark = dark
         self.db_path = db_path
         self.setWindowTitle(tr("历史条件查询"))
         self.setMinimumSize(900, 540)
@@ -408,7 +441,7 @@ class HistoryQueryDialog(QDialog):
         btn_row.addWidget(btn_reset)
         btn_row.addStretch()
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet("font-size: 12px; color: #666;")
+        self.count_label.setObjectName("dialogHint")
         btn_row.addWidget(self.count_label)
         vbox.addLayout(btn_row)
 
@@ -487,9 +520,9 @@ class HistoryQueryDialog(QDialog):
             st = d.get("status", "")
             st_item = QTableWidgetItem(st)
             if st == "online":
-                st_item.setForeground(QColor(34, 163, 74))
+                st_item.setForeground(_theme_color("online", self.dark))
             elif st == "offline":
-                st_item.setForeground(QColor(150, 150, 150))
+                st_item.setForeground(_theme_color("muted", self.dark))
             st_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(r, 1, st_item)
             self.table.setItem(r, 2, QTableWidgetItem(
@@ -553,8 +586,7 @@ class TopologyDialog(QDialog):
         self.view = QGraphicsView()
         self.view.setRenderHint(QPainter.Antialiasing, True)
         self.scene = QGraphicsScene()
-        bg = QColor(30, 30, 30) if dark else QColor(248, 248, 248)
-        self.scene.setBackgroundBrush(QBrush(bg))
+        self.scene.setBackgroundBrush(QBrush(_theme_color("topo_bg", dark)))
         self.view.setScene(self.scene)
         layout.addWidget(self.view, 1)
 
@@ -570,21 +602,29 @@ class TopologyDialog(QDialog):
             self._build_star_topology()
 
     def _update_legend(self):
+        # ⚠️ 色值**不写进 `tr()` 的键**：旧写法把"颜色"和"文案"焊死在同一个
+        # 词条里（形如 `"<span style='color:…'>●</span> 网关"`），改一次配色
+        # 就要同步改语言包，而且那个颜色根本不随主题变。现在先取色、再拼 HTML，
+        # 文案本身照常可译。
         items = [
-            tr("<span style='color:#E69500;'>●</span> 网关"),
-            tr("<span style='color:#22A34A;'>●</span> 在线"),
-            tr("<span style='color:#B4B4B4;'>●</span> 离线"),
+            self._legend_item("gateway", "●", tr("网关")),
+            self._legend_item("online", "●", tr("在线")),
+            self._legend_item("topo_offline", "●", tr("离线")),
         ]
         if self.topology and self.topology.links:
             items += [
-                tr("<span style='color:#4DA6FF;'>━</span> LLDP"),
-                tr("<span style='color:#22C55E;'>━</span> CDP"),
+                self._legend_item("topo_link", "━", "LLDP"),
+                self._legend_item("cdp", "━", "CDP"),
             ]
         self.legend.setText("   ".join(items))
         self.legend.setStyleSheet("font-size: 12px; padding: 4px;")
 
+    def _legend_item(self, token_name: str, glyph: str, text: str) -> str:
+        return ("<span style='color:%s;'>%s</span> %s"
+                % (token(token_name, self.dark), glyph, text))
+
     def _text_color(self):
-        return QColor(224, 224, 224) if self.dark else QColor(40, 40, 40)
+        return _theme_color("topo_fg", self.dark)
 
     # ── 真实拓扑 (LLDP/CDP) ──
 
@@ -637,9 +677,9 @@ class TopologyDialog(QDialog):
                 x1, y1 = node_pos[link.source_id]
                 x2, y2 = node_pos[link.target_id]
                 if link.protocol == "LLDP":
-                    pen = QPen(QColor(77, 166, 255), 2)
+                    pen = QPen(_theme_color("topo_link", self.dark), 2)
                 elif link.protocol == "CDP":
-                    pen = QPen(QColor(34, 197, 94), 2)
+                    pen = QPen(_theme_color("cdp", self.dark), 2)
                 else:
                     pen = QPen(self._muted(), 1)
                 self.scene.addLine(x1, y1, x2, y2, pen)
@@ -666,7 +706,7 @@ class TopologyDialog(QDialog):
     def _add_switch_node(self, x, y, node):
         """绘制交换机节点（方形）。"""
         w, h = 50, 30
-        color = QColor(14, 99, 156)
+        color = _theme_color("topo_link", self.dark)
         rect = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
         rect.setBrush(QBrush(color))
         rect.setPen(QPen(QColor(255, 255, 255, 80), 1.5))
@@ -688,7 +728,7 @@ class TopologyDialog(QDialog):
             if r.ip == node.ip or r.ip == node.id:
                 online = r.status == "online"
                 break
-        color = QColor(34, 163, 74) if online else QColor(180, 180, 180)
+        color = _theme_color("online" if online else "topo_offline", self.dark)
         dot = QGraphicsEllipseItem(x - 10, y - 10, 20, 20)
         dot.setBrush(QBrush(color))
         dot.setPen(QPen(QColor(0, 0, 0, 60), 1))
@@ -723,7 +763,7 @@ class TopologyDialog(QDialog):
 
     def _add_host_node(self, x, y, r):
         online = r.status == "online"
-        color = QColor(34, 163, 74) if online else QColor(180, 180, 180)
+        color = _theme_color("online" if online else "topo_offline", self.dark)
         node = QGraphicsEllipseItem(x - 14, y - 14, 28, 28)
         node.setBrush(QBrush(color))
         node.setPen(QPen(QColor(0, 0, 0, 60), 1))
@@ -741,7 +781,7 @@ class TopologyDialog(QDialog):
                 if r.hostname:
                     sub = f"{self.gateway_ip}\n{r.hostname}"
                 break
-        color = QColor(230, 149, 0)
+        color = _theme_color("gateway", self.dark)
         node = QGraphicsEllipseItem(x - 24, y - 24, 48, 48)
         node.setBrush(QBrush(color))
         node.setPen(QPen(QColor(0, 0, 0, 80), 2))
@@ -752,10 +792,10 @@ class TopologyDialog(QDialog):
         self.scene.addItem(txt)
 
     def _muted(self):
-        return QColor(150, 156, 166) if self.dark else QColor(170, 170, 170)
+        return _theme_color("topo_muted", self.dark)
 
     def _link_blue(self):
-        return QColor(77, 166, 255) if self.dark else QColor(14, 99, 156)
+        return _theme_color("topo_link", self.dark)
 
 
 class WmiCredentialDialog(QDialog):
@@ -810,8 +850,8 @@ class WmiCredentialDialog(QDialog):
             "DCOM 需开放 135 及动态 RPC 端口；WinRM 只需 5985/5986 单端口，跨网段更易通过。\n"
             "非域环境请填目标本机管理员账号。"
         ))
+        hint.setObjectName("dialogHintSmall")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px;")
         layout.addRow(hint)
 
         buttons = QDialogButtonBox(
@@ -900,9 +940,11 @@ class SnmpV3CredentialDialog(QDialog):
         test_row.addWidget(self.test_btn)
         layout.addRow(tr("测试目标:"), test_row)
 
+        # 颜色与字号交给 QSS（`QLabel#snmpTestResult` 及 `[ok]` 属性选择器）：
+        # 本对话框拿不到主题标志，硬编码的绿/红在深色底上对比度不足。
         self.result_label = QLabel("")
+        self.result_label.setObjectName("snmpTestResult")
         self.result_label.setWordWrap(True)
-        self.result_label.setStyleSheet("font-size: 11px;")
         layout.addRow(self.result_label)
 
         self.save_check = QCheckBox(tr("保存配置（DPAPI 加密口令到本机配置）"))
@@ -913,8 +955,8 @@ class SnmpV3CredentialDialog(QDialog):
             "认证支持 HMAC-MD5-96 / HMAC-SHA-96；加密仅支持 AES-128（不支持已废弃的 DES）。\n"
             "口令不足 8 位时部分设备会拒绝本地化密钥，建议至少 8 位。"
         ))
+        hint.setObjectName("dialogHintSmall")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px;")
         layout.addRow(hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -953,8 +995,9 @@ class SnmpV3CredentialDialog(QDialog):
             self._set_result(err, ok=False)
             return
 
+        self.result_label.setProperty("ok", "")
+        self._repolish(self.result_label)
         self.result_label.setText(tr("测试中…"))
-        self.result_label.setStyleSheet("color: #888; font-size: 11px;")
         # 单次 GET 最长 1.5s；模态对话框里短暂等待可以接受，
         # 换成线程反而要额外处理"测试还没回来、对话框已被关闭"的竞态
         self.setCursor(Qt.WaitCursor)
@@ -971,9 +1014,17 @@ class SnmpV3CredentialDialog(QDialog):
                                      or info.get("sys_descr") or ip), ok=True)
 
     def _set_result(self, text: str, ok: bool):
-        color = "#16A34A" if ok else "#DC2626"
-        self.result_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self.result_label.setProperty("ok", "true" if ok else "false")
+        self._repolish(self.result_label)
         self.result_label.setText(text)
+
+    @staticmethod
+    def _repolish(widget):
+        """改过动态属性后必须 unpolish/polish 一次，否则 QSS 不会重算 ——
+        少了这两步，颜色会在第一次设置后"卡住"不变（与 `overview.set_tone` 同因）。"""
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
 
     def get_config(self):
         """返回 (username, auth_proto, auth_key, priv_proto, priv_key, save)。"""
@@ -994,16 +1045,22 @@ class ConflictReportDialog(QDialog):
     支持选中行高亮对应 IP（通过回调通知主窗口）。
     """
 
-    COLS = [tr("严重级别"), tr("冲突类型"), tr("描述"), tr("涉及 IP"), tr("涉及 MAC"), tr("详情")]
-    _SEVERITY_COLORS = {
-        SEVERITY_HIGH: QColor(220, 38, 38),     # 红
-        SEVERITY_WARNING: QColor(217, 119, 6),   # 橙
-        SEVERITY_INFO: QColor(37, 99, 235),      # 蓝
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return [tr("严重级别"), tr("冲突类型"), tr("描述"), tr("涉及 IP"),
+                tr("涉及 MAC"), tr("详情")]
+    # 级别 → 语义色**令牌名**。存名字而不是 `QColor`：类体在 import 期求值，
+    # 那时还不知道用户选的是浅色还是深色主题，存 QColor 就等于把颜色冻死。
+    _SEVERITY_TOKEN = {
+        SEVERITY_HIGH: "danger",     # 红
+        SEVERITY_WARNING: "warn",    # 橙
+        SEVERITY_INFO: "link",       # 蓝
     }
-    _SEVERITY_BG = {
-        SEVERITY_HIGH: QColor(254, 226, 226),    # 浅红底
-        SEVERITY_WARNING: QColor(254, 243, 199), # 浅橙底
-        SEVERITY_INFO: QColor(219, 234, 254),    # 浅蓝底
+    _SEVERITY_BG_TOKEN = {
+        SEVERITY_HIGH: "sev_bg_high",     # 淡红底 / 深红底
+        SEVERITY_WARNING: "sev_bg_warn",  # 淡橙底 / 深橙底
+        SEVERITY_INFO: "sev_bg_info",     # 淡蓝底 / 深蓝底
     }
 
     def __init__(self, conflicts, parent=None, dark=False):
@@ -1024,11 +1081,11 @@ class ConflictReportDialog(QDialog):
         info = sum(1 for c in conflicts if c.severity == SEVERITY_INFO)
         summary_parts = []
         if high:
-            summary_parts.append(f"<span style='color:#DC2626;font-weight:bold;'>{high} 严重</span>")
+            summary_parts.append(self._summary_span("danger", high, "严重"))
         if warn:
-            summary_parts.append(f"<span style='color:#D97706;font-weight:bold;'>{warn} 警告</span>")
+            summary_parts.append(self._summary_span("warn", warn, "警告"))
         if info:
-            summary_parts.append(f"<span style='color:#2563EB;font-weight:bold;'>{info} 提示</span>")
+            summary_parts.append(self._summary_span("link", info, "提示"))
         summary_text = " · ".join(summary_parts) if summary_parts else tr("无冲突")
         self.summary_label = QLabel(f"共检测到 {len(conflicts)} 条冲突：{summary_text}")
         self.summary_label.setTextFormat(Qt.RichText)
@@ -1051,12 +1108,15 @@ class ConflictReportDialog(QDialog):
             hdr.setSectionResizeMode(col, QHeaderView.Interactive)
             hdr.resizeSection(col, w)
 
+        # 表头是 property（每次读取都翻译）；行循环里要用列数，先算一次
+        n_cols = len(self.COLS)
         self.table.setRowCount(len(conflicts))
         for row, c in enumerate(conflicts):
             # 严重级别
             sev_item = QTableWidgetItem(c.severity_label)
             sev_item.setTextAlignment(Qt.AlignCenter)
-            fg = self._SEVERITY_COLORS.get(c.severity, QColor(100, 100, 100))
+            fg = _theme_color(self._SEVERITY_TOKEN.get(c.severity, "gray"),
+                              self.dark)
             sev_item.setForeground(fg)
             font = sev_item.font()
             font.setBold(True)
@@ -1081,9 +1141,12 @@ class ConflictReportDialog(QDialog):
             self.table.setItem(row, 5, detail_item)
 
             # 行背景色
-            bg = self._SEVERITY_BG.get(c.severity)
-            if bg and not self.dark:
-                for col in range(len(self.COLS)):
+            # 行底色两套主题都铺：深色下用同色系的深底，"按级别着色"这条
+            # 信息在深色主题里才不会丢（旧实现直接 `not self.dark` 跳过）。
+            bg_name = self._SEVERITY_BG_TOKEN.get(c.severity)
+            if bg_name:
+                bg = _theme_color(bg_name, self.dark)
+                for col in range(n_cols):
                     item = self.table.item(row, col)
                     if item:
                         item.setBackground(bg)
@@ -1105,6 +1168,11 @@ class ConflictReportDialog(QDialog):
 
         layout.addLayout(btn_row)
         self.setLayout(layout)
+
+    def _summary_span(self, token_name: str, count: int, word: str) -> str:
+        """摘要行里的一个彩色片段（色值随主题，与单元格着色同源）。"""
+        return ("<span style='color:%s;font-weight:bold;'>%d %s</span>"
+                % (token(token_name, self.dark), count, word))
 
     def _export_csv(self):
         default_name = f"IP冲突报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -1132,12 +1200,16 @@ class ConflictReportDialog(QDialog):
 class SubnetUtilizationDialog(QDialog):
     """子网利用率视图：按 /24 聚合扫描结果，展示各子网的在线占比与设备分布。"""
 
-    COLS = [tr("子网"), tr("扫描 IP 数"), tr("在线"), tr("离线"), tr("利用率"), tr("设备类型分布")]
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return [tr("子网"), tr("扫描 IP 数"), tr("在线"), tr("离线"),
+                tr("利用率"), tr("设备类型分布")]
 
-    # 利用率色阶
-    _COLOR_LOW = QColor(34, 163, 74)      # 绿 <60%
-    _COLOR_MID = QColor(217, 119, 6)      # 橙 60-85%
-    _COLOR_HIGH = QColor(220, 38, 38)     # 红 >85%
+    # 利用率色阶 → 令牌名（同上：类体在 import 期求值，不能存 QColor）
+    _UTIL_TOKEN_LOW = "online"     # 绿 <60%
+    _UTIL_TOKEN_MID = "warn"       # 橙 60-85%
+    _UTIL_TOKEN_HIGH = "danger"    # 红 >85%
 
     def __init__(self, results, parent=None, dark=False):
         super().__init__(parent)
@@ -1196,7 +1268,7 @@ class SubnetUtilizationDialog(QDialog):
             # 在线
             on_item = QTableWidgetItem(str(s["online"]))
             on_item.setTextAlignment(Qt.AlignCenter)
-            on_item.setForeground(self._COLOR_LOW)
+            on_item.setForeground(_theme_color(self._UTIL_TOKEN_LOW, self.dark))
             on_font = on_item.font()
             on_font.setBold(True)
             on_item.setFont(on_font)
@@ -1219,9 +1291,10 @@ class SubnetUtilizationDialog(QDialog):
             bar.setMinimumHeight(18)
             color = self._util_color(pct)
             bar.setStyleSheet(
-                f"QProgressBar {{ border: 1px solid #999; border-radius: 2px; "
-                f"background: {'#333' if dark else '#eee'}; font-size: 11px; margin: 1px; }}"
-                f"QProgressBar::chunk {{ background: {color.name()}; border-radius: 1px; }}"
+                "QProgressBar { border: 1px solid %s; border-radius: 2px; "
+                "background: %s; font-size: 11px; margin: 1px; }"
+                "QProgressBar::chunk { background: %s; border-radius: 1px; }"
+                % (token("sep", dark), token("surface_alt", dark), color.name())
             )
             self.table.setCellWidget(row, 4, bar)
 
@@ -1261,10 +1334,10 @@ class SubnetUtilizationDialog(QDialog):
 
     def _util_color(self, pct: float) -> QColor:
         if pct > 85:
-            return self._COLOR_HIGH
+            return _theme_color(self._UTIL_TOKEN_HIGH, self.dark)
         if pct >= 60:
-            return self._COLOR_MID
-        return self._COLOR_LOW
+            return _theme_color(self._UTIL_TOKEN_MID, self.dark)
+        return _theme_color(self._UTIL_TOKEN_LOW, self.dark)
 
     def _export_csv(self):
         default_name = f"子网利用率_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -1291,7 +1364,10 @@ class SubnetUtilizationDialog(QDialog):
 class AuditLogDialog(QDialog):
     """审计日志查看器：按分类筛选 + 关键词搜索，展示扫描活动记录。"""
 
-    COLS = [tr("时间"), tr("分类"), tr("操作"), tr("详情")]
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return [tr("时间"), tr("分类"), tr("操作"), tr("详情")]
 
     def __init__(self, parent=None, dark=False):
         super().__init__(parent)
@@ -1356,7 +1432,7 @@ class AuditLogDialog(QDialog):
         # ── 底部 ──
         btn_row = QHBoxLayout()
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet("font-size: 12px; color: #666;")
+        self.count_label.setObjectName("dialogHint")
         btn_row.addWidget(self.count_label)
         btn_row.addStretch()
 
@@ -1424,7 +1500,11 @@ class AuditLogDialog(QDialog):
 class SwitchPortDialog(QDialog):
     """交换机端口映射：通过 SNMP 获取 MAC 转发表，展示 MAC → 物理端口对应关系。"""
 
-    COLS = [tr("MAC 地址"), tr("端口"), "ifIndex", "IP", tr("主机名"), tr("厂商"), tr("设备类型")]
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return [tr("MAC 地址"), tr("端口"), "ifIndex", "IP", tr("主机名"),
+                tr("厂商"), tr("设备类型")]
 
     def __init__(self, scan_results=None, parent=None, dark=False, snmp_v3_user=None):
         super().__init__(parent)
@@ -1471,7 +1551,7 @@ class SwitchPortDialog(QDialog):
 
         # ── 交换机信息标签 ──
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet("font-size: 12px; color: #555; padding: 2px 0;")
+        self.info_label.setObjectName("dialogHint")
         layout.addWidget(self.info_label)
 
         # ── 表格 ──
@@ -1495,7 +1575,7 @@ class SwitchPortDialog(QDialog):
         # ── 底部 ──
         btn_row = QHBoxLayout()
         self.status_label = QLabel(tr("就绪"))
-        self.status_label.setStyleSheet("font-size: 12px; color: #666;")
+        self.status_label.setObjectName("dialogHint")
         btn_row.addWidget(self.status_label)
         btn_row.addStretch()
 
@@ -1580,11 +1660,18 @@ class SwitchPortDialog(QDialog):
 class ChangeReportDialog(QDialog):
     """资产变更报告：展示本次扫描与上次快照之间的设备变动。"""
 
-    COLS = [tr("严重度"), tr("变更类型"), "IP", "MAC", tr("主机名"), tr("变更详情")]
+    @property
+    def COLS(self):
+        """表头文案。**每次读取时翻译** —— 写成类属性会在 import 期求值，英文界面下永远是中文表头。"""
+        return [tr("严重度"), tr("变更类型"), "IP", "MAC", tr("主机名"),
+                tr("变更详情")]
 
-    _COLOR_HIGH = QColor(220, 38, 38)     # 红
-    _COLOR_WARN = QColor(217, 119, 6)     # 橙
-    _COLOR_INFO = QColor(107, 114, 128)   # 灰
+    # 严重度 → 令牌名（同上：类体在 import 期求值，不能存 QColor）
+    _SEVERITY_TOKEN = {
+        CHG_HIGH: "danger",      # 红
+        CHG_WARNING: "warn",     # 橙
+        CHG_INFO: "gray",        # 灰
+    }
 
     def __init__(self, changes, parent=None, dark=False):
         super().__init__(parent)
@@ -1684,11 +1771,7 @@ class ChangeReportDialog(QDialog):
         self.setLayout(layout)
 
     def _severity_color(self, severity) -> QColor:
-        if severity == CHG_HIGH:
-            return self._COLOR_HIGH
-        if severity == CHG_WARNING:
-            return self._COLOR_WARN
-        return self._COLOR_INFO
+        return _theme_color(self._SEVERITY_TOKEN.get(severity, "gray"), self.dark)
 
     def _export_csv(self):
         default_name = f"资产变更报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"

@@ -660,3 +660,46 @@ QProgressBar#overviewBar[tone="warn"]::chunk {
 QProgressBar#overviewBar[tone="bad"]::chunk {
     background-color: #F87171;
 }
+
+/* ── 批次 3：对话框说明文字 + 空状态主按钮（见 light.qss 同名注释） ── */
+QLabel#dialogHint {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #969CA6;
+}
+QLabel#dialogHintSmall {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #969CA6;
+}
+QLabel#snmpTestResult {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #969CA6;
+}
+QLabel#snmpTestResult[ok="true"] {
+    color: #4ADE80;
+}
+QLabel#snmpTestResult[ok="false"] {
+    color: #F87171;
+}
+/* 深色下用**浅蓝底 + 深字**：`#4DA6FF` 配白字只有约 1.9:1，
+   配近黑字是 6.5:1（AA 要求 4.5:1）。 */
+QPushButton#emptyPrimary {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    font-weight: bold;
+    padding: 5px 16px;
+    border: 1px solid #4DA6FF;
+    border-radius: 2px;
+    background-color: #4DA6FF;
+    color: #1E1E1E;
+}
+QPushButton#emptyPrimary:hover {
+    background-color: #74B9FF;
+    border-color: #74B9FF;
+}
+QPushButton#emptyPrimary:pressed {
+    background-color: #3D93EE;
+    border-color: #3D93EE;
+}

@@ -129,7 +129,11 @@ class OverviewPanel(QWidget):
         for block, _body in (self.block_changes, self.block_risks,
                              self.block_services):
             self.summary_row.addWidget(block, 1)
-        root.addLayout(self.summary_row)
+        # stretch=1：让这两行按比例吃满剩余高度。旧实现在末尾留了一个
+        # `addStretch(1)`，于是 1080×660 的窗口下概览只占上半屏、下半屏整片空白
+        # （见 UI_REVIEW_ROUND2 §5 第 9 项）。KPI 卡片行不参与拉伸 —— 它的
+        # 高度是 Fixed，拉伸只会把空白塞进卡片内部。
+        root.addLayout(self.summary_row, 1)
 
         # ── 分布列表 ──
         self.list_row = QHBoxLayout()
@@ -140,8 +144,7 @@ class OverviewPanel(QWidget):
         for block, _body in (self.block_vendors, self.block_classes,
                              self.block_subnets):
             self.list_row.addWidget(block, 1)
-        root.addLayout(self.list_row)
-        root.addStretch(1)
+        root.addLayout(self.list_row, 1)
 
     def _make_block(self, title: str):
         """一个带标题的区块，返回 (QFrame, 用于放内容的 QVBoxLayout)。"""

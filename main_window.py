@@ -406,11 +406,15 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb3.setContentsMargins(2, 0, 2, 2)
         # 视图切换：概览 / 列表（UI_REVIEW P3-2）。放在筛选条左侧、与它同一行，
         # 因为两者是同一件事的两面 —— "换个角度看这批结果"。
-        tb3.addWidget(self._build_view_toggle())
-        tb3.addWidget(_vsep())
+        # 两个控件都存成属性：无结果时整行要隐藏（见 `_update_result_controls`）。
+        self.view_toggle = self._build_view_toggle()
+        tb3.addWidget(self.view_toggle)
+        self.tb3_sep = _vsep()
+        tb3.addWidget(self.tb3_sep)
         # stretch=1：让滚动容器吃满整行宽度。若改成"容器 + 末尾 addStretch"，
         # 容器只会拿到自己的 sizeHint（很窄），于是**永远**显示滚动条。
-        tb3.addWidget(FilterChipScroll(self.filter_bar), 1)
+        self.filter_scroll = FilterChipScroll(self.filter_bar)
+        tb3.addWidget(self.filter_scroll, 1)
         main_layout.addLayout(tb3)
 
         # ── 原工具栏上的扫描参数 / 筛选：改为菜单驱动（保留实例供设置与扫描读取） ──
@@ -512,6 +516,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.result_stack.setCurrentIndex(0)
 
         main_layout.addWidget(self.result_stack, 1)
+        # 启动时还没有结果：把「视图切换 + 筛选条」整行收起来
+        self._update_result_controls()
 
         # ── 进度条 ──
         self.progress_bar = QProgressBar()
@@ -1449,8 +1455,26 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             btn.setChecked(True)
         self._apply_view_mode(save=save)
 
+    def _update_result_controls(self):
+        """无结果时隐藏「视图切换 + 筛选条」整行（UI_REVIEW_ROUND2 §5 第 9 项）。
+
+        它们都是"对已有结果做筛选 / 换视角"的控件：一条结果都没有时，chip 上的
+        计数全是 0，视图切换也只能切到同一个空状态页 —— 留着只会让人误以为
+        "是筛选把结果藏起来了"。扫描出结果后立即恢复。
+
+        用 `getattr(..., None)` 取值：`_load_settings` 可能在构造途中就调到本
+        函数，那时这几个控件还没建出来。
+        """
+        visible = bool(self.all_results)
+        for widget in (getattr(self, "view_toggle", None),
+                       getattr(self, "tb3_sep", None),
+                       getattr(self, "filter_scroll", None)):
+            if widget is not None:
+                widget.setVisible(visible)
+
     def _apply_view_mode(self, save: bool = True):
         """按当前 view_mode 切到对应页面；无结果时一律回到空状态引导页。"""
+        self._update_result_controls()
         if not self.all_results:
             self.result_stack.setCurrentIndex(0)
             self._update_empty_hint()
@@ -1489,6 +1513,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         结果页有两张：列表（表格 + 详情面板）与概览，具体切到哪张由
         `view_mode` 决定 —— 扫描开始时不该把正在看概览的用户硬拽回列表。
         """
+        self._update_result_controls()
         if not show_results:
             self.result_stack.setCurrentIndex(0)
             self._update_empty_hint()

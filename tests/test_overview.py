@@ -233,6 +233,21 @@ class OverviewPanelTest(unittest.TestCase):
                 out.append(lab.text())
         return out
 
+    def test_block_rows_expand_to_fill_the_page(self):
+        """两行区块要能拉伸填满高度，末尾不得再有 `addStretch`。
+
+        旧实现在末尾留了一个 `addStretch(1)`，于是 1080×660 的窗口下概览只占
+        上半屏、下半屏整片空白（UI_REVIEW_ROUND2 §5 第 9 项）。
+        """
+        root = self.panel.layout()
+        last = root.itemAt(root.count() - 1)
+        self.assertIsNone(last.spacerItem(),
+                          "概览页末尾仍有 addStretch —— 下半屏会留白")
+        stretches = [root.stretch(i) for i in range(root.count())]
+        self.assertGreaterEqual(
+            stretches.count(1), 2,
+            "「变更/风险/服务暴露」与「Top 厂商/设备类型/子网利用率」两行都要能拉伸")
+
     def test_clear_shows_placeholder(self):
         self.panel.clear()
         self.assertEqual(self.panel.card_total.value.text(), "—")

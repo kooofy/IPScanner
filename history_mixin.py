@@ -53,7 +53,8 @@ class HistoryMixin:
         dlg.exec_()
 
     def _open_history_query(self):
-        dlg = HistoryQueryDialog(self, db_path=self.history_db)
+        dlg = HistoryQueryDialog(self, db_path=self.history_db,
+                                 dark=self.dark_mode)
         dlg.exec_()
 
     def _open_topology(self):

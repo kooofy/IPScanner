@@ -667,3 +667,49 @@ QProgressBar#overviewBar[tone="warn"]::chunk {
 QProgressBar#overviewBar[tone="bad"]::chunk {
     background-color: #DC2626;
 }
+
+/* ── 批次 3：对话框说明文字 + 空状态主按钮 ────────────────────
+   下面这几类标签原先在 Python 里 `setStyleSheet("color: #666; …")` 硬编码，
+   深色主题下不会跟着变（深灰压在深底上几乎不可见）。收回 QSS 后随主题自动
+   切换，色值与 `theme_tokens` 的 `muted` 保持一致。 */
+QLabel#dialogHint {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    color: #64748B;
+}
+QLabel#dialogHintSmall {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #64748B;
+}
+QLabel#snmpTestResult {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #64748B;
+}
+QLabel#snmpTestResult[ok="true"] {
+    color: #16A34A;
+}
+QLabel#snmpTestResult[ok="false"] {
+    color: #DC2626;
+}
+/* 空状态主 CTA：实心强调色。此前它与次要按钮同为浅灰底，"哪个才是推荐动作"
+   完全看不出来（UI_REVIEW_ROUND2 §5 第 9 项）。 */
+QPushButton#emptyPrimary {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+    font-weight: bold;
+    padding: 5px 16px;
+    border: 1px solid #0078D7;
+    border-radius: 2px;
+    background-color: #0078D7;
+    color: #FFFFFF;
+}
+QPushButton#emptyPrimary:hover {
+    background-color: #1A88E0;
+    border-color: #1A88E0;
+}
+QPushButton#emptyPrimary:pressed {
+    background-color: #0069BC;
+    border-color: #0069BC;
+}

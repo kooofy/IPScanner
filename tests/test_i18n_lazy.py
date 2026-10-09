@@ -431,9 +431,15 @@ class NoImportTimeTrTest(unittest.TestCase):
        「设备类型」列的型号永远显示中文品牌名。
 
     判定规则（作用域感知，不能简单地 ast.walk 到底）：
-      - 只有模块顶层的语句才算"导入期执行"；
-      - 函数 / 类 / lambda 体都是延迟执行 → 停止下探。
+      - 模块顶层语句、以及**类体**，都在 import 期执行；
+      - 函数 / lambda 体是延迟执行 → 停止下探。
         这正是 `_LAZY_ALIASES` 用 lambda 实现惰性的原理，误判会把它一并否掉。
+
+    ⚠️ 类体**不是**延迟执行。早先这里把 `ClassDef` 和函数一起当成"延迟执行"跳过，
+    于是漏掉了一整类事故：`ui_dialogs.py` 里 8 个对话框把表头写成
+    `COLS = [tr("IP 地址"), …]`，导入时就被冻成中文 —— 实测在
+    `i18n.init("en-US")` 之后 `COLS[0]` 仍是 `"IP 地址"`，英文界面下这些对话框的
+    表头永远是中文。现在类体也下探，这类写法一律得改成 `@property`。
     """
 
     SKIP_DIRS = {"venv", "build", "dist", "dist_new", "__pycache__",
@@ -449,8 +455,11 @@ class NoImportTimeTrTest(unittest.TestCase):
         def walk(node):
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                      ast.ClassDef, ast.Lambda)):
+                                      ast.Lambda)):
                     continue          # 延迟执行，不下探
+                if isinstance(child, ast.ClassDef):
+                    walk(child)       # 类体在 import 期就执行 → 必须下探
+                    continue
                 if (isinstance(child, ast.Call)
                         and isinstance(child.func, ast.Name)
                         and child.func.id in ("tr", "_tr")):

@@ -58,7 +58,11 @@ class EmptyStatePanel(QWidget):
         btns.setSpacing(8)
         btns.addStretch(1)
         self.btn_local = QPushButton(tr("扫描本机所在子网"))
-        self.btn_local.setObjectName("primaryBtn")
+        # 主 CTA 用实心强调色（`#emptyPrimary`），与次按钮（`#emptySecondary`）
+        # 拉开层级 —— 两者同为浅灰底时，"哪个才是推荐动作"完全看不出来。
+        # 这里刻意**不复用** `#primaryBtn`：那是全应用共用的浅灰按钮样式，
+        # 改它会把工具栏的「扫描」和两个对话框按钮一起改掉。
+        self.btn_local.setObjectName("emptyPrimary")
         self.btn_local.setMinimumHeight(32)
         self.btn_local.clicked.connect(self.scan_local_requested.emit)
         btns.addWidget(self.btn_local)
