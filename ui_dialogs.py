@@ -569,6 +569,18 @@ class TopologyDialog(QDialog):
     否则回退到网关为中心的星型拓扑。
     """
 
+    #: 星型拓扑最多画多少个**在线**节点，超出的只计数不画。
+    _MAX_STAR_NODES = 400
+
+    #: 节点数超过这个值就不画辐条 —— 几百条 1px 细线汇聚圆心，缩小后会退化成
+    #: 摩尔纹（2026-10-09 用户实测：1023 台时整个视图完全无法阅读）。
+    _MAX_STAR_EDGES = 150
+
+    #: 在线节点超过这个数量就不再逐点标注 IP（信息改走悬停提示），
+    #: 否则文字会糊成一片，反而比不标更难读。同心环的环内间距是常数 92px，
+    #: 所以到一两百台时标 IP 仍然压不到字，再往上就没意义了（整图已被缩放）。
+    _MAX_LABELLED_NODES = 150
+
     def __init__(self, results, gateway_ip, dark, parent=None, topology=None):
         super().__init__(parent)
         self.setWindowTitle(tr("网络拓扑视图"))
@@ -579,19 +591,22 @@ class TopologyDialog(QDialog):
         self.gateway_ip = gateway_ip
         self.dark = dark
         self.topology = topology  # Topology 对象，None = 回退星型
+        self._topo_note = ""      # 图例尾部的一句补充（隐藏了多少台等）
 
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.view = QGraphicsView()
         self.view.setRenderHint(QPainter.Antialiasing, True)
+        # 画布始终按 fitInView 自适应铺满，滚动条只会是残留噪声。
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scene = QGraphicsScene()
         self.scene.setBackgroundBrush(QBrush(_theme_color("topo_bg", dark)))
         self.view.setScene(self.scene)
         layout.addWidget(self.view, 1)
 
         self.legend = QLabel()
-        self._update_legend()
         layout.addWidget(self.legend)
 
         self.setLayout(layout)
@@ -600,6 +615,34 @@ class TopologyDialog(QDialog):
             self._build_real_topology()
         else:
             self._build_star_topology()
+        # 图例放在构建**之后**：星型拓扑要往里补"已隐藏 N 台离线设备"。
+        self._update_legend()
+
+    # ── 视口自适应 ──
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_view()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_view()
+
+    def _fit_view(self):
+        """把整个场景缩放到刚好放进视口，且**只缩不放**。
+
+        老实现从头到尾没有 `fitInView`：`view.transform().m11()` 恒为 1.0，而
+        场景在千台规模下是 14000px 见方 —— 用户只看得到左上角一小块，几百条
+        辐条线挤成摩尔纹（见 TRAPS「拓扑视图」）。这里补上自适应，同时挡掉
+        "放大"：三五个节点时不该被糊成一屏。
+        """
+        rect = self.scene.itemsBoundingRect()
+        if rect.isEmpty():
+            return
+        self.view.fitInView(rect.adjusted(-40, -40, 40, 40), Qt.KeepAspectRatio)
+        if self.view.transform().m11() > 1.0:
+            self.view.resetTransform()
+            self.view.centerOn(rect.center())
 
     def _update_legend(self):
         # ⚠️ 色值**不写进 `tr()` 的键**：旧写法把"颜色"和"文案"焊死在同一个
@@ -609,13 +652,16 @@ class TopologyDialog(QDialog):
         items = [
             self._legend_item("gateway", "●", tr("网关")),
             self._legend_item("online", "●", tr("在线")),
-            self._legend_item("topo_offline", "●", tr("离线")),
         ]
         if self.topology and self.topology.links:
             items += [
                 self._legend_item("topo_link", "━", "LLDP"),
                 self._legend_item("cdp", "━", "CDP"),
+                # 真实拓扑里终端设备仍按在线/离线着色，图例保留
+                self._legend_item("topo_offline", "●", tr("离线")),
             ]
+        elif self._topo_note:
+            items.append(self._topo_note)
         self.legend.setText("   ".join(items))
         self.legend.setStyleSheet("font-size: 12px; padding: 4px;")
 
@@ -625,6 +671,42 @@ class TopologyDialog(QDialog):
 
     def _text_color(self):
         return _theme_color("topo_fg", self.dark)
+
+    @staticmethod
+    def _ring_layout(n: int, first_radius: float = 150.0,
+                     ring_gap: float = 92.0, spacing: float = 92.0):
+        """把 n 个点铺在同心环上，返回 `[(x, y), ...]`。
+
+        半径按 **√n** 量级增长（每个环的容量随周长增长），而不是老实现的
+        `R = max(200, 50 + n*7)` 那种**线性**增长 —— 后者在 1000 台时把画布
+        撑到 14000px 见方，任何视图都读不了。环间距与环内间距都是常数，
+        所以每个点的横向余量始终约等于 `spacing`，标注 IP 不会互相压字。
+        """
+        out = []
+        ring = 0
+        while len(out) < n:
+            r = first_radius + ring * ring_gap
+            cap = max(6, int(2 * math.pi * r / spacing))
+            take = min(cap, n - len(out))
+            # 奇数环错开半个间隔，避免内外环的点连成一条半径
+            offset = 0.5 if ring % 2 else 0.0
+            for i in range(take):
+                ang = 2 * math.pi * (i + offset) / cap - math.pi / 2
+                out.append((r * math.cos(ang), r * math.sin(ang)))
+            ring += 1
+        return out
+
+    def _host_tooltip(self, r) -> str:
+        """节点悬停提示。逐点标主机名会压字，完整信息改放这里。"""
+        parts = [r.ip]
+        if r.hostname:
+            parts.append(r.hostname)
+        parts.append(tr("在线") if r.status == "online" else tr("离线"))
+        if r.mac:
+            parts.append(r.mac.upper())
+        if r.vendor:
+            parts.append(r.vendor)
+        return "\n".join(parts)
 
     # ── 真实拓扑 (LLDP/CDP) ──
 
@@ -743,52 +825,72 @@ class TopologyDialog(QDialog):
     # ── 回退星型拓扑 ──
 
     def _build_star_topology(self):
-        cx, cy = 0, 0
-        hosts = self.results
-        n = len(hosts)
-        R = max(200, 50 + n * 7)
-        edge_pen = QPen(self._muted(), 1)
+        """网关居中 + **在线**设备同心环（离线默认不画）。
 
-        for i, r in enumerate(hosts):
-            ang = 2 * math.pi * i / n if n else 0
-            x = cx + R * math.cos(ang)
-            y = cy + R * math.sin(ang)
-            self.scene.addLine(cx, cy, x, y, edge_pen)
-            self._add_host_node(x, y, r)
+        离线设备常占九成以上（2026-10-09 实测 1023 台里 952 台离线），画出来
+        只是把圆心糊成一团噪声。隐藏了多少台写进图例，不静默丢数据。
+        """
+        online = [r for r in self.results if r.status == "online"]
+        hidden = len(self.results) - len(online)
+        hosts = online[:self._MAX_STAR_NODES]
+        over = len(online) - len(hosts)
 
-        self._add_gateway_node(cx, cy)
+        if hosts:
+            # 几百条 1px 辐条缩到一屏就会退化成摩尔纹；设备多时干脆不画线。
+            draw_edges = len(hosts) <= self._MAX_STAR_EDGES
+            show_labels = len(hosts) <= self._MAX_LABELLED_NODES
+            edge_pen = QPen(self._muted(), 1)
+            for (x, y), r in zip(self._ring_layout(len(hosts)), hosts):
+                if draw_edges:
+                    self.scene.addLine(0, 0, x, y, edge_pen)
+                self._add_host_node(x, y, r, show_labels)
 
-        if self.scene.itemsBoundingRect().isValid():
-            self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-50, -50, 50, 50))
+        self._add_gateway_node(0, 0)
 
-    def _add_host_node(self, x, y, r):
-        online = r.status == "online"
-        color = _theme_color("online" if online else "topo_offline", self.dark)
+        notes = []
+        if hidden:
+            notes.append(tr("已隐藏 {n} 台离线设备").format(n=hidden))
+        if over:
+            notes.append(tr("另有 {n} 台在线设备未显示").format(n=over))
+        self._topo_note = "；".join(notes)
+
+        rect = self.scene.itemsBoundingRect()
+        if not rect.isEmpty():
+            self.scene.setSceneRect(rect.adjusted(-60, -60, 60, 60))
+
+    def _add_host_node(self, x, y, r, show_label: bool = True):
+        """画一个在线终端节点；标签只在设备不多时画，完整信息一律进悬停提示。"""
         node = QGraphicsEllipseItem(x - 14, y - 14, 28, 28)
-        node.setBrush(QBrush(color))
+        node.setBrush(QBrush(_theme_color("online", self.dark)))
         node.setPen(QPen(QColor(0, 0, 0, 60), 1))
+        node.setToolTip(self._host_tooltip(r))
         self.scene.addItem(node)
-        label = r.ip + (("\n" + r.hostname) if r.hostname else "")
-        txt = QGraphicsTextItem(label)
+        if not show_label:
+            return
+        # 只标 IP：主机名重复时（实测 8 台同名）标上去反而误导，改放悬停提示。
+        txt = QGraphicsTextItem(r.ip)
         txt.setDefaultTextColor(self._text_color())
-        txt.setPos(x - 55, y + 16)
+        txt.setScale(0.75)
+        txt.setPos(x - 28, y + 16)
+        txt.setToolTip(self._host_tooltip(r))
         self.scene.addItem(txt)
 
     def _add_gateway_node(self, x, y):
-        sub = self.gateway_ip or tr("未知")
+        gw = self.gateway_ip or tr("未知")
+        host = ""
         for r in self.results:
             if r.ip == self.gateway_ip:
-                if r.hostname:
-                    sub = f"{self.gateway_ip}\n{r.hostname}"
+                host = r.hostname or ""
                 break
-        color = _theme_color("gateway", self.dark)
+        tip = "\n".join(p for p in (gw, host) if p)
         node = QGraphicsEllipseItem(x - 24, y - 24, 48, 48)
-        node.setBrush(QBrush(color))
+        node.setBrush(QBrush(_theme_color("gateway", self.dark)))
         node.setPen(QPen(QColor(0, 0, 0, 80), 2))
+        node.setToolTip(tip)
         self.scene.addItem(node)
-        txt = QGraphicsTextItem(tr("网关\n") + sub)
+        txt = QGraphicsTextItem(tr("网关\n") + tip)
         txt.setDefaultTextColor(self._text_color())
-        txt.setPos(x - 45, y + 28)
+        txt.setPos(x - 45, y + 34)
         self.scene.addItem(txt)
 
     def _muted(self):
