@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""扫描预设（对应 UI_REVIEW.md 的 P1-3）。
+"""扫描预设（对应 docs/reviews/UI_REVIEW.md 的 P1-3）。
 
 设计动机
 --------

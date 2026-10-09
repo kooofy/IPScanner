@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""结果筛选条（对应 UI_REVIEW.md 的 P1-4）。
+"""结果筛选条（对应 docs/reviews/UI_REVIEW.md 的 P1-4）。
 
 设计动机
 --------

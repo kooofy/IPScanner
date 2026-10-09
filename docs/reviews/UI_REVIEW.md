@@ -1,5 +1,22 @@
 # IPScanner 界面（UI/UX）评审与改进建议
 
+> ## 状态：已关闭 · 2026-10-09 · 关闭版本 v1.7.4
+>
+> 本文档的建议**已全部落地**，此后**仅作历史记录，不再更新**。
+> 发现新问题请另开文档，不要在本文件里追加条目。
+>
+> | 项 | 值 |
+> |---|---|
+> | 评审对象 | `kooofy/IPScanner` @ `db84b58`（v1.6.0） |
+> | 关闭版本 | v1.7.4 |
+> | 落地情况 | P0-1~2 / P1-1~4 / P2-1~4（共 10 项）+ P3 的 4 个差异化方向，**全部落地** |
+> | 落地位置与验证 | `README.md`（本目录） |
+> | 改造后的实机验收 | `UI_REVIEW_ROUND2.md`（本目录） |
+>
+> 对应模块：`detail_panel.py` / `empty_state.py` / `scan_status.py` / `filter_bar.py` /
+> `favorites.py` / `scan_presets.py` / `theme_tokens.py` / `design_tokens.py` /
+> `overview.py` / `risk_rules.py` / `history_store.device_timeline()`。
+
 > 评审对象：`kooofy/IPScanner` @ `db84b58`（v1.6.0）
 > 评审方式：通读 UI 层全部源码（`main_window.py` 1030 行 / `main_window_tree.py` 681 行 / `ui_dialogs.py` 1747 行 / `assets/styles/*.qss` 686 行）+ 对照市面同类产品
 > 评审日期：2026-10-08

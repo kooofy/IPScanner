@@ -1,0 +1,114 @@
+# 评审文档归档
+
+> 这里存放 IPScanner 历次**代码 / 界面评审**的历史记录。
+> 三份文档**均已关闭**，只作存档，不再更新。
+> 发现新问题请另开一份新文档，**不要**往这里的文件追加条目。
+
+归档时间：2026-10-09 ｜ 归档时版本：v1.7.4
+
+---
+
+## 1. 文档清单
+
+| 文档 | 评审对象 | 评审日期 | 状态 | 关闭版本 |
+|---|---|---|---|---|
+| [`CODE_REVIEW.md`](CODE_REVIEW.md) | `f15341a`（v1.6.0） | 2026-10-06 | **已关闭** | v1.7.4 |
+| [`UI_REVIEW.md`](UI_REVIEW.md) | `db84b58`（v1.6.0） | 2026-10-08 | **已关闭** | v1.7.4 |
+| [`UI_REVIEW_ROUND2.md`](UI_REVIEW_ROUND2.md) | `638c462`（UI 改造 P0–P3） | 2026-10-09 | **已关闭** | v1.7.4 |
+
+第二轮界面验收的实机截图证据在同级目录 **`../ui-review-round2/`**（18 张）。
+
+---
+
+## 2. 为什么要归档并标注「已关闭」
+
+这三份文档原本放在仓库根目录，且用的是「待办」口吻。问题是：
+
+- 条目做完了，文档却还写着"建议…"，**下一个读的人（或下一轮的人）会把已定的事再争一遍**；
+- 根目录躺着三份 `*_REVIEW.md`，看起来像"当前待办清单"，实际是历史。
+
+所以本轮做了两件事：**统一加「已关闭」状态横幅** + **移入 `docs/reviews/`**。
+根目录只保留 `README.md`。
+
+---
+
+## 3. CODE_REVIEW.md 落地对照
+
+12 项意见中 **8 项已落地**，4 项明确未做（**已确认，不要再当"遗漏"重提**）。
+
+### 已落地（8 项）
+
+| 编号 | 事项 | 落地位置 |
+|---|---|---|
+| P0-1 | `_syn_failed` / `_raw_cap_cache` 跨模块未共享 | `scanner/constants.py` 改用 `threading.Event()`；`ports.py` / `engine.py` 统一走 `_C.` 属性访问 |
+| P0-2 | IPv6 被静默接受 → 假"全离线"结果 | `scanner/range.py` 显式版本闸门（`net.version != 4`），另有 `is_ipv6_range()` 供提示分流 |
+| P0-3 | `requirements-dev.txt` 里 spec 文件名过期 | 已改为 `pyinstaller IPScanner.spec` |
+| P1-1 | 端口扫描线程池反复新建（最坏 3200+ 线程） | `bounded_pool.py` |
+| P1-2 | ping 走子进程，与竞品有速度代差 | `scanner/ping.py`（原生 ICMP） |
+| P1-3 | `scan()` 400 行，扩展需改核心 | `scanner/engine.py` 重构 + `models.py` / `constants.py` 拆分 |
+| P2-1 | 定时扫描 + 变更告警 | `scheduler.py` / `change_detector.py` / `notifier.py` |
+| P2-2 | 服务版本指纹库 | `service_fingerprints.py` |
+
+### 未落地（4 项）
+
+| 编号 | 事项 | 现状 |
+|---|---|---|
+| P1-4 | `ui_dialogs.py` 拆分（评审时 1747 行） | **未做**；已长到 **1898 行**，是全仓最大文件，列为下一轮结构改造目标 |
+| P2-3 | 插件 / Fetcher 机制 | **未做**；仍无 `plugins/` 目录 |
+| P2-4 | macOS / Linux CI | **未做**；`.github/workflows/ci.yml` 仍只有 `windows-latest` |
+| P2-5 | `oui.db` 入 Git LFS | **未做**；`.gitattributes` 无 lfs 条目 |
+
+---
+
+## 4. UI_REVIEW.md 落地对照
+
+**全部落地**：P0-1~2、P1-1~4、P2-1~4（共 10 项）+ P3 的 4 个差异化方向。
+
+| 编号 | 事项 | 落地位置 |
+|---|---|---|
+| P0-1 | 详情面板（QSplitter 主从布局） | `detail_panel.py` |
+| P0-2 | 空状态 + 扫描态摘要条 | `empty_state.py` / `scan_status.py` |
+| P1-1 | 工具栏图标加文字 + 动作分组 | `main_window._init_toolbar()` |
+| P1-2 | 13 列 → 列预设 | `main_window.COLUMN_PRESETS` |
+| P1-3 | 扫描预设 + 设备收藏 | `scan_presets.py` / `favorites.py` |
+| P1-4 | 筛选条常驻 + 计数 | `filter_bar.py` |
+| P2-1 | 视觉令牌（圆角 / 间距 / 行高） | `theme_tokens.py` / `design_tokens.py` |
+| P2-2 | 内联样式迁到 QSS | 4 个新模块零内联 `setStyleSheet`；`ui_dialogs.py` 硬编码色 20 → 5（余 5 处是拓扑绘图的半透明描边，本就与主题无关） |
+| P2-3 | 右键菜单按动作语义分组 | `main_window_tree._show_context_menu()` |
+| P2-4 | 高 DPI / 最小窗口 | `setDevicePixelRatio`；最小窗口 1024×640 |
+| P3-1 | 变更时间线（常驻 chip + 行内角标） | `history_store.device_timeline()` + `ui_logic.build_change_index()` |
+| P3-2 | 概览仪表盘 + 列表/概览视图切换 | `overview.py` + `main_window.VIEW_MODES` |
+| P3-3 | 跟随系统深浅色 | `system_theme.resolve_dark()` |
+| P3-4 | 风险列 / 评分 | `risk_rules.py` |
+
+---
+
+## 5. UI_REVIEW_ROUND2.md 落地对照
+
+**9 项全部修复**，由 v1.7.1 → v1.7.4 四个版本关闭。
+
+| 编号 | 事项 | 落地位置 | 回归测试 |
+|---|---|---|---|
+| P0-1（续） | 深色下服务子项 / 制造商列不跟随主题 | `main_window_tree._refresh_child_marks()`、`main_window._link_color()` 改走 `token()` | `test_theme_marks.py` |
+| P0-4 | 93 处 `QMessageBox` 按钮仍是英文 | `ui_msg.py` 集中本地化 | `test_msg_buttons.py` |
+| 新增 P1 | 切语言后列宽不重算 → 多列截断 | `table/header_lang` 语言戳 + `_COLUMN_WIDTH_OVERRIDES`（同语言不重算） | `test_column_widths.py` |
+| 新增 P1 | 状态栏右侧整段漏翻 | 4 条 f-string 改带占位符的 `tr()` | — |
+| P2 | 空状态页主次按钮 / 隐藏筛选条 / 概览页留白 / 默认排序 / `ui_dialogs` 硬编码色 | `empty_state.py`、`_update_result_controls()`、`overview.py` 等 | `test_result_controls.py` |
+
+---
+
+## 6. 引用约定（重要）
+
+代码与测试的注释里引用本目录文档时，**一律写带路径的形式**：
+
+```
+docs/reviews/UI_REVIEW.md P3-2
+docs/reviews/CODE_REVIEW.md P2-14
+```
+
+历史上存在过 `UI_REVIEW P3-2` 这种**不带路径**的短引用（评审文档还在仓库根目录时留下的）。
+本次归档已把它们批量补齐路径。若你仍看到不带路径的旧引用，它指的就是本目录里的同名文档。
+
+> 注意：`UI_REVIEW.md` 与 `UI_REVIEW_ROUND2.md` 是**两份不同**的文档 ——
+> 前者是 2026-10-08 的第一轮界面评审，后者是 2026-10-09 对改造结果的第二轮验收。
+> 引用时不要混用编号。

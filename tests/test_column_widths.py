@@ -85,7 +85,7 @@ class ColumnWidthTableTest(unittest.TestCase):
     def test_status_column_covers_the_measured_english_need(self):
         """把实测值钉成数字：英文 `Online` 需要 82px，而中文基线只有 78px。
 
-        78 < 82 就是 `Onl…` 的成因（证据见 UI_REVIEW_ROUND2.md §3 与
+        78 < 82 就是 `Onl…` 的成因（证据见 docs/reviews/UI_REVIEW_ROUND2.md §3 与
         docs/ui-review-round2/10-英文-列表-状态列被截断.png）。
         """
         zh = column_widths_for("zh-CN")[1]

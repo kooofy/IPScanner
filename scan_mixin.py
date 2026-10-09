@@ -430,7 +430,7 @@ class ScanMixin:
         self.stop_btn.setEnabled(True)
         self.act_export.setEnabled(False)
         self.act_clear.setEnabled(False)
-        # 扫描态摘要条（UI_REVIEW P0-2 后半）：阶段 / 已扫 / 在线 / 有服务 /
+        # 扫描态摘要条（docs/reviews/UI_REVIEW.md P0-2 后半）：阶段 / 已扫 / 在线 / 有服务 /
         # 用时 / [停止]。计数在 `_on_scan_result` 里累加，这里只负责复位。
         self._scan_online = 0
         self._scan_services = 0

@@ -366,6 +366,9 @@ IPScanner/
 ├─ app_logging.py             # 统一日志（轮转文件）
 ├─ bounded_pool.py            # 有界并发执行工具
 ├─ tests/                     # 单元测试（标准库 unittest）
+├─ docs/                      # 文档
+│  ├─ reviews/                #   历次代码 / 界面评审归档（均已关闭，只作历史记录）
+│  └─ ui-review-round2/       #   第二轮界面验收截图（18 张）
 └─ IPScanner.spec             # GUI 版 PyInstaller 打包配方（onedir，名字不带版本号）
 └─ IPScanner_cli.spec         # CLI 版打包配方（onefile）
 ```

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设备收藏（对应 UI_REVIEW.md 的 P1-3）。
+"""设备收藏（对应 docs/reviews/UI_REVIEW.md 的 P1-3）。
 
 设计动机
 --------

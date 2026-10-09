@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""空状态面板（对应 UI_REVIEW.md 的 P0-2）。
+"""空状态面板（对应 docs/reviews/UI_REVIEW.md 的 P0-2）。
 
 设计动机
 --------

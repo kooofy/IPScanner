@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设备详情面板（对应 UI_REVIEW.md 的 P0-1）。
+"""设备详情面板（对应 docs/reviews/UI_REVIEW.md 的 P0-1）。
 
 设计动机
 --------
@@ -16,7 +16,7 @@
 ----
 - 所有显示文本经 `tr()` 惰性翻译，不预先拼接语言相关字符串；
 - **配色一律走 QSS**（objectName 选择器），不在 Python 里硬编码颜色 ——
-  否则深色主题下会出现"漏白"（见 UI_REVIEW.md P2-2）。
+  否则深色主题下会出现"漏白"（见 docs/reviews/UI_REVIEW.md P2-2）。
 """
 from datetime import datetime
 

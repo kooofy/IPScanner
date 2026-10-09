@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设计令牌：圆角 / 间距 / 行高的**唯一刻度**（UI_REVIEW.md 的 P2-1.1 与 P2-1.4）。
+"""设计令牌：圆角 / 间距 / 行高的**唯一刻度**（docs/reviews/UI_REVIEW.md 的 P2-1.1 与 P2-1.4）。
 
 与 `theme_tokens` 的分工
 ------------------------
@@ -54,7 +54,7 @@ SPACING_SCALE = (SPACING_XS, SPACING_SM, SPACING_MD, SPACING_LG, SPACING_XL)
 
 # ── 结果表格行高（px）──────────────────────────────────────────────────
 #
-# 行高两档（UI_REVIEW.md P2-1.2）。旧实现 `QTreeWidget::item { min-height: 26px }`
+# 行高两档（docs/reviews/UI_REVIEW.md P2-1.2）。旧实现 `QTreeWidget::item { min-height: 26px }`
 # 写死，扫 /24 出 254 行时一屏看不完也调不动。
 #
 # 规范值语言无关（`compact`/`comfortable`），显示名走 `density_label()` 惰性翻译。

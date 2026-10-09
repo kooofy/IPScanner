@@ -1,5 +1,22 @@
 # IPScanner 界面改造验收（第二轮）
 
+> ## 状态：已关闭 · 2026-10-09 · 关闭版本 v1.7.4
+>
+> 本文档列出的问题**已全部修复**，此后**仅作历史记录，不再更新**。
+> 发现新问题请另开文档，不要在本文件里追加条目。
+>
+> | 项 | 值 |
+> |---|---|
+> | 验收对象 | `kooofy/IPScanner` @ `638c462`（UI 改造 P0–P3） |
+> | 关闭版本 | v1.7.4（由 v1.7.1 → v1.7.2 → v1.7.3 → v1.7.4 四个版本关闭） |
+> | 落地情况 | 9 项全部修复（P0-1 续 / P0-4 / 新增 P1×2 / P2 其它×5） |
+> | 落地位置与验证 | `README.md`（本目录） |
+>
+> 主要落点：`main_window_tree._refresh_child_marks()`、`main_window._link_color()`、
+> `ui_msg.py`、`table/header_lang` + `_COLUMN_WIDTH_OVERRIDES`、状态栏 `tr()`、
+> `empty_state` 主次按钮、`_update_result_controls()`。
+> 回归测试：`test_theme_marks` / `test_msg_buttons` / `test_column_widths` / `test_result_controls`。
+
 > 验收对象：`kooofy/IPScanner` @ `638c462`（`feat(ui): 界面层改造（P0–P3 共 13 项）`，2026-10-09 06:51）
 > 对照基准：`UI_REVIEW.md`（同一提交入库的那份，293 行）+ 2026-10-08 那轮基于**实机渲染**的评审
 > 验收方式：**跑起来量**，不是读代码猜 —— 真实 Qt 布局（必须 `show()`，否则 `viewport` 尺寸是错的）、

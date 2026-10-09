@@ -869,7 +869,7 @@ class TreeMixin:
         if not mac and lib_dev:
             mac = (lib_dev.get("mac") or "").strip()
 
-        # 菜单按"动作语义"分组（UI_REVIEW P2-3）。
+        # 菜单按"动作语义"分组（docs/reviews/UI_REVIEW.md P2-3）。
         # 旧实现把 20+ 个动作平铺成一层：复制 4 项、工具 8 项、地址库 3 项…
         # 用户要在一条长菜单里逐行扫，且"复制 MAC"和"远程关机"视觉权重相同。
         menu = QMenu(self)
@@ -880,7 +880,7 @@ class TreeMixin:
         act_rescan.triggered.connect(lambda: self._rescan_single_item(top_item))
         menu.addAction(act_rescan)
 
-        # 收藏（UI_REVIEW P1-3）：轻量"常看这几台"，与 MAC 地址库（资产台账）不同
+        # 收藏（docs/reviews/UI_REVIEW.md P1-3）：轻量"常看这几台"，与 MAC 地址库（资产台账）不同
         if _result is not None:
             _is_fav = self.favorites.is_favorite(_result)
             act_fav = QAction(tr("取消收藏") if _is_fav else tr("加入收藏"), self)

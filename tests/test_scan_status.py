@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""扫描态摘要条（UI_REVIEW P0-2 后半）。
+"""扫描态摘要条（docs/reviews/UI_REVIEW.md P0-2 后半）。
 
 覆盖四层，任何一层断了都能定位到具体环节：
 

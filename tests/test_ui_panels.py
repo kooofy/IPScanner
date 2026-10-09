@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""详情面板与空状态面板的行为契约（UI_REVIEW P0-1 / P0-2）。
+"""详情面板与空状态面板的行为契约（docs/reviews/UI_REVIEW.md P0-1 / P0-2）。
 
 用真实的 Qt widget（offscreen）验证渲染结果，而不是断言"函数被调用过" ——
 这两块 UI 的价值全在"到底显示了什么"，只测调用链等于没测。

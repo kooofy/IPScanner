@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""风险评分与风险列（UI_REVIEW.md P3-4）。
+"""风险评分与风险列（docs/reviews/UI_REVIEW.md P3-4）。
 
 守四件事：
 

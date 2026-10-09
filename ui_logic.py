@@ -259,7 +259,7 @@ def build_overview(results, changes=None, conflicts=None,
                    top_n: int = OVERVIEW_TOP_N) -> dict:
     """汇总概览页需要的全部指标（纯函数，可脱离 Qt 单测）。
 
-    对应 UI_REVIEW.md 的 P3-2：把原先只活在 `SubnetUtilizationDialog` 里的
+    对应 docs/reviews/UI_REVIEW.md 的 P3-2：把原先只活在 `SubnetUtilizationDialog` 里的
     统计提升为常驻概览。**这里只算数据、不拼文案** —— 文案由 `overview.py`
     渲染时 `tr()`，否则英文界面会拿到一堆中文串。
 
@@ -331,7 +331,7 @@ def build_overview(results, changes=None, conflicts=None,
     }
 
 
-# ── 首次启动授权声明（CODE_REVIEW P2-14）──────────────────────────────
+# ── 首次启动授权声明（docs/reviews/CODE_REVIEW.md P2-14）──────────────────────────────
 
 #: 授权声明的**版本号**。🔴 改动声明文案（哪怕只加一句）就必须 +1 —— 否则已经
 #: 确认过旧版本的用户永远看不到新增的免责条款，而那往往正是最要紧的一句。

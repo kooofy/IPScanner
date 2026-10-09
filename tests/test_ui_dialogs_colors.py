@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""对话框配色统一走语义色令牌 + 表头惰性翻译（批次 3 / UI_REVIEW_ROUND2 §5 第 8 项）。
+"""对话框配色统一走语义色令牌 + 表头惰性翻译（批次 3 / docs/reviews/UI_REVIEW_ROUND2.md §5 第 8 项）。
 
 背景
 ----

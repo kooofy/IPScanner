@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""语义色令牌（对应 UI_REVIEW.md 的 P2-1）。
+"""语义色令牌（对应 docs/reviews/UI_REVIEW.md 的 P2-1）。
 
 为什么需要这个模块
 ------------------

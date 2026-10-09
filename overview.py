@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""扫描结果概览仪表盘（对应 UI_REVIEW.md 的 P3-2）。
+"""扫描结果概览仪表盘（对应 docs/reviews/UI_REVIEW.md 的 P3-2）。
 
 设计动机
 --------
@@ -16,7 +16,7 @@ Top 厂商。这里把散落在各处的统计提升为**常驻页面**，让"�
 - 指标计算全在 `ui_logic.build_overview`（纯函数，可脱离 Qt 单测）；
 - 本模块**只负责渲染**，不做任何统计；
 - 配色一律走 QSS（objectName / 动态属性选择器），不在 Python 里硬编码颜色 ——
-  否则深色主题下会"漏白"（见 UI_REVIEW.md P2-2）。
+  否则深色主题下会"漏白"（见 docs/reviews/UI_REVIEW.md P2-2）。
 """
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -131,7 +131,7 @@ class OverviewPanel(QWidget):
             self.summary_row.addWidget(block, 1)
         # stretch=1：让这两行按比例吃满剩余高度。旧实现在末尾留了一个
         # `addStretch(1)`，于是 1080×660 的窗口下概览只占上半屏、下半屏整片空白
-        # （见 UI_REVIEW_ROUND2 §5 第 9 项）。KPI 卡片行不参与拉伸 —— 它的
+        # （见 docs/reviews/UI_REVIEW_ROUND2.md §5 第 9 项）。KPI 卡片行不参与拉伸 —— 它的
         # 高度是 Fixed，拉伸只会把空白塞进卡片内部。
         root.addLayout(self.summary_row, 1)
 

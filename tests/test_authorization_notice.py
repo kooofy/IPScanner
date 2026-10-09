@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""首次启动授权声明（CODE_REVIEW P2-14）。
+"""首次启动授权声明（docs/reviews/CODE_REVIEW.md P2-14）。
 
 背景
 ----

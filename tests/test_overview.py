@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""概览仪表盘测试（UI_REVIEW P3-2）。
+"""概览仪表盘测试（docs/reviews/UI_REVIEW.md P3-2）。
 
 分三层：
 1. `ui_logic.build_overview` —— 纯统计，脱离 Qt 也能跑；
@@ -8,7 +8,7 @@
 3. `OverviewPanel` —— 渲染层，重点是"规范值必须惰性翻译"和"重填不泄漏控件"。
 
 最后一类是 QSS 覆盖守卫：概览用的 objectName 必须在浅色/深色两套样式里都存在，
-否则深色主题下会出现"漏白"（与 UI_REVIEW P2-2 同类问题）。
+否则深色主题下会出现"漏白"（与 docs/reviews/UI_REVIEW.md P2-2 同类问题）。
 """
 import io
 import os
@@ -237,7 +237,7 @@ class OverviewPanelTest(unittest.TestCase):
         """两行区块要能拉伸填满高度，末尾不得再有 `addStretch`。
 
         旧实现在末尾留了一个 `addStretch(1)`，于是 1080×660 的窗口下概览只占
-        上半屏、下半屏整片空白（UI_REVIEW_ROUND2 §5 第 9 项）。
+        上半屏、下半屏整片空白（docs/reviews/UI_REVIEW_ROUND2.md §5 第 9 项）。
         """
         root = self.panel.layout()
         last = root.itemAt(root.count() - 1)

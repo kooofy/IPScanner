@@ -136,7 +136,7 @@ def column_widths_for(lang: str) -> dict:
 #: 为什么把「跟随系统」放第一位并作为新装默认：Windows 10/11 的
 #: 个性化设置是用户表达明暗偏好的标准入口，工具理应尊重它；而旧版的
 #: 「18:00 后自动转深色」是个拍脑袋的猜测，做夜间运维的人白天也想深色。
-#: 所以跟随系统升为默认，按时间降级为可选项（见 UI_REVIEW.md P3-3）。
+#: 所以跟随系统升为默认，按时间降级为可选项（见 docs/reviews/UI_REVIEW.md P3-3）。
 #:
 #: key 复用 system_theme 的常量，避免两处各写一份字符串字面量。
 THEME_MODES = (
@@ -149,7 +149,7 @@ THEME_MODES = (
 #: 主题模式默认值（新装 / 配置损坏时）
 DEFAULT_THEME_MODE = system_theme.DEFAULT_MODE
 
-#: 结果视图模式：key → 规范中文标签（UI_REVIEW P3-2）。
+#: 结果视图模式：key → 规范中文标签（docs/reviews/UI_REVIEW.md P3-2）。
 #:
 #: 「列表」是原来的表格视图，「概览」是本次新增的仪表盘。两者共用同一份
 #: 扫描结果，切换不重新扫描、也不改变筛选条件。
@@ -207,7 +207,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             QSettings.IniFormat
         )
 
-        # 设备收藏（UI_REVIEW P1-3）：轻量"常看这几台"标记，与 MAC 地址库
+        # 设备收藏（docs/reviews/UI_REVIEW.md P1-3）：轻量"常看这几台"标记，与 MAC 地址库
         # （资产台账）职责不同，故分开存储。
         self.favorites = FavoriteStore(self.settings)
         # 命名扫描预设：网段 + 级别 + 协议集 + 探测方式 的组合
@@ -282,7 +282,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         main_layout.setSpacing(2)
         main_layout.setContentsMargins(4, 4, 4, 4)
 
-        # ── 工具栏 Row 1：按语义分组的动作区（UI_REVIEW P1-1）──
+        # ── 工具栏 Row 1：按语义分组的动作区（docs/reviews/UI_REVIEW.md P1-1）──
         #
         # 原实现是 6 个纯图标按钮平铺，三个真实问题：
         #   1. 自绘图标语义模糊 —— "ip" 与 "c" 两个绿方块不 hover 分不清；
@@ -337,7 +337,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb1.addWidget(self.local_subnet_btn)
         tb1.addWidget(self.c_subnet_btn)
 
-        # 扫描预设（UI_REVIEW P1-3）：网段 + 级别 + 协议集 的命名组合。
+        # 扫描预设（docs/reviews/UI_REVIEW.md P1-3）：网段 + 级别 + 协议集 的命名组合。
         # 网段虽然会持久化，但只有一份 —— 今天扫办公网、明天扫机房就得来回改。
         tb1.addWidget(_vsep())
         self.preset_btn = QToolButton()
@@ -393,7 +393,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.search_input.textChanged.connect(self._filter_results)
         tb2.addWidget(self.search_input)
 
-        # 结果筛选条（UI_REVIEW P1-4）：常驻可见 + 带计数。
+        # 结果筛选条（docs/reviews/UI_REVIEW.md P1-4）：常驻可见 + 带计数。
         # 旧实现把筛选藏在「视图 > 筛选」菜单里，工具栏只留一个隐藏的 combo
         # 当值载体 —— 用户扫 /24 出 254 条却只看到 12 条时无从得知原因。
         self.filter_bar = FilterChipBar()
@@ -414,7 +414,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb3 = QHBoxLayout()
         tb3.setSpacing(8)
         tb3.setContentsMargins(2, 0, 2, 2)
-        # 视图切换：概览 / 列表（UI_REVIEW P3-2）。放在筛选条左侧、与它同一行，
+        # 视图切换：概览 / 列表（docs/reviews/UI_REVIEW.md P3-2）。放在筛选条左侧、与它同一行，
         # 因为两者是同一件事的两面 —— "换个角度看这批结果"。
         # 两个控件都存成属性：无结果时整行要隐藏（见 `_update_result_controls`）。
         self.view_toggle = self._build_view_toggle()
@@ -427,7 +427,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb3.addWidget(self.filter_scroll, 1)
         main_layout.addLayout(tb3)
 
-        # ── 扫描态摘要条（UI_REVIEW P0-2 后半）──
+        # ── 扫描态摘要条（docs/reviews/UI_REVIEW.md P0-2 后半）──
         # 放在工具栏与内容之间：扫描期间它是"现在在干嘛"的唯一出口
         # （阶段 / 已扫 / 在线 / 有服务 / 用时 / 停止）。
         # 默认隐藏，扫描结束后整体收起 —— 结果已经在表格里，再占一行是噪声。
@@ -469,7 +469,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.table = QTreeWidget()
         # objectName 供 QSS 按行高档位选中它（见 design_tokens.ROW_HEIGHT）
         self.table.setObjectName("resultTable")
-        # 行高档位（UI_REVIEW P2-1.2）。规范值语言无关，显示名走 density_label()；
+        # 行高档位（docs/reviews/UI_REVIEW.md P2-1.2）。规范值语言无关，显示名走 density_label()；
         # 这里先落默认值，真正的用户配置在 `_load_settings` 里读取并重新应用。
         self.row_density = DEFAULT_DENSITY
         self._apply_row_density()
@@ -510,7 +510,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 右键上下文菜单：复制/重扫/WoL/地址库/内置工具（单连接，避免重复弹菜单）
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
 
-        # ── 结果区：空状态 ⇄ (表格 + 详情面板) 双页切换 (UI_REVIEW P0-1 / P0-2) ──
+        # ── 结果区：空状态 ⇄ (表格 + 详情面板) 双页切换 (docs/reviews/UI_REVIEW.md P0-1 / P0-2) ──
         #
         # 原实现是"工具栏 + 一张宽表格"的单面板结构，有两个真实缺陷：
         #   1. 没有详情区域 —— WMI/NetBIOS/SNMP/共享 等富信息只能塞进 tooltip
@@ -519,7 +519,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 这里用 QStackedWidget 分三页解决：
         #   page 0 = EmptyStatePanel（无结果时的引导）
         #   page 1 = QSplitter(表格 / 详情面板)，垂直可拖拽、可折叠
-        #   page 2 = OverviewPanel（概览仪表盘，UI_REVIEW P3-2）
+        #   page 2 = OverviewPanel（概览仪表盘，docs/reviews/UI_REVIEW.md P3-2）
         self.detail_panel = DeviceDetailPanel()
         self.detail_splitter = QSplitter(Qt.Vertical)
         self.detail_splitter.setObjectName("detailSplitter")
@@ -857,7 +857,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         view_menu = menubar.addMenu(tr("查看(&V)"))
         view_menu.setStyleSheet("")
 
-        # ── 显示列：预设 + 自定义（UI_REVIEW P1-2）──
+        # ── 显示列：预设 + 自定义（docs/reviews/UI_REVIEW.md P1-2）──
         col_menu = view_menu.addMenu(tr("显示列"))
         col_menu.setStyleSheet("")
         col_menu.setIcon(_mi(QStyle.SP_FileDialogDetailedView))
@@ -904,7 +904,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             filter_menu.addAction(_fact)
             self._filter_actions[_fkey] = _fact
 
-        # ── 行高：舒适 / 紧凑（UI_REVIEW P2-1.2）──
+        # ── 行高：舒适 / 紧凑（docs/reviews/UI_REVIEW.md P2-1.2）──
         # 扫 /24 出 254 行时一屏只放得下二十来行。紧凑档把 min-height 收到 20px
         # 并收窄上下 padding，实测行高 34px → 25px（可见行数约 +36%）。
         density_menu = view_menu.addMenu(tr("行高"))
@@ -1031,7 +1031,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             app.setStyleSheet(STYLE_SHEET)
         # 标签与分隔线的颜色已全部下沉到 QSS（objectName 选择器），
         # 这里不再逐控件改色 —— 否则主题色会同时存在于 .qss 与本函数两处，
-        # 新增一个内联样式就会在深色下"漏白"（见 UI_REVIEW.md P2-2）。
+        # 新增一个内联样式就会在深色下"漏白"（见 docs/reviews/UI_REVIEW.md P2-2）。
         # 工具栏小图标随主题重绘线条颜色
         _icon_color = "#FFFFFF" if dark else "#555555"
         if hasattr(self, "local_subnet_btn"):
@@ -1126,7 +1126,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         """
         return QColor(token("link", self.dark_mode))
 
-    # ── 扫描预设 (UI_REVIEW P1-3) ──
+    # ── 扫描预设 (docs/reviews/UI_REVIEW.md P1-3) ──
 
     def _current_scan_config(self) -> dict:
         """把当前扫描参数打包成可保存的预设内容。"""
@@ -1209,7 +1209,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
                     lambda _checked=False, n=name: self._delete_preset(n)
                 )
 
-    # ── 设备收藏 (UI_REVIEW P1-3) ──
+    # ── 设备收藏 (docs/reviews/UI_REVIEW.md P1-3) ──
 
     def _toggle_favorite(self, result):
         """切换设备收藏状态，并同步星标 / 计数 / 当前筛选。"""
@@ -1224,7 +1224,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             self._filter_results()
         self.status_bar.showMessage(tr("已加入收藏") if now else tr("已取消收藏"))
 
-    # ── 结果筛选 (UI_REVIEW P1-4) ──
+    # ── 结果筛选 (docs/reviews/UI_REVIEW.md P1-4) ──
 
     def _set_filter(self, key: str):
         """切换结果筛选。筛选条 chip 与「视图 > 筛选」菜单共用这一个入口。"""
@@ -1248,7 +1248,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             act.setChecked(key == self.filter_key)
             act.blockSignals(False)
 
-    # ── 列预设 (UI_REVIEW P1-2) ──
+    # ── 列预设 (docs/reviews/UI_REVIEW.md P1-2) ──
 
     def _apply_default_column_widths(self):
         """按**当前语言**套用默认列宽（不动可见性与列序）。
@@ -1317,7 +1317,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             act.setChecked(key == active)
             act.blockSignals(False)
 
-    # ── 行高 (UI_REVIEW P2-1.2) ──
+    # ── 行高 (docs/reviews/UI_REVIEW.md P2-1.2) ──
 
     def _apply_row_density(self):
         """把行高档位写进表格的动态属性，由 QSS 决定 `min-height`。
@@ -1483,7 +1483,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.row_density = _rd if _rd in DENSITIES else DEFAULT_DENSITY
         self._apply_row_density()
         self._sync_density_actions()
-        # 首次启动授权声明（CODE_REVIEW P2-14）。0 = 从没确认过。
+        # 首次启动授权声明（docs/reviews/CODE_REVIEW.md P2-14）。0 = 从没确认过。
         self.authorization_notice_ack = s.value("legal/notice_ack", 0, type=int)
 
     def _save_settings(self):
@@ -1541,7 +1541,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.mdns_check.toggled.connect(lambda _c: self._update_empty_hint())
 
     def _build_view_toggle(self) -> QWidget:
-        """构建「列表 / 概览」视图切换控件（UI_REVIEW P3-2）。"""
+        """构建「列表 / 概览」视图切换控件（docs/reviews/UI_REVIEW.md P3-2）。"""
         box = QWidget()
         box.setObjectName("viewToggle")
         lay = QHBoxLayout(box)
@@ -1563,7 +1563,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             self._view_buttons[key] = btn
         return box
 
-    # ── 结果视图：列表 / 概览 (UI_REVIEW P3-2) ──
+    # ── 结果视图：列表 / 概览 (docs/reviews/UI_REVIEW.md P3-2) ──
 
     def _set_view_mode(self, key: str, save: bool = True):
         """切换结果视图（列表 / 概览）。"""
@@ -1576,7 +1576,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self._apply_view_mode(save=save)
 
     def _update_result_controls(self):
-        """无结果时隐藏「视图切换 + 筛选条」整行（UI_REVIEW_ROUND2 §5 第 9 项）。
+        """无结果时隐藏「视图切换 + 筛选条」整行（docs/reviews/UI_REVIEW_ROUND2.md §5 第 9 项）。
 
         它们都是"对已有结果做筛选 / 换视角"的控件：一条结果都没有时，chip 上的
         计数全是 0，视图切换也只能切到同一个空状态页 —— 留着只会让人误以为
@@ -1625,7 +1625,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             return
         self._refresh_overview()
 
-    # ── 空状态 / 结果页切换 (UI_REVIEW P0-2) ──
+    # ── 空状态 / 结果页切换 (docs/reviews/UI_REVIEW.md P0-2) ──
 
     def _show_results_page(self, show_results: bool):
         """在「空状态引导页」与「结果页」之间切换。
@@ -1690,7 +1690,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
                 notes.append(f"[{c.type_label}] {c.description}")
         return notes
 
-    # ── 变更索引 / 历史轨迹 (UI_REVIEW P3-1) ──
+    # ── 变更索引 / 历史轨迹 (docs/reviews/UI_REVIEW.md P3-1) ──
 
     def _rebuild_change_index(self) -> dict:
         """把 `self._changes` 折叠成 `{ip: [变更类型, ...]}` 并缓存。
@@ -1809,7 +1809,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
     # --- 扫描 ---
 
 
-    # ── 首次启动授权声明（CODE_REVIEW P2-14）──
+    # ── 首次启动授权声明（docs/reviews/CODE_REVIEW.md P2-14）──
 
     def _authorization_notice_text(self) -> str:
         """授权声明的正文（HTML）。
