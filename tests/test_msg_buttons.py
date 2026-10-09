@@ -128,6 +128,8 @@ class WrapperTest(unittest.TestCase):
 
     `exec_()` 会阻塞，所以这里把它换成"记录对话框并返回固定值"的替身 ——
     这样既能断言返回值透传，又能拿到真实构造出来的 box 检查按钮文案。
+    标题同样改成盯 `setWindowTitle()` 的**调用**而非 `windowTitle()` 属性：
+    macOS 上 Qt 会清掉标题，读属性是平台相关的（见 test_msg_info_returns_exec_result）。
     """
 
     #: 替身返回的哨兵值 —— 用来验证包装函数把 exec_() 的结果原样透传
@@ -135,17 +137,27 @@ class WrapperTest(unittest.TestCase):
 
     def setUp(self):
         self._seen = []
+        self._titles = []
         self._orig_exec = QMessageBox.exec_
+        self._orig_set_title = QMessageBox.setWindowTitle
         sentinel = self.SENTINEL
+        titles = self._titles
+        orig_set_title = self._orig_set_title
 
         def fake_exec(box):
             self._seen.append(box)
             return sentinel
 
+        def spy_set_title(box, title):
+            titles.append(title)
+            return orig_set_title(box, title)
+
         QMessageBox.exec_ = fake_exec
+        QMessageBox.setWindowTitle = spy_set_title
 
     def tearDown(self):
         QMessageBox.exec_ = self._orig_exec
+        QMessageBox.setWindowTitle = self._orig_set_title
         i18n.init("zh-CN")
 
     def test_msg_info_returns_exec_result(self):
@@ -154,7 +166,10 @@ class WrapperTest(unittest.TestCase):
         self.assertEqual(rc, self.SENTINEL)
         self.assertEqual(len(self._seen), 1)
         box = self._seen[0]
-        self.assertEqual(box.windowTitle(), "标题")
+        # ⚠️ 不读 `box.windowTitle()`：macOS 的 QMessageBox 不显示标题栏，Qt 会把它
+        # **清掉**（CI 实测 macOS 返回 `''`，其它平台返回 `'标题'`）—— 断言控件属性
+        # 就成了平台相关的。这里改为盯"标题有没有被原样传下去"，三平台都成立。
+        self.assertEqual(self._titles, ["标题"])
         self.assertEqual(box.text(), "内容")
         self.assertEqual(_texts(box), {int(QMessageBox.Ok): "确定"})
 
