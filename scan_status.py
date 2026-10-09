@@ -17,6 +17,7 @@ import time
 from PyQt5.QtCore import QTimer, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton
 
+from design_tokens import SPACING_LG, SPACING_SM, SPACING_XS
 from i18n import tr
 from scanner.constants import phase_label
 from ui_logic import format_elapsed
@@ -53,8 +54,10 @@ class ScanStatusBar(QFrame):
         self._services = 0
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(6, 2, 6, 2)
-        row.setSpacing(12)
+        # 间距一律取设计令牌（`design_tokens.SPACING_*`），不再写字面量 ——
+        # 本模块是间距令牌的首个接入方。
+        row.setContentsMargins(SPACING_SM, SPACING_XS, SPACING_SM, SPACING_XS)
+        row.setSpacing(SPACING_LG)
 
         self.lbl_phase = QLabel("")
         self.lbl_phase.setObjectName("scanPhase")

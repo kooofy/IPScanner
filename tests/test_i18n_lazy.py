@@ -292,6 +292,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
     """
 
     def _label_tables(self):
+        from design_tokens import _DENSITY_TEXT
         from filter_bar import FILTERS
         from main_window import (
             COLUMN_PRESETS, COLUMN_LABELS, THEME_MODES, VIEW_MODES,
@@ -313,6 +314,8 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "scanner.constants._SCAN_LEVEL_TEXT":
                 list(_sc._SCAN_LEVEL_TEXT.values()),
             "scanner.constants._PHASE_TEXT": list(_sc._PHASE_TEXT.values()),
+            # design_tokens 的行高档位显示名（同上：字面量表）。
+            "design_tokens._DENSITY_TEXT": list(_DENSITY_TEXT.values()),
             # ui_msg 的标准按钮表：值是**字面量**（模块顶层不能调 tr()，否则会被
             # 冻结成导入期语言），所以 AST 收集不到，必须在这里显式登记。
             "ui_msg.STANDARD_BUTTON_TEXT": list(STANDARD_BUTTON_TEXT.values()),

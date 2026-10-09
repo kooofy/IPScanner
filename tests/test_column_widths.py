@@ -187,5 +187,66 @@ class LanguageStampedLayoutTest(unittest.TestCase):
             mw2.close()
 
 
+class NoWriteBackWhileLoadingTest(unittest.TestCase):
+    """🔴 载入配置期间**绝不允许回写**。
+
+    `_load_settings()` 会经 `_set_filter()` 间接调到 `_save_settings()`，而
+    `view/mode`、`view/row_density` 排在 `_set_filter` **之后**才载入 —— 此时它们
+    还停在 `_init_ui` 落的默认值。少了这道闸门，回写会把用户存的值覆盖成默认值：
+    用户把视图切成「概览」、行高切成「紧凑」，重启后全变回默认，**且没有任何提示**。
+    （2026-10-09 实测：存 `overview` 读回 `list`；存 `compact` 读回 `comfortable`。）
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ipscanner_nwb_")
+        self._orig_data_dir = main_window.data_dir
+        main_window.data_dir = lambda: self.tmp
+        i18n.init("zh-CN")
+        self.mw = main_window.MainWindow()
+        self.mw.show()
+        QApplication.processEvents()
+
+    def tearDown(self):
+        self.mw.close()
+        main_window.data_dir = self._orig_data_dir
+        i18n.init("zh-CN")
+
+    def _ini(self):
+        return os.path.join(self.tmp, "ipscanner.ini")
+
+    def test_saved_values_survive_a_reload(self):
+        from design_tokens import DENSITY_COMPACT
+
+        self.mw.view_mode = "overview"
+        self.mw._set_row_density(DENSITY_COMPACT)
+        self.mw.settings.sync()
+
+        mw2 = main_window.MainWindow()
+        try:
+            self.assertEqual(mw2.view_mode, "overview",
+                             msg="重启后视图模式被重置成默认值（载入期回写了）")
+            self.assertEqual(mw2.row_density, DENSITY_COMPACT,
+                             msg="重启后行高档位被重置成默认值（载入期回写了）")
+        finally:
+            mw2.close()
+
+    def test_loading_does_not_touch_the_ini(self):
+        """载入前后 ini 逐字节一致 —— 直接钉住"载入期不回写"这条不变量。"""
+        self.mw.view_mode = "overview"
+        self.mw._save_settings()
+        self.mw.settings.sync()
+        with open(self._ini(), "rb") as fh:
+            before = fh.read()
+
+        mw2 = main_window.MainWindow()
+        try:
+            mw2.settings.sync()
+            with open(self._ini(), "rb") as fh:
+                after = fh.read()
+            self.assertEqual(after, before, msg="载入配置时改写了 ini")
+        finally:
+            mw2.close()
+
+
 if __name__ == "__main__":
     unittest.main()

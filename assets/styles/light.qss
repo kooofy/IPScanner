@@ -8,7 +8,7 @@ QGroupBox {
     font-weight: bold;
     color: #333333;
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
     margin-top: 8px;
     padding-top: 14px;
     background-color: #FFFFFF;
@@ -22,7 +22,7 @@ QPushButton {
     font-family: "Microsoft YaHei", "Segoe UI";
     font-size: 13px;
     padding: 5px 14px;
-    border-radius: 2px;
+    border-radius: 4px;
     border: 1px solid #ADADAD;
     background-color: #E1E1E1;
     color: #333333;
@@ -42,7 +42,7 @@ QPushButton#primaryBtn {
     font-size: 13px;
     padding: 4px 14px;
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 QPushButton#primaryBtn:hover {
     background-color: #EBEBEB;
@@ -63,7 +63,7 @@ QPushButton#stopBtn {
     font-size: 13px;
     padding: 4px 14px;
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 QPushButton#stopBtn:hover {
     background-color: #EBEBEB;
@@ -83,7 +83,7 @@ QPushButton#toolBtnGreen {
     font-size: 13px;
     padding: 4px 12px;
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 QFrame#toolSep {
     background-color: #D0D0D0;
@@ -95,7 +95,7 @@ QToolButton#presetBtn {
     font-size: 13px;
     padding: 4px 10px;
     border: 1px solid #ADADAD;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #E1E1E1;
     color: #333333;
 }
@@ -149,7 +149,7 @@ QScrollArea#filterScroll QScrollBar:horizontal {
 }
 QScrollArea#filterScroll QScrollBar::handle:horizontal {
     min-width: 24px;
-    border-radius: 3px;
+    border-radius: 4px;
 }
 QScrollArea#filterScroll QScrollBar::add-line:horizontal,
 QScrollArea#filterScroll QScrollBar::sub-line:horizontal {
@@ -166,7 +166,7 @@ QPushButton#toolBtnGreen:pressed {
 QPushButton#toolBtnYellow {
     background-color: #FFF9C4;
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 QPushButton#toolBtnYellow:hover {
     background-color: #FFF59D;
@@ -199,7 +199,7 @@ QLineEdit {
     font-size: 13px;
     padding: 4px 8px;
     border: 1px solid #ABABAB;
-    border-radius: 1px;
+    border-radius: 4px;
     background-color: #FFFFFF;
     selection-background-color: #0078D7;
     min-height: 22px;
@@ -212,7 +212,7 @@ QComboBox {
     font-size: 13px;
     padding: 4px 8px;
     border: 1px solid #ABABAB;
-    border-radius: 1px;
+    border-radius: 4px;
     background-color: #FFFFFF;
     min-height: 22px;
 }
@@ -221,7 +221,7 @@ QSpinBox {
     font-size: 13px;
     padding: 4px 8px;
     border: 1px solid #ABABAB;
-    border-radius: 1px;
+    border-radius: 4px;
     background-color: #FFFFFF;
     min-height: 22px;
 }
@@ -260,6 +260,19 @@ QTreeWidget::item {
     border: none;
     min-height: 26px;
 }
+/* 行高两档（UI_REVIEW P2-1.2）。属性值由 `MainWindow._apply_row_density()` 设置，
+   ⚠️ 动态属性改了**必须** unpolish/polish 才会重绘 —— 否则切档位没反应。
+   数字必须与 `design_tokens.ROW_HEIGHT` / `ROW_PADDING_V` 一致，由 test_design_tokens 校验。
+   ⚠️ 紧凑档必须**同时收 padding**：min-height 压不过字号本身的行高 —— 实测把它
+   从 26 降到 20，行高只从 34px 降到 29px；连 padding 收到 2px 才是 25px。 */
+QTreeWidget#resultTable[density="comfortable"]::item {
+    padding: 4px 6px;
+    min-height: 26px;
+}
+QTreeWidget#resultTable[density="compact"]::item {
+    padding: 2px 6px;
+    min-height: 20px;
+}
 QTreeWidget::item:hover {
     background-color: #E5F3FF;
 }
@@ -288,7 +301,7 @@ QProgressBar {
     font-family: "Microsoft YaHei", "Segoe UI";
     font-size: 12px;
     border: 1px solid #CCCCCC;
-    border-radius: 1px;
+    border-radius: 4px;
     background-color: #E8E8E8;
     text-align: center;
     color: #333333;
@@ -309,13 +322,13 @@ QListWidget {
     font-family: "Consolas", "Microsoft YaHei";
     font-size: 13px;
     border: 1px solid #CCCCCC;
-    border-radius: 1px;
+    border-radius: 4px;
     background-color: #FFFFFF;
     padding: 1px;
 }
 QListWidget::item {
     padding: 3px 5px;
-    border-radius: 1px;
+    border-radius: 2px;
 }
 QListWidget::item:hover {
     background-color: #E5F3FF;
@@ -484,7 +497,7 @@ QPushButton#detailAction {
     padding: 3px 10px;
     min-height: 20px;
     border: 1px solid #ADADAD;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #F0F0F0;
     color: #333333;
 }
@@ -517,7 +530,7 @@ QPushButton#emptySecondary {
     font-size: 13px;
     padding: 5px 14px;
     border: 1px solid #ADADAD;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #E1E1E1;
     color: #333333;
 }
@@ -558,7 +571,7 @@ QPushButton#viewBtn {
     padding: 2px 10px;
     min-height: 20px;
     border: 1px solid #C4C4C4;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #F5F5F5;
     color: #555555;
 }
@@ -701,7 +714,7 @@ QPushButton#emptyPrimary {
     font-weight: bold;
     padding: 5px 16px;
     border: 1px solid #0078D7;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #0078D7;
     color: #FFFFFF;
 }
@@ -718,7 +731,7 @@ QPushButton#emptyPrimary:pressed {
 QFrame#scanStatusBar {
     background-color: #F2F7FD;
     border: 1px solid #D6E4F0;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 QLabel#scanPhase {
     font-family: "Microsoft YaHei", "Segoe UI";
@@ -733,11 +746,11 @@ QLabel#scanMetric {
 }
 QProgressBar#scanProgress {
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #E8E8E8;
 }
 QProgressBar#scanProgress::chunk {
-    border-radius: 1px;
+    border-radius: 2px;
     background-color: #0078D7;
 }
 QPushButton#scanStop {
@@ -745,7 +758,7 @@ QPushButton#scanStop {
     font-size: 12px;
     padding: 2px 10px;
     border: 1px solid #CCCCCC;
-    border-radius: 2px;
+    border-radius: 4px;
     background-color: #F0F0F0;
     color: #333333;
 }

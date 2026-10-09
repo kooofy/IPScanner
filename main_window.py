@@ -28,6 +28,9 @@ import ui_logic
 
 from styles import STYLE_SHEET, DARK_STYLE_SHEET
 from theme_tokens import token
+from design_tokens import (
+    DEFAULT_DENSITY, DENSITIES, density_label,
+)
 from main_window_tree import TreeMixin
 from detail_panel import DeviceDetailPanel
 from empty_state import EmptyStatePanel
@@ -458,6 +461,12 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         # ── 结果表格 (QTreeWidget, 13列, 支持展开/收起服务) ──
         self.table = QTreeWidget()
+        # objectName 供 QSS 按行高档位选中它（见 design_tokens.ROW_HEIGHT）
+        self.table.setObjectName("resultTable")
+        # 行高档位（UI_REVIEW P2-1.2）。规范值语言无关，显示名走 density_label()；
+        # 这里先落默认值，真正的用户配置在 `_load_settings` 里读取并重新应用。
+        self.row_density = DEFAULT_DENSITY
+        self._apply_row_density()
         self.table.setColumnCount(13)
         self.table.setHeaderLabels([
             tr("IP地址"), tr("状态"), tr("主机名"), tr("MAC地址"),
@@ -886,6 +895,24 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             filter_menu.addAction(_fact)
             self._filter_actions[_fkey] = _fact
 
+        # ── 行高：舒适 / 紧凑（UI_REVIEW P2-1.2）──
+        # 扫 /24 出 254 行时一屏只放得下二十来行。紧凑档把 min-height 收到 20px
+        # 并收窄上下 padding，实测行高 34px → 25px（可见行数约 +36%）。
+        density_menu = view_menu.addMenu(tr("行高"))
+        density_menu.setStyleSheet("")
+        density_menu.setIcon(_mi(QStyle.SP_FileDialogListView))
+        self._density_group = QActionGroup(self)
+        self._density_group.setExclusive(True)
+        self._density_actions = {}
+        for _dkey in DENSITIES:
+            _dact = QAction(density_label(_dkey), self, checkable=True)
+            _dact.setData(_dkey)
+            _dact.setChecked(_dkey == self.row_density)
+            _dact.triggered.connect(lambda _c, k=_dkey: self._set_row_density(k))
+            self._density_group.addAction(_dact)
+            density_menu.addAction(_dact)
+            self._density_actions[_dkey] = _dact
+
         view_menu.addSeparator()
 
         act_expand = QAction(tr("展开全部"), self)
@@ -1270,9 +1297,62 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             act.setChecked(key == active)
             act.blockSignals(False)
 
+    # ── 行高 (UI_REVIEW P2-1.2) ──
+
+    def _apply_row_density(self):
+        """把行高档位写进表格的动态属性，由 QSS 决定 `min-height`。
+
+        ⚠️ 动态属性改完**必须** `unpolish` / `polish` 才会重绘 —— 这是 Qt 的已知
+        行为，`overview.set_tone()` 那处踩过同一个坑。少了这两行，切档位毫无反应。
+
+        行高的具体数字在 `assets/styles/*.qss`（`[density="..."]::item` 的
+        `min-height` 与 `padding`），与 `design_tokens.ROW_HEIGHT` /
+        `ROW_PADDING_V` 由 `test_design_tokens` 保证一致。
+        """
+        value = getattr(self, "row_density", DEFAULT_DENSITY)
+        if value not in DENSITIES:
+            value = DEFAULT_DENSITY
+            self.row_density = value
+        self.table.setProperty("density", value)
+        self.table.style().unpolish(self.table)
+        self.table.style().polish(self.table)
+        self.table.viewport().update()
+
+    def _set_row_density(self, value: str):
+        """切换行高（菜单触发）：立即生效并持久化。"""
+        if value not in DENSITIES:
+            self._sync_density_actions()
+            return
+        if value == getattr(self, "row_density", DEFAULT_DENSITY):
+            self._sync_density_actions()
+            return
+        self.row_density = value
+        self._apply_row_density()
+        self._sync_density_actions()
+        self._save_settings()
+
+    def _sync_density_actions(self):
+        """把行高单选态同步到当前值（静默，避免递归触发）。"""
+        for key, act in getattr(self, "_density_actions", {}).items():
+            act.blockSignals(True)
+            act.setChecked(key == self.row_density)
+            act.blockSignals(False)
+
     # ── 配置持久化 (P2-2) ──
     def _load_settings(self):
-        """载入持久化配置：主题 / 扫描参数 / 网段 / 窗口几何 / 列布局。"""
+        """载入持久化配置：主题 / 扫描参数 / 网段 / 窗口几何 / 列布局。
+
+        本方法只负责"载入期不许回写"这一层，实际内容在 `_load_settings_values`。
+        拆开是因为必须用 `try/finally` 把整段载入包住，而直接缩进 100 多行会让
+        这个 diff 完全没法读。见 `_save_settings` 里那道闸门的说明。
+        """
+        self._loading_settings = True
+        try:
+            self._load_settings_values()
+        finally:
+            self._loading_settings = False
+
+    def _load_settings_values(self):
         s = self.settings
         # 主题：优先读新的 theme/mode；旧配置只有 theme/dark + theme/auto_time，
         # 迁移规则见 system_theme.migrate_mode（原则是"外观不变"）。
@@ -1377,9 +1457,22 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             _btn = self._view_buttons.get(self.view_mode)
             if _btn is not None:
                 _btn.setChecked(True)
+        # 行高档位（规范值 compact / comfortable）。旧配置里没有这个键 →
+        # 落到默认的「舒适」，与改造前的 26px 行高**逐像素一致**。
+        _rd = s.value("view/row_density", DEFAULT_DENSITY, type=str)
+        self.row_density = _rd if _rd in DENSITIES else DEFAULT_DENSITY
+        self._apply_row_density()
+        self._sync_density_actions()
 
     def _save_settings(self):
         """保存当前配置到 ipscanner.ini。"""
+        # 🔴 载入期间**禁止回写**。`_load_settings()` 会经 `_set_filter()` 间接调到
+        # 这里，而排在 `_set_filter` **之后**才载入的键（`view/mode`、
+        # `view/row_density`）此时还停在 `_init_ui` 落的默认值 —— 一旦回写就把用户
+        # 存的值覆盖成默认值，且**没有任何提示**（表现为"改了设置重启就重置"）。
+        # 闸门由 `_load_settings` 置位、`finally` 还原。
+        if getattr(self, "_loading_settings", False):
+            return
         s = self.settings
         s.setValue("theme/mode", self.theme_mode)
         # 保留旧键：① 旧版本回退时行为可预期；② 外部脚本/文档仍可能读它
@@ -1403,6 +1496,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("ui/detail_splitter", self.detail_splitter.saveState())
         s.setValue("view/filter_key", getattr(self, "filter_key", "online"))
         s.setValue("view/mode", getattr(self, "view_mode", DEFAULT_VIEW_MODE))
+        # 存**当前值**而不是字面量 —— 写成字面量会导致每次启动都把用户的
+        # 选择重置掉（批次 1 踩过这个坑：列布局被反复重置）。
+        s.setValue("view/row_density",
+                   getattr(self, "row_density", DEFAULT_DENSITY))
         s.sync()
 
     def _connect_signals(self):

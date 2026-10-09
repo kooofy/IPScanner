@@ -778,5 +778,9 @@
   "已扫 {c}/{t}": "Scanned {c}/{t}",
   "在线 {n}": "Online {n}",
   "有服务 {n}": "With services {n}",
-  "用时 {t}": "Elapsed {t}"
+  "用时 {t}": "Elapsed {t}",
+
+  "行高": "Row height",
+  "舒适": "Comfortable",
+  "紧凑": "Compact"
 }
