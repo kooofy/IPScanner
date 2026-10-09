@@ -2,12 +2,13 @@
 """OUI 数据库更新混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
 from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 from PyQt5.QtCore import Qt
+from ui_msg import msg_ask, msg_info, msg_warn
 from i18n import tr
 
 class OuiMixin:
     def _update_oui_db(self):
         """从 IEEE 官网下载最新 OUI 数据库并重建 oui.db。"""
-        reply = QMessageBox.question(
+        reply = msg_ask(
             self, tr("检查 OUI 更新"),
             tr("将从 IEEE 官网下载最新的 MAC 厂商数据库（约 2MB），\n"
                "并重建本地 OUI 数据库。是否继续？"),
@@ -51,14 +52,14 @@ class OuiMixin:
             # 重新加载数据库连接
             from oui_database import reload_db
             reload_db()
-            QMessageBox.information(
+            msg_info(
                 self, tr("OUI 更新"),
                 tr("OUI 数据库更新成功！\n\n")
                 + f"共 {result['count']:,} 条记录\n"
                 + f"保存至: {result['path']}"
             )
         else:
-            QMessageBox.warning(
+            msg_warn(
                 self, tr("OUI 更新失败"),
                 tr("更新 OUI 数据库时出错：\n") + result.get("error", tr("未知错误"))
             )

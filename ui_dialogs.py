@@ -31,6 +31,7 @@ from scanner.snmp_v3 import (AUTH_NONE, AUTH_MD5, AUTH_SHA, PRIV_NONE, PRIV_AES,
                              SnmpV3User, auth_label, priv_label,
                              snmp_v3_get_system)
 from app_logging import get_logger
+from ui_msg import localize_buttons, msg_ask, msg_info, msg_warn
 from i18n import tr
 import ui_logic
 
@@ -71,6 +72,7 @@ class DeviceEditDialog(QDialog):
             layout.addRow(label, le)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        localize_buttons(btns)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         layout.addRow(btns)
@@ -81,7 +83,7 @@ class DeviceEditDialog(QDialog):
         if data["mac"]:
             norm = normalize_mac(data["mac"])
             if not norm:
-                QMessageBox.warning(self, tr("格式错误"), tr("MAC 地址格式不正确，请检查后重试。"))
+                msg_warn(self, tr("格式错误"), tr("MAC 地址格式不正确，请检查后重试。"))
                 return
             data["mac"] = norm
         if self.device_id:
@@ -180,7 +182,7 @@ class MacLibraryDialog(QDialog):
     def _edit(self):
         did = self._selected_id()
         if did is None:
-            QMessageBox.information(self, tr("提示"), tr("请先选中一行"))
+            msg_info(self, tr("提示"), tr("请先选中一行"))
             return
         dlg = DeviceEditDialog(self.library, parent=self, device_id=did)
         if dlg.exec_() == QDialog.Accepted:
@@ -190,11 +192,11 @@ class MacLibraryDialog(QDialog):
     def _delete(self):
         did = self._selected_id()
         if did is None:
-            QMessageBox.information(self, tr("提示"), tr("请先选中一行"))
+            msg_info(self, tr("提示"), tr("请先选中一行"))
             return
         dev = self.library.get_by_id(did)
         label = (dev.get("mac") or dev.get("ip") or f"#{did}")
-        reply = QMessageBox.question(
+        reply = msg_ask(
             self, tr("确认删除"), f"确定删除该设备吗？\n\n{label}",
             QMessageBox.Yes | QMessageBox.No,
         )
@@ -213,7 +215,7 @@ class MacLibraryDialog(QDialog):
         success, msg = self.library.export_to_excel(path)
         if success:
             self._audit(tr("导出地址库"), f"{self.library.count()} 条 · {os.path.basename(path)}")
-        QMessageBox.information(self, tr("导出成功") if success else tr("导出失败"), msg)
+        msg_info(self, tr("导出成功") if success else tr("导出失败"), msg)
 
     @staticmethod
     def _audit(action, detail=""):
@@ -473,7 +475,7 @@ class HistoryQueryDialog(QDialog):
                 ip_substr=ip_substr, db_path=self.db_path,
             )
         except Exception as e:
-            QMessageBox.warning(self, tr("查询失败"), str(e))
+            msg_warn(self, tr("查询失败"), str(e))
             return
         self._fill_table(rows)
         self.count_label.setText(f"共 {len(rows)} 台设备")
@@ -499,7 +501,7 @@ class HistoryQueryDialog(QDialog):
 
     def _export_csv(self):
         if self.table.rowCount() == 0:
-            QMessageBox.information(self, tr("提示"), tr("暂无数据可导出。"))
+            msg_info(self, tr("提示"), tr("暂无数据可导出。"))
             return
         default_name = f"历史查询_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         path, _ = QFileDialog.getSaveFileName(
@@ -518,9 +520,9 @@ class HistoryQueryDialog(QDialog):
                         self._cell(r, 3), self._cell(r, 4),
                         self._cell(r, 5), self._cell(r, 6),
                     ])
-            QMessageBox.information(self, tr("导出成功"), f"已保存到：\n{path}")
+            msg_info(self, tr("导出成功"), f"已保存到：\n{path}")
         except Exception as e:
-            QMessageBox.warning(self, tr("导出失败"), str(e))
+            msg_warn(self, tr("导出失败"), str(e))
 
     def _cell(self, row, col):
         item = self.table.item(row, col)
@@ -815,6 +817,7 @@ class WmiCredentialDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
+        localize_buttons(buttons)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
@@ -915,6 +918,7 @@ class SnmpV3CredentialDialog(QDialog):
         layout.addRow(hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        localize_buttons(buttons)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
@@ -1120,9 +1124,9 @@ class ConflictReportDialog(QDialog):
                         ", ".join(c.ips), ", ".join(c.macs),
                         c.detail.replace("\n", " | "),
                     ])
-            QMessageBox.information(self, tr("导出成功"), f"报告已保存到：\n{path}")
+            msg_info(self, tr("导出成功"), f"报告已保存到：\n{path}")
         except Exception as e:
-            QMessageBox.warning(self, tr("导出失败"), str(e))
+            msg_warn(self, tr("导出失败"), str(e))
 
 
 class SubnetUtilizationDialog(QDialog):
@@ -1279,9 +1283,9 @@ class SubnetUtilizationDialog(QDialog):
                         s["subnet"], s["total"], s["online"], s["offline"],
                         f"{s['utilization']:.1f}%", s["device_dist"],
                     ])
-            QMessageBox.information(self, tr("导出成功"), f"已保存到：\n{path}")
+            msg_info(self, tr("导出成功"), f"已保存到：\n{path}")
         except Exception as e:
-            QMessageBox.warning(self, tr("导出失败"), str(e))
+            msg_warn(self, tr("导出失败"), str(e))
 
 
 class AuditLogDialog(QDialog):
@@ -1377,7 +1381,7 @@ class AuditLogDialog(QDialog):
         try:
             logs = audit_log.query_logs(category=category, keyword=keyword)
         except Exception as e:
-            QMessageBox.warning(self, tr("读取失败"), str(e))
+            msg_warn(self, tr("读取失败"), str(e))
             return
 
         self.table.setRowCount(len(logs))
@@ -1403,7 +1407,7 @@ class AuditLogDialog(QDialog):
         self.count_label.setText(f"共 {len(logs)} 条记录")
 
     def _clear_logs(self):
-        reply = QMessageBox.question(
+        reply = msg_ask(
             self, tr("确认清空"), tr("确定要清空全部审计日志吗？此操作不可恢复。"),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
@@ -1412,7 +1416,7 @@ class AuditLogDialog(QDialog):
         try:
             audit_log.clear_logs()
         except Exception as e:
-            QMessageBox.warning(self, tr("清空失败"), str(e))
+            msg_warn(self, tr("清空失败"), str(e))
             return
         self._reload()
 
@@ -1507,7 +1511,7 @@ class SwitchPortDialog(QDialog):
     def _start_mapping(self):
         ip = self.ip_input.text().strip()
         if not ip:
-            QMessageBox.information(self, tr("提示"), tr("请输入交换机 IP 地址。"))
+            msg_info(self, tr("提示"), tr("请输入交换机 IP 地址。"))
             return
         community = self.community_input.text().strip() or "public"
 
@@ -1531,7 +1535,7 @@ class SwitchPortDialog(QDialog):
 
         if info.error:
             self.status_label.setText(tr("映射失败"))
-            QMessageBox.warning(self, tr("映射失败"), info.error)
+            msg_warn(self, tr("映射失败"), info.error)
             return
 
         # 交换机信息
@@ -1703,7 +1707,7 @@ class ChangeReportDialog(QDialog):
                         c.severity_label, c.type_label, c.ip, c.mac,
                         c.hostname, c.description,
                     ])
-            QMessageBox.information(self, tr("导出成功"), f"报告已保存到：\n{path}")
+            msg_info(self, tr("导出成功"), f"报告已保存到：\n{path}")
         except Exception as e:
-            QMessageBox.warning(self, tr("导出失败"), str(e))
+            msg_warn(self, tr("导出失败"), str(e))
 

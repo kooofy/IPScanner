@@ -751,5 +751,20 @@
   "魅族": "Meizu",
   "（暂无预设）": "(no presets yet)",
   "（未发现冲突）": "(No conflicts found)",
-  "（需管理员权限；Windows 还需 Npcap，否则自动回退全连接）": "(Requires admin privileges; Windows also needs Npcap, otherwise auto-falls back to connect scan)"
+  "（需管理员权限；Windows 还需 Npcap，否则自动回退全连接）": "(Requires admin privileges; Windows also needs Npcap, otherwise auto-falls back to connect scan)",
+  "确定": "OK",
+  "保存": "Save",
+  "全部保存": "Save All",
+  "打开": "Open",
+  "是": "Yes",
+  "全部是": "Yes to All",
+  "否": "No",
+  "全部否": "No to All",
+  "中止": "Abort",
+  "重试": "Retry",
+  "忽略": "Ignore",
+  "放弃": "Discard",
+  "帮助": "Help",
+  "应用": "Apply",
+  "恢复默认": "Restore Defaults"
 }

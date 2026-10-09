@@ -297,6 +297,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             COLUMN_PRESETS, COLUMN_LABELS, THEME_MODES, VIEW_MODES,
         )
         from main_window_tree import _CHANGE_LABEL
+        from ui_msg import STANDARD_BUTTON_TEXT
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
@@ -304,6 +305,9 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "main_window.THEME_MODES": [lbl for _k, lbl in THEME_MODES],
             "main_window.VIEW_MODES": [lbl for _k, lbl in VIEW_MODES],
             "main_window_tree._CHANGE_LABEL": list(_CHANGE_LABEL.values()),
+            # ui_msg 的标准按钮表：值是**字面量**（模块顶层不能调 tr()，否则会被
+            # 冻结成导入期语言），所以 AST 收集不到，必须在这里显式登记。
+            "ui_msg.STANDARD_BUTTON_TEXT": list(STANDARD_BUTTON_TEXT.values()),
         }
 
     def test_all_table_labels_are_translated(self):

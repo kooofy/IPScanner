@@ -11,6 +11,7 @@ from PyQt5.QtCore import QUrl, QProcess
 from PyQt5.QtGui import QDesktopServices
 import audit_log
 from app_logging import get_logger
+from ui_msg import msg_ask, msg_info, msg_warn
 from i18n import tr
 from scanner.constants import SVC_FTP, SVC_HTTP, SVC_HTTPS, SVC_RDP
 from ui_dialogs import SwitchPortDialog
@@ -83,7 +84,7 @@ class NetworkToolMixin:
         ok, cleaned, reason = validate_target(target)
         if ok:
             return cleaned
-        QMessageBox.warning(
+        msg_warn(
             self, title,
             tr("目标地址不合法，已阻止本次操作。")
             + f"\n\n{tr('目标')}: {target}\n{tr('原因')}: {reason}\n\n"
@@ -135,7 +136,7 @@ class NetworkToolMixin:
             # P0-4：用户名同样进入命令行
             ok_user, user, reason = validate_user(user)
             if not ok_user:
-                QMessageBox.warning(
+                msg_warn(
                     self, tr("SSH 连接"),
                     tr("用户名不合法，已阻止本次连接。") + f"\n\n{tr('原因')}: {reason}"
                 )
@@ -146,7 +147,7 @@ class NetworkToolMixin:
                              "请在「设置 → 应用 → 可选功能」中启用「OpenSSH 客户端」后重试。")
                 else:
                     msg = tr("系统未安装 SSH 客户端。请执行: sudo apt install openssh-client")
-                QMessageBox.warning(self, tr("未找到 ssh"), msg)
+                msg_warn(self, tr("未找到 ssh"), msg)
                 return
             cmd = f"ssh {user}@{target}"
         elif tool == "rdp":
@@ -156,10 +157,10 @@ class NetworkToolMixin:
                     self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"RDP · 目标 {target}")
                     self.status_bar.showMessage(f"已启动 RDP: {target}")
                 except Exception as e:
-                    QMessageBox.warning(self, tr("启动失败"), f"无法启动远程桌面: {e}")
+                    msg_warn(self, tr("启动失败"), f"无法启动远程桌面: {e}")
                 return
             else:
-                QMessageBox.information(self, tr("远程桌面"),
+                msg_info(self, tr("远程桌面"),
                     tr("RDP 为 Windows 专有功能。Linux/macOS 请使用 Remmina 或 FreeRDP 客户端。"))
                 return
         elif tool == "cmd":
@@ -185,14 +186,14 @@ class NetworkToolMixin:
                 elif shutil.which("open"):  # macOS
                     subprocess.Popen(["open", "-a", "Terminal", "--args", cmd])
                 else:
-                    QMessageBox.information(self, tr("启动网络工具"),
+                    msg_info(self, tr("启动网络工具"),
                         tr("未找到可用的终端模拟器。请在终端中手动执行:\n") + cmd)
                     return
 
             self._audit(audit_log.CAT_DEVICE, tr("启动网络工具"), f"{tool.upper()} · 目标 {target}")
             self.status_bar.showMessage(f"已启动 {tool.upper()}: {target}")
         except Exception as e:
-            QMessageBox.warning(self, tr("启动失败"), f"无法启动 {tool.upper()}: {e}")
+            msg_warn(self, tr("启动失败"), f"无法启动 {tool.upper()}: {e}")
 
     def _remote_power(self, action: str):
         """
@@ -221,7 +222,7 @@ class NetworkToolMixin:
             return
 
         _verb = tr("关机") if action == "shutdown" else tr("重启")
-        reply = QMessageBox.question(
+        reply = msg_ask(
             self, f"确认远程{_verb}",
             f"确定要向 {target} 发送远程{_verb}指令吗？\n"
             f"（目标上将立即{_verb}，未保存的工作可能丢失）",
@@ -248,13 +249,13 @@ class NetworkToolMixin:
             )
             if proc.returncode == 0:
                 self._audit(audit_log.CAT_DEVICE, f"远程{_verb}", f"目标 {target} · 指令已发送")
-                QMessageBox.information(self, tr("指令已发送"), f"已向 {target} 发送远程{_verb}指令。")
+                msg_info(self, tr("指令已发送"), f"已向 {target} 发送远程{_verb}指令。")
                 self.status_bar.showMessage(f"已发送远程{_verb}: {target}")
             else:
                 _err = (proc.stderr or proc.stdout or "").strip()
                 self._audit(audit_log.CAT_DEVICE, f"远程{_verb}失败",
                             f"目标 {target} · 退出码 {proc.returncode}")
-                QMessageBox.warning(
+                msg_warn(
                     self, tr("远程") + _verb + tr("失败"),
                     f"向 {target} 发送{_verb}指令失败 (退出码 {proc.returncode})。\n"
                     + (_err + "\n\n" if _err else "")
@@ -262,12 +263,12 @@ class NetworkToolMixin:
                     + tr("或本地未以管理员身份运行本程序。")
                 )
         except Exception as e:
-            QMessageBox.warning(self, tr("远程") + _verb + tr("失败"), f"执行远程{_verb}指令时出错: {e}")
+            msg_warn(self, tr("远程") + _verb + tr("失败"), f"执行远程{_verb}指令时出错: {e}")
 
     def _remote_power_unix(self, target, action, _verb):
         """Linux/macOS: 通过 SSH 执行 shutdown/reboot。"""
         if not shutil.which("ssh"):
-            QMessageBox.warning(self, tr("未找到 ssh"),
+            msg_warn(self, tr("未找到 ssh"),
                 tr("远程关机需要 SSH。请安装 openssh-client 后重试。"))
             return
 
@@ -278,16 +279,16 @@ class NetworkToolMixin:
             proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
             if proc.returncode == 0:
                 self._audit(audit_log.CAT_DEVICE, f"远程{_verb}", f"目标 {target} · SSH 指令已发送")
-                QMessageBox.information(self, tr("指令已发送"),
+                msg_info(self, tr("指令已发送"),
                     f"已通过 SSH 向 {target} 发送远程{_verb}指令。")
                 self.status_bar.showMessage(f"已发送远程{_verb}: {target}")
             else:
                 _err = (proc.stderr or proc.stdout or "").strip()
-                QMessageBox.warning(self, tr("远程") + _verb + tr("失败"),
+                msg_warn(self, tr("远程") + _verb + tr("失败"),
                     f"SSH 连接 {target} 失败：{_err}\n\n"
                     + tr("提示：目标需开启 SSH 且允许 root 登录，或配置免密 sudo。"))
         except Exception as e:
-            QMessageBox.warning(self, tr("远程") + _verb + tr("失败"), f"执行失败: {e}")
+            msg_warn(self, tr("远程") + _verb + tr("失败"), f"执行失败: {e}")
 
     def _show_snmp_info(self, ip, name, descr):
         """点击 SNMP 服务子项 → 弹窗展示设备识别信息"""
@@ -298,7 +299,7 @@ class NetworkToolMixin:
             text += f"\n系统描述 (sysDescr):\n{descr}"
         else:
             text += tr("\n(未获取到 sysDescr)")
-        QMessageBox.information(self, tr("SNMP 设备信息"), text)
+        msg_info(self, tr("SNMP 设备信息"), text)
 
     def _open_service(self, proto, ip):
         """根据协议打开浏览器 / 远程桌面。"""
@@ -318,7 +319,7 @@ class NetworkToolMixin:
             QDesktopServices.openUrl(QUrl(f"ftp://{ip}"))
         elif _p == SVC_RDP:
             if not QProcess.startDetached("mstsc", [f"/v:{ip}"]):
-                QMessageBox.information(
+                msg_info(
                     self, tr("远程桌面"),
                     f"未能自动启动远程桌面连接。\n请手动运行：mstsc /v:{ip}"
                 )
@@ -329,7 +330,7 @@ class NetworkToolMixin:
         import socket as sock
         mac_clean = mac.replace("-", "").replace(":", "").replace(".", "").strip().upper()
         if len(mac_clean) != 12 or not all(c in "0123456789ABCDEF" for c in mac_clean):
-            QMessageBox.warning(self, tr("WoL 唤醒"), f"MAC 地址格式无效，无法唤醒：\n{mac}")
+            msg_warn(self, tr("WoL 唤醒"), f"MAC 地址格式无效，无法唤醒：\n{mac}")
             return
         try:
             mac_bytes = bytes.fromhex(mac_clean)
@@ -339,14 +340,14 @@ class NetworkToolMixin:
             s.sendto(packet, ("255.255.255.255", 9))
             s.close()
             self.status_bar.showMessage(f"已向 {mac} 发送 WoL 魔术包")
-            QMessageBox.information(
+            msg_info(
                 self, tr("WoL 唤醒"),
                 f"已向 {mac} 发送唤醒魔术包。\n\n请确保目标设备已开启 WOL：\n"
                 + tr("• BIOS/UEFI 中启用 Wake on LAN\n"
                      "• 网卡属性中允许「允许此设备唤醒计算机」")
             )
         except Exception as e:
-            QMessageBox.warning(self, tr("WoL 唤醒"), f"发送失败：{e}")
+            msg_warn(self, tr("WoL 唤醒"), f"发送失败：{e}")
 
     def _show_switch_port_mapping(self):
         """弹出交换机端口映射对话框。"""

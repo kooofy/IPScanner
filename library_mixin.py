@@ -3,6 +3,7 @@
 from PyQt5.QtWidgets import QDialog, QMessageBox
 from ui_dialogs import MacLibraryDialog, DeviceEditDialog
 import audit_log
+from ui_msg import msg_ask
 from i18n import tr
 
 class LibraryMixin:
@@ -38,7 +39,7 @@ class LibraryMixin:
         if not dev:
             return
         label = dev.get("mac") or dev.get("ip") or f"#{device_id}"
-        reply = QMessageBox.question(
+        reply = msg_ask(
             self, tr("确认删除"),
             f"确定从地址库删除该设备吗？\n\n{label}",
             QMessageBox.Yes | QMessageBox.No,

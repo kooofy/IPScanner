@@ -2,13 +2,14 @@
 """导入导出与打印操作混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
 import os
 from datetime import datetime
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QFileDialog
 from PyQt5.QtGui import QTextDocument, QPageLayout, QPageSize
 from PyQt5.QtPrintSupport import QPrinter, QPrintPreviewDialog
 from excel_handler import (
     export_results, export_csv, export_html, export_json, create_template
 )
 import audit_log
+from ui_msg import msg_info, msg_warn
 from i18n import tr
 
 class ExportMixin:
@@ -45,9 +46,9 @@ class ExportMixin:
             self._refresh_matches_from_library()
 
         if errs:
-            QMessageBox.warning(self, tr("部分文件导入失败"), "\n".join(errs))
+            msg_warn(self, tr("部分文件导入失败"), "\n".join(errs))
         elif ok_files:
-            QMessageBox.information(
+            msg_info(
                 self, tr("导入成功"),
                 f"已合并 {ok_files} 个文件到地址库，共 {self.library.count()} 条。\n"
                 f"扫描联网设备后将自动按 MAC 匹配。"
@@ -67,9 +68,9 @@ class ExportMixin:
                 f"{self.library.count()} 条 · {os.path.basename(file_path)}",
             )
             self.status_bar.showMessage(msg)
-            QMessageBox.information(self, tr("导出成功"), msg)
+            msg_info(self, tr("导出成功"), msg)
         else:
-            QMessageBox.warning(self, tr("导出失败"), msg)
+            msg_warn(self, tr("导出失败"), msg)
 
     def _generate_template(self):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -84,13 +85,13 @@ class ExportMixin:
                 audit_log.CAT_EXPORT, tr("生成 Excel 模板"),
                 os.path.basename(file_path),
             )
-            QMessageBox.information(self, tr("成功"), msg)
+            msg_info(self, tr("成功"), msg)
         else:
-            QMessageBox.warning(self, tr("失败"), msg)
+            msg_warn(self, tr("失败"), msg)
 
     def _export_results(self):
         if not self.all_results:
-            QMessageBox.warning(self, tr("提示"), tr("没有可导出的结果"))
+            msg_warn(self, tr("提示"), tr("没有可导出的结果"))
             return
 
         default_name = f"扫描结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -134,14 +135,14 @@ class ExportMixin:
                 f"{_fmt} · {len(self.all_results)} 条 · {os.path.basename(path)}",
             )
             self.status_bar.showMessage(msg)
-            QMessageBox.information(self, tr("导出成功"), msg)
+            msg_info(self, tr("导出成功"), msg)
         else:
-            QMessageBox.warning(self, tr("导出失败"), msg)
+            msg_warn(self, tr("导出失败"), msg)
 
     def _print_results(self):
         """将当前扫描结果表格打印 / 导出为 PDF（先弹打印预览对话框）。"""
         if self.table.topLevelItemCount() == 0:
-            QMessageBox.information(self, tr("提示"), tr("当前没有可打印的扫描结果，请先执行扫描。"))
+            msg_info(self, tr("提示"), tr("当前没有可打印的扫描结果，请先执行扫描。"))
             return
 
         # 仅取可见列（服务列默认隐藏，跳过），只打印设备顶层行

@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTreeWidget, QHeaderView,
-    QProgressBar, QMessageBox, QSpinBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
+    QProgressBar, QSpinBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
     QSplitter, QStackedWidget, QToolButton, QMenu, QInputDialog, QButtonGroup,
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QByteArray
@@ -36,7 +36,8 @@ from filter_bar import FilterChipBar, FilterChipScroll, FILTERS
 from favorites import FavoriteStore
 from scan_presets import ScanPresetStore, PresetError, validate_name
 import system_theme
-from i18n import tr
+from ui_msg import msg_about, msg_info, msg_warn
+from i18n import current_lang, tr
 from scan_mixin import ScanMixin
 from export_mixin import ExportMixin
 from history_mixin import HistoryMixin
@@ -75,7 +76,48 @@ COLUMN_PRESETS = (
 #:
 #: v2=IP/序号/状态…; v3=新增「设备类型」列（设备指纹深度）;
 #: v4=新增「巡检」默认列宽预设。
+#:
+#: ⚠️ 列宽还跟**语言**有关（见 `_COLUMN_WIDTH_OVERRIDES`），所以载入时除了版本号
+#: 还要比对 `table/header_lang`。语言变化**不需要** bump 版本号 —— 单独比对语言键
+#: 就够了，这样不会让所有老用户再被重置一次列布局。
 CURRENT_LAYOUT_VER = 4
+
+#: 默认列宽基线（中文）。索引对应 COLUMN_LABELS。
+_BASE_COLUMN_WIDTHS = {
+    0: 130, 1: 78, 2: 140, 3: 220, 4: 100, 5: 120, 6: 90, 7: 90,
+    8: 160, 9: 200, 10: 150, 11: 120, 12: 180,
+}
+
+#: 按语言覆盖的列宽 —— 只列**需要变**的列，其余沿用基线。
+#:
+#: 为什么：这些列的**表头或单元格文本会随语言变化**，而列宽是按像素持久化的。
+#: 实测口径是 `table.sizeHintForColumn()`（含图标 18px 与 QSS `padding: 4px 6px`），
+#: **不是** `QFontMetrics` 的文本宽度：
+#:
+#:   col 1  状态 / Status         单元格「在线」68px → `Online` **82px**
+#:                                （默认 78px 放不下 → 英文界面显示 `Onl…`）
+#:   col 4  制造商 / Manufacturer  表头 72px → **131px**
+#:   col 7  响应时间 / Response Time (ms)  表头 121px → **178px**
+#:   col 8  开放端口 / Open Ports  单元格 162px → 175px
+#:   col 9  服务 / Services        单元格 192px → 215px
+#:   col 10 操作系统 / Operating System  单元格 176px → 200px
+#:
+#: 数值来自真实 MainWindow 的多行样本实测（`probe_widths`），并留了余量。
+#: ⚠️ 这些宽度**不能用单测断言绝对像素** —— headless（`QT_QPA_PLATFORM=offscreen`）
+#: 下 Qt 用的是回退字体，宽度明显更大（实测英文状态列 native 82px / offscreen 120px），
+#: 断言会假挂。所以 `tests/test_column_widths.py` 只钉「机制」与「表本身」，
+#: 「像素到底够不够」由实测探针负责。
+_COLUMN_WIDTH_OVERRIDES = {
+    "en-US": {1: 92, 4: 140, 7: 190, 8: 175, 9: 215, 10: 200},
+}
+
+
+def column_widths_for(lang: str) -> dict:
+    """该语言下的默认列宽（基线 + 语言覆盖）。"""
+    widths = dict(_BASE_COLUMN_WIDTHS)
+    widths.update(_COLUMN_WIDTH_OVERRIDES.get(lang, {}))
+    return widths
+
 
 #: 主题模式：key → 规范中文标签。
 #:
@@ -427,10 +469,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         #            7=响应时间, 8=开放端口, 9=服务, 10=操作系统, 11=设备类型, 12=备注)
         header = self.table.header()
         header.setStretchLastSection(False)
-        _widths = {0: 130, 1: 78, 2: 140, 3: 220, 4: 100, 5: 120, 6: 90, 7: 90, 8: 160, 9: 200, 10: 150, 11: 120, 12: 180}
-        for _col, _w in _widths.items():
-            header.setSectionResizeMode(_col, QHeaderView.Interactive)
-            header.resizeSection(_col, _w)
+        # 宽度**按语言分流** —— 中文下够宽的列在英文下会省略（见
+        # `_COLUMN_WIDTH_OVERRIDES`）。
+        self._apply_default_column_widths()
         # 状态电脑图标尺寸（预渲染 Pixmap 缩放到此尺寸，避免被压扁）
         self.table.setIconSize(QSize(18, 18))
 
@@ -1022,7 +1063,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             return
         self.settings.setValue("ui/language", lang)
         self.settings.sync()
-        QMessageBox.information(
+        msg_info(
             self, tr("语言切换"),
             tr("语言设置已保存，重启程序后生效。")
         )
@@ -1093,7 +1134,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             name = validate_name(name)
             self.scan_presets.put(name, self._current_scan_config())
         except PresetError as e:
-            QMessageBox.warning(self, tr("保存扫描预设"), str(e))
+            msg_warn(self, tr("保存扫描预设"), str(e))
             return
         self._rebuild_preset_menu()
         self.status_bar.showMessage(tr("已保存预设") + ": " + name)
@@ -1167,6 +1208,18 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             act.blockSignals(False)
 
     # ── 列预设 (UI_REVIEW P1-2) ──
+
+    def _apply_default_column_widths(self):
+        """按**当前语言**套用默认列宽（不动可见性与列序）。
+
+        载入时若发现老布局是另一种语言下存的，就调它重算一次 —— 列宽是按像素
+        持久化的，语言变了旧像素值就不再合适（中文 78px 的状态列放不下英文
+        `Online`，会省略成 `Onl…`）。
+        """
+        header = self.table.header()
+        for _col, _w in column_widths_for(current_lang()).items():
+            header.setSectionResizeMode(_col, QHeaderView.Interactive)
+            header.resizeSection(_col, _w)
 
     def _apply_column_preset(self, key: str):
         """按预设切换可见列，并同步自定义勾选态。"""
@@ -1286,12 +1339,21 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 版本号的含义与"为什么改动默认布局必须 +1"见 CURRENT_LAYOUT_VER 的定义。
         saved_ver = int(s.value("table/layout_ver", 0) or 0)
         hdr_state = s.value("table/header_state")
-        if saved_ver == CURRENT_LAYOUT_VER and isinstance(hdr_state, QByteArray):
+        # 语言也要对得上：列宽按**像素**存，而部分列的表头/单元格文本随语言变化。
+        # 老配置（1.7.1 及以前）没有这个键 —— 中文用户沿用其布局（当时就是中文），
+        # 英文用户则重算一次英文列宽。
+        _cur_lang = current_lang()
+        _saved_lang = str(s.value("table/header_lang", "") or "")
+        _lang_ok = (_saved_lang == _cur_lang
+                    or (not _saved_lang and _cur_lang == "zh-CN"))
+        if (saved_ver == CURRENT_LAYOUT_VER and _lang_ok
+                and isinstance(hdr_state, QByteArray)):
             self.table.header().restoreState(hdr_state)
         else:
             # 首次运行（或列布局版本已变）：套用「巡检」预设。默认把 13 列
             # 全铺出来会立刻横向滚动，且多数列在第一次扫描时都是空的。
             self._apply_column_preset("inspect")
+            self._apply_default_column_widths()
             # 排序指示也要显式定死。`QHeaderView` 的默认排序方向是**降序**，
             # 而恢复出来的 header_state 里存的是用户上次点的方向 —— 于是同一个
             # 版本会出现"新装 IP 从大到小、老配置从小到大"的行为不一致。
@@ -1330,6 +1392,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("window/state", self.saveState())
         s.setValue("table/header_state", self.table.header().saveState())
         s.setValue("table/layout_ver", CURRENT_LAYOUT_VER)
+        # 列宽与语言相关：记下这份布局是在哪种语言下调的（见载入处的比对）
+        s.setValue("table/header_lang", current_lang())
         # 详情面板高度（用户拖动分隔条后应保持）
         s.setValue("ui/detail_splitter", self.detail_splitter.saveState())
         s.setValue("view/filter_key", getattr(self, "filter_key", "online"))
@@ -1602,7 +1666,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
     def _show_about(self):
         _data_info = tr("数据目录：") + data_dir() + "\n" + tr("存放方式：") + data_dir_label()
-        QMessageBox.about(self, tr("关于"), (
+        msg_about(self, tr("关于"), (
             tr("<h3>局域网终端扫描工具</h3>")
             # 版本号从可翻译串里拆出来：它不需要翻译，混进去会导致
             # 每次发版都要同步改语言包，且漏改时英文界面回退成中文。

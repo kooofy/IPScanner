@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """历史快照、审计日志与拓扑视图混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
-from PyQt5.QtWidgets import QMessageBox, QProgressDialog
+from PyQt5.QtWidgets import QProgressDialog
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from ui_dialogs import (
     AuditLogDialog, HistoryCompareDialog, HistoryQueryDialog, TopologyDialog
@@ -10,6 +10,7 @@ import audit_log
 import ui_logic
 import history_store
 from app_logging import get_logger
+from ui_msg import msg_info
 from i18n import tr
 
 _log = get_logger(__name__)
@@ -57,7 +58,7 @@ class HistoryMixin:
 
     def _open_topology(self):
         if not self.all_results:
-            QMessageBox.information(self, tr("拓扑视图"), tr("请先完成一次扫描，再查看拓扑。"))
+            msg_info(self, tr("拓扑视图"), tr("请先完成一次扫描，再查看拓扑。"))
             return
         gw_ip = _detect_gateway()
 

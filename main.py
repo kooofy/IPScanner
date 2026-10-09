@@ -18,7 +18,7 @@ import app_logging
 app_logging.setup()
 _log = app_logging.get_logger(__name__)
 
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt, QSettings
 from PyQt5.QtGui import QFont, QIcon, QPixmap
 
@@ -30,6 +30,7 @@ _saved_lang = QSettings("ipscanner.ini", QSettings.IniFormat).value("ui/language
 i18n.init(_saved_lang if _saved_lang else None)
 
 from main_window import MainWindow, STYLE_SHEET
+from ui_msg import msg_error
 from i18n import tr
 
 
@@ -127,7 +128,7 @@ class SafeApp(QApplication):
             if _now - SafeApp._last_popup > 3:
                 SafeApp._last_popup = _now
                 try:
-                    QMessageBox.critical(
+                    msg_error(
                         None, tr("运行时错误（已捕获，未崩溃）"),
                         tr("程序捕获到一个错误，已写入 crash.log：\n\n") + err[-1500:]
                     )

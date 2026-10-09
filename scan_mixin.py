@@ -5,7 +5,7 @@ import re
 import socket
 import subprocess
 from PyQt5.QtWidgets import (
-    QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QComboBox, QMessageBox
+    QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QComboBox
 )
 from PyQt5.QtCore import Qt
 from scanner import (
@@ -27,6 +27,7 @@ from conflict_detector import (
     detect_conflicts, get_conflict_ips, SEVERITY_HIGH, SEVERITY_WARNING
 )
 from change_detector import detect_changes, get_change_summary
+from ui_msg import localize_buttons, msg_info, msg_warn
 from i18n import tr
 
 _log = get_logger(__name__)
@@ -53,6 +54,7 @@ class ScanMixin:
         )
         _layout.addRow(tr("端口探测方式:"), _mode)
         _btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        localize_buttons(_btns)
         _btns.accepted.connect(dlg.accept)
         _btns.rejected.connect(dlg.reject)
         _layout.addRow(_btns)
@@ -217,7 +219,7 @@ class ScanMixin:
         if subnet:
             self._fill_subnet_range(subnet)
         else:
-            QMessageBox.warning(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
+            msg_warn(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
 
     def _scan_c_class_subnet(self):
         """扫描 C 类子网：仅填充范围并加入待扫列表（仿 AIP），不自动开始扫描。"""
@@ -225,7 +227,7 @@ class ScanMixin:
         if subnet:
             self._fill_subnet_range(subnet)
         else:
-            QMessageBox.warning(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
+            msg_warn(self, tr("提示"), tr("无法获取本机 IP，请手动输入扫描范围。"))
 
     def _fill_subnet_range(self, subnet: str):
         """将网段填入范围输入框并静默加入待扫列表（不弹重复提示、不自动扫描）。
@@ -294,14 +296,14 @@ class ScanMixin:
 
         # 规模超限：必须明确告知用户，不能静默丢弃
         if too_large:
-            QMessageBox.warning(
+            msg_warn(
                 self, tr("范围过大"),
                 tr("以下网段的 IP 数超过单次上限 {limit} 个，已忽略：\n  {items}"
                    "\n\n请拆分为更小的范围（如按 /24 分批）后再扫描。").format(
                     limit=MAX_IPS_PER_RANGE, items="\n  ".join(too_large))
             )
         if over_total:
-            QMessageBox.warning(
+            msg_warn(
                 self, tr("范围过大"),
                 tr("加上以下网段后，待扫 IP 总数将超过上限 {limit} 个，已忽略：\n  {items}"
                    "\n\n请先清空部分网段，或分多次扫描。").format(
@@ -313,14 +315,14 @@ class ScanMixin:
                 return
             # 全部无效或全部重复，未新增任何网段
             if ipv6:
-                QMessageBox.warning(
+                msg_warn(
                     self, tr("暂不支持 IPv6"),
                     tr("以下项是 IPv6 地址，本工具目前只支持 IPv4 扫描：\n  {items}"
                        "\n\n请改用 IPv4 网段（如 192.168.1.0/24）。").format(
                         items="\n  ".join(ipv6))
                 )
             if invalid:
-                QMessageBox.warning(
+                msg_warn(
                     self, tr("格式错误"),
                     tr("以下项无法解析:\n  {items}"
                        "\n\n支持格式 (可一行多个, 用逗号/空格/换行分隔):\n"
@@ -328,7 +330,7 @@ class ScanMixin:
                         items="\n  ".join(invalid))
                 )
             if not ipv6 and not invalid and dup:
-                QMessageBox.information(self, tr("提示"), tr("这些网段都已添加过了"))
+                msg_info(self, tr("提示"), tr("这些网段都已添加过了"))
             return
 
         # 有成功添加时，仅对"重复 / 无效 / IPv6"做补充提示，避免无效输入被静默吞掉
@@ -342,7 +344,7 @@ class ScanMixin:
             if invalid:
                 msg.append(tr("以下项无法解析，已忽略:\n  {items}").format(
                     items="\n  ".join(invalid)))
-            QMessageBox.information(self, tr("提示"), "\n".join(msg))
+            msg_info(self, tr("提示"), "\n".join(msg))
 
     def _clear_ranges(self):
         if self.ip_range_items:
@@ -356,13 +358,13 @@ class ScanMixin:
             if text:
                 self._add_ip_range()
             if not self.ip_range_items:
-                QMessageBox.warning(self, tr("提示"), tr("请先添加至少一个 IP 范围"))
+                msg_warn(self, tr("提示"), tr("请先添加至少一个 IP 范围"))
                 return
 
         # 规模兜底：网段可能来自旧配置或手工编辑的 ini，启动前再校验一次总量
         total_ips = self._total_ips()
         if total_ips > MAX_IPS_TOTAL:
-            QMessageBox.warning(
+            msg_warn(
                 self, tr("范围过大"),
                 tr("待扫 IP 总数为 {total}，超过上限 {limit} 个，已中止扫描。"
                    "\n\n请清空部分网段，或分多次扫描。").format(
@@ -370,7 +372,7 @@ class ScanMixin:
             )
             return
         if total_ips == 0:
-            QMessageBox.warning(self, tr("提示"), tr("待扫列表中没有可解析的 IP，请检查网段格式。"))
+            msg_warn(self, tr("提示"), tr("待扫列表中没有可解析的 IP，请检查网段格式。"))
             return
 
         self.scan_btn.setEnabled(False)
@@ -518,7 +520,7 @@ class ScanMixin:
             # 扫描被拒绝（如范围超限）导致 0 结果时明确弹窗，
             # 否则用户会误以为"这个网段里没有任何设备"。
             if _warns and not results:
-                QMessageBox.warning(self, tr("扫描未执行"), "\n\n".join(_warns))
+                msg_warn(self, tr("扫描未执行"), "\n\n".join(_warns))
 
             # 恢复排序
             self.table.setSortingEnabled(True)
@@ -561,7 +563,7 @@ class ScanMixin:
         """
         if not self.all_results:
             if not silent:
-                QMessageBox.information(self, tr("冲突检测"), tr("暂无扫描结果，请先执行扫描。"))
+                msg_info(self, tr("冲突检测"), tr("暂无扫描结果，请先执行扫描。"))
             return
 
         library = self.library if self.library.is_loaded() else None
@@ -600,7 +602,7 @@ class ScanMixin:
 
         # 手动触发：弹出报告对话框
         if not self._conflicts:
-            QMessageBox.information(self, tr("冲突检测"), tr("未检测到任何冲突，网络状态良好。"))
+            msg_info(self, tr("冲突检测"), tr("未检测到任何冲突，网络状态良好。"))
             return
         dlg = ConflictReportDialog(self._conflicts, parent=self, dark=self.dark_mode)
         dlg.exec_()
@@ -614,7 +616,7 @@ class ScanMixin:
         """
         if not self.all_results:
             if not silent:
-                QMessageBox.information(self, tr("变更检测"), tr("暂无扫描结果，请先执行扫描。"))
+                msg_info(self, tr("变更检测"), tr("暂无扫描结果，请先执行扫描。"))
             return
 
         # 加载最近一次快照作为"上次"基准
@@ -624,7 +626,7 @@ class ScanMixin:
                 self._changes = []
                 self._apply_change_index()
                 if not silent:
-                    QMessageBox.information(self, tr("变更检测"), tr("没有历史快照可供对比（首次扫描）。"))
+                    msg_info(self, tr("变更检测"), tr("没有历史快照可供对比（首次扫描）。"))
                 return
             last_snap = history_store.get_snapshot(snapshots[-1]["id"], self.history_db)
             prev_devices = last_snap["devices"] if last_snap else []
@@ -635,7 +637,7 @@ class ScanMixin:
             self._changes = []
             self._apply_change_index()
             if not silent:
-                QMessageBox.information(self, tr("变更检测"), tr("上次快照为空，无法对比。"))
+                msg_info(self, tr("变更检测"), tr("上次快照为空，无法对比。"))
             return
 
         self._changes = detect_changes(self.all_results, prev_devices)
@@ -665,7 +667,7 @@ class ScanMixin:
 
         # 手动触发：弹出报告对话框
         if not self._changes:
-            QMessageBox.information(self, tr("变更检测"), tr("与上次扫描相比无任何变更，网络状态稳定。"))
+            msg_info(self, tr("变更检测"), tr("与上次扫描相比无任何变更，网络状态稳定。"))
             return
         dlg = ChangeReportDialog(self._changes, parent=self, dark=self.dark_mode)
         dlg.exec_()
@@ -684,7 +686,7 @@ class ScanMixin:
     def _show_subnet_utilization(self):
         """弹出子网利用率对话框。"""
         if not self.all_results:
-            QMessageBox.information(self, tr("子网利用率"), tr("暂无扫描结果，请先执行扫描。"))
+            msg_info(self, tr("子网利用率"), tr("暂无扫描结果，请先执行扫描。"))
             return
         dlg = SubnetUtilizationDialog(self.all_results, parent=self, dark=self.dark_mode)
         dlg.exec_()
@@ -812,7 +814,7 @@ class ScanMixin:
                 return
             user, pwd, domain, save, transport = dlg.get_credentials()
             if not user or not pwd:
-                QMessageBox.warning(self, tr("WMI 识别"), tr("用户名和密码不能为空"))
+                msg_warn(self, tr("WMI 识别"), tr("用户名和密码不能为空"))
                 return
             self.wmi_creds.set(user, pwd, domain, transport)
             if save:
@@ -823,12 +825,12 @@ class ScanMixin:
         targets = ui_logic.select_identification_targets(self.all_results, targets, tr("Windows"))
         if not targets:
             if not _explicit:
-                QMessageBox.information(
+                msg_info(
                     self, tr("WMI 识别"),
                     tr("没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n" "可先用普通扫描发现设备，再对选中设备执行 WMI 识别。")
                 )
             else:
-                QMessageBox.information(self, tr("WMI 识别"), tr("所选设备不在线，无法识别。"))
+                msg_info(self, tr("WMI 识别"), tr("所选设备不在线，无法识别。"))
             return
 
         # 3) 后台线程逐台识别
@@ -881,12 +883,12 @@ class ScanMixin:
         targets = ui_logic.select_identification_targets(self.all_results, targets, tr("Windows"))
         if not targets:
             if not _explicit:
-                QMessageBox.information(
+                msg_info(
                     self, tr("NetBIOS 识别"),
                     tr("没有发现在线且疑似 Windows 的设备（需开放 135/445，或 TTL 推测为 Windows）。\n" "可先扫描发现设备，再对选中设备执行 NetBIOS 识别。")
                 )
             else:
-                QMessageBox.information(self, tr("NetBIOS 识别"), tr("所选设备不在线，无法识别。"))
+                msg_info(self, tr("NetBIOS 识别"), tr("所选设备不在线，无法识别。"))
             return
 
         if self.netbios_thread and self.netbios_thread.isRunning():
