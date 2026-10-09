@@ -242,6 +242,7 @@ class ScanContext:
                  max_threads: int = 100, scan_ports_flag: bool = False,
                  protocols=None, mdns_discovery: bool = True, ports=None,
                  progress_callback=None, result_callback=None,
+                 phase_callback=None,
                  library_lookup=None, snmp_v3_user=None):
         self.scanner = scanner
         self.all_ips = list(all_ips)
@@ -261,6 +262,11 @@ class ScanContext:
         self.mdns_discovery = mdns_discovery
         self.progress_callback = progress_callback
         self.result_callback = result_callback
+        # 阶段回调 ``(name, index, total)``。``name`` 是**语言无关的规范值**
+        # （即 ``DiscoveryPhase.name``，如 ``"ping"``），显示层再经
+        # ``constants.phase_label()`` 惰性翻译 —— 回调里绝不传已翻译的文本，
+        # 否则日志/审计里会出现"随界面语言变化的阶段名"。
+        self.phase_callback = phase_callback
         self.library_lookup = library_lookup
         self.snmp_v3_user = snmp_v3_user
 
@@ -723,6 +729,7 @@ class NetworkScanner:
              protocols: List[str] = None, tcp_scan_mode: str = "connect",
              mdns_discovery: bool = True, ports: List[int] = None,
              progress_callback=None, result_callback=None,
+             phase_callback=None,
              library_lookup=None, snmp_v3_user=None) -> List[ScanResult]:
         """
         扫描多个 IP 范围。
@@ -741,6 +748,9 @@ class NetworkScanner:
             mdns_discovery: 是否在扫描末尾做 mDNS 组播发现（发现网内 IoT/打印机/NAS 等）
             progress_callback: 进度回调 (current, total, current_ip)
             result_callback: 单个结果回调 (ScanResult)
+            phase_callback: 阶段切换回调 (phase_name, index, total)。在**每个阶段开始前**
+                调用一次，``phase_name`` 是语言无关的规范值（如 ``"ping"``）；
+                供 GUI 显示"现在在干嘛"。
             library_lookup: 地址库匹配回调 (ScanResult) -> bool，在 enrich 工作线程内
                 逐台调用，用于把台账信息（位置/使用者/备注）写回结果。
                 由调用方传入内存索引（见 mac_library.MacMatcher.apply_to），
@@ -778,12 +788,19 @@ class NetworkScanner:
             ports=ports,
             progress_callback=progress_callback,
             result_callback=result_callback,
+            phase_callback=phase_callback,
             library_lookup=library_lookup,
             snmp_v3_user=snmp_v3_user,
         )
 
         try:
-            for phase in PHASES:
+            _total_phases = len(PHASES)
+            for _index, phase in enumerate(PHASES, start=1):
+                # 阶段开始前通知一次（带 index/total，供 UI 显示"阶段 2/3"）。
+                # 与 progress_callback 同属纯通知，这里不做异常隔离 —— 显示层
+                # 自己的问题不该被引擎悄悄吃掉。
+                if ctx.phase_callback:
+                    ctx.phase_callback(phase.name, _index, _total_phases)
                 phase.run(ctx)
         finally:
             # 等待所有富化完成；停止扫描时不再等待，直接返回

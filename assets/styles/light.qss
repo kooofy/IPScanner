@@ -713,3 +713,42 @@ QPushButton#emptyPrimary:pressed {
     background-color: #0069BC;
     border-color: #0069BC;
 }
+/* 扫描态摘要条（UI_REVIEW P0-2 后半）：扫描期间显示
+   「阶段 / 进度 / 已扫 / 在线 / 有服务 / 用时 / 停止」。 */
+QFrame#scanStatusBar {
+    background-color: #F2F7FD;
+    border: 1px solid #D6E4F0;
+    border-radius: 2px;
+}
+QLabel#scanPhase {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    font-weight: bold;
+    color: #005A9E;
+}
+QLabel#scanMetric {
+    font-family: "Consolas", "Microsoft YaHei";
+    font-size: 12px;
+    color: #333333;
+}
+QProgressBar#scanProgress {
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+    background-color: #E8E8E8;
+}
+QProgressBar#scanProgress::chunk {
+    border-radius: 1px;
+    background-color: #0078D7;
+}
+QPushButton#scanStop {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    padding: 2px 10px;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+    background-color: #F0F0F0;
+    color: #333333;
+}
+QPushButton#scanStop:hover {
+    background-color: #E0E0E0;
+}

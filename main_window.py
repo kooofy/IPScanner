@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTreeWidget, QHeaderView,
-    QProgressBar, QSpinBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
+    QSpinBox, QAction, QAbstractItemView, QStyle, QTextEdit, QFrame, QActionGroup,
     QSplitter, QStackedWidget, QToolButton, QMenu, QInputDialog, QButtonGroup,
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QByteArray
@@ -33,6 +33,7 @@ from detail_panel import DeviceDetailPanel
 from empty_state import EmptyStatePanel
 from overview import OverviewPanel
 from filter_bar import FilterChipBar, FilterChipScroll, FILTERS
+from scan_status import ScanStatusBar
 from favorites import FavoriteStore
 from scan_presets import ScanPresetStore, PresetError, validate_name
 import system_theme
@@ -417,6 +418,14 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb3.addWidget(self.filter_scroll, 1)
         main_layout.addLayout(tb3)
 
+        # ── 扫描态摘要条（UI_REVIEW P0-2 后半）──
+        # 放在工具栏与内容之间：扫描期间它是"现在在干嘛"的唯一出口
+        # （阶段 / 已扫 / 在线 / 有服务 / 用时 / 停止）。
+        # 默认隐藏，扫描结束后整体收起 —— 结果已经在表格里，再占一行是噪声。
+        self.scan_status = ScanStatusBar()
+        self.scan_status.stop_requested.connect(self._stop_scan)
+        main_layout.addWidget(self.scan_status)
+
         # ── 原工具栏上的扫描参数 / 筛选：改为菜单驱动（保留实例供设置与扫描读取） ──
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(100, 5000)
@@ -518,12 +527,6 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         main_layout.addWidget(self.result_stack, 1)
         # 启动时还没有结果：把「视图切换 + 筛选条」整行收起来
         self._update_result_controls()
-
-        # ── 进度条 ──
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedHeight(18)
-        main_layout.addWidget(self.progress_bar)
 
         # ── 状态栏 ──
         self.status_bar = self.statusBar()

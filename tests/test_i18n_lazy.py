@@ -297,6 +297,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             COLUMN_PRESETS, COLUMN_LABELS, THEME_MODES, VIEW_MODES,
         )
         from main_window_tree import _CHANGE_LABEL
+        from scanner import constants as _sc
         from ui_msg import STANDARD_BUTTON_TEXT
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
@@ -305,6 +306,13 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "main_window.THEME_MODES": [lbl for _k, lbl in THEME_MODES],
             "main_window.VIEW_MODES": [lbl for _k, lbl in VIEW_MODES],
             "main_window_tree._CHANGE_LABEL": list(_CHANGE_LABEL.values()),
+            # scanner.constants 的两张"显示名表"：值同样是**字面量**（模块顶层不能
+            # 调 tr()，否则会被冻成导入期语言），AST 收集不到，只能显式登记。
+            # `_PHASE_TEXT` 是扫描摘要条"当前阶段"的来源，漏翻只会在英文界面
+            # 显示中文阶段名 —— 与 FILTERS/COLUMN_PRESETS 那次是同一类盲区。
+            "scanner.constants._SCAN_LEVEL_TEXT":
+                list(_sc._SCAN_LEVEL_TEXT.values()),
+            "scanner.constants._PHASE_TEXT": list(_sc._PHASE_TEXT.values()),
             # ui_msg 的标准按钮表：值是**字面量**（模块顶层不能调 tr()，否则会被
             # 冻结成导入期语言），所以 AST 收集不到，必须在这里显式登记。
             "ui_msg.STANDARD_BUTTON_TEXT": list(STANDARD_BUTTON_TEXT.values()),

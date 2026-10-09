@@ -703,3 +703,42 @@ QPushButton#emptyPrimary:pressed {
     background-color: #3D93EE;
     border-color: #3D93EE;
 }
+/* 扫描态摘要条（UI_REVIEW P0-2 后半）。深色下强调色用 `#6CC0FF`：
+   `#0078D7` 压在 `#1E2A38` 上只有约 2.6:1，读不清。 */
+QFrame#scanStatusBar {
+    background-color: #1E2A38;
+    border: 1px solid #2F4055;
+    border-radius: 2px;
+}
+QLabel#scanPhase {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    font-weight: bold;
+    color: #6CC0FF;
+}
+QLabel#scanMetric {
+    font-family: "Consolas", "Microsoft YaHei";
+    font-size: 12px;
+    color: #E0E0E0;
+}
+QProgressBar#scanProgress {
+    border: 1px solid #3F3F46;
+    border-radius: 2px;
+    background-color: #2D2D30;
+}
+QProgressBar#scanProgress::chunk {
+    border-radius: 1px;
+    background-color: #4DA6FF;
+}
+QPushButton#scanStop {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 12px;
+    padding: 2px 10px;
+    border: 1px solid #3F3F46;
+    border-radius: 2px;
+    background-color: #3E3E42;
+    color: #E0E0E0;
+}
+QPushButton#scanStop:hover {
+    background-color: #4A4A50;
+}

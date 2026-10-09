@@ -56,6 +56,26 @@ def scan_level_label(level: str) -> str:
     return tr(text) if text else str(level)
 
 
+# 扫描阶段显示名：惰性翻译。键是**语言无关的规范值**（即 `DiscoveryPhase.name`），
+# 与 `scanner/engine.py` 的 `PHASES` 一一对应。
+# 未知阶段名原样返回 —— 以后新增阶段忘了补词条，也只是显示英文名，不会崩。
+#
+# ⚠️ 措辞刻意避开已有词条：语言包里 `"mDNS 发现"` 已存在，但它的含义是
+# **"该设备是通过 mDNS 发现的"**（`Found via mDNS`）。阶段名若复用它，英文界面
+# 会显示成 "Found via mDNS"，意思全拧 —— 故这里用"mDNS 组播发现"。
+_PHASE_TEXT = {
+    "ping": "存活探测",
+    "arp": "ARP 补全",
+    "mdns": "mDNS 组播发现",
+}
+
+
+def phase_label(name: str) -> str:
+    """扫描阶段代码 -> 当前语言的显示名（惰性翻译）。"""
+    text = _PHASE_TEXT.get(name)
+    return tr(text) if text else str(name)
+
+
 def get_ports_for_level(level: str):
     """按扫描级别返回端口列表（按需生成，不常驻大列表）。
 

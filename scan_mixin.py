@@ -379,8 +379,11 @@ class ScanMixin:
         self.stop_btn.setEnabled(True)
         self.act_export.setEnabled(False)
         self.act_clear.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
+        # 扫描态摘要条（UI_REVIEW P0-2 后半）：阶段 / 已扫 / 在线 / 有服务 /
+        # 用时 / [停止]。计数在 `_on_scan_result` 里累加，这里只负责复位。
+        self._scan_online = 0
+        self._scan_services = 0
+        self.scan_status.start(total_ips)
         # 切到结果页：让用户立刻看到表格在填充（空状态页只服务于"尚无结果"）
         self._show_results_page(True)
         self.table.setSortingEnabled(False)
@@ -404,6 +407,7 @@ class ScanMixin:
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()
         self.scan_thread.progress.connect(self._on_scan_progress, Qt.QueuedConnection)
+        self.scan_thread.phase_changed.connect(self._on_scan_phase, Qt.QueuedConnection)
         self.scan_thread.result_ready.connect(self._on_scan_result, Qt.QueuedConnection)
         self.scan_thread.finished_signal.connect(self._on_scan_finished, Qt.QueuedConnection)
         self.scan_thread.log_signal.connect(lambda msg: self.status_bar.showMessage(msg), Qt.QueuedConnection)
@@ -469,15 +473,26 @@ class ScanMixin:
             _a.setChecked(_a.data() == self.scan_level)
 
     def _on_scan_progress(self, current, total, ip):
-        pct = int(current / total * 100) if total > 0 else 0
-        self.progress_bar.setValue(pct)
+        self.scan_status.set_progress(current, total)
         self.status_bar.showMessage(f"扫描中 [{current}/{total}] {ip} ...")
+
+    def _on_scan_phase(self, name, index, total):
+        """阶段切换。`name` 是语言无关的规范值（`ping`/`arp`/`mdns`），
+        翻译发生在 `ScanStatusBar.set_phase` 里。"""
+        self.scan_status.set_phase(name, index, total)
 
     def _on_scan_result(self, result: ScanResult):
         # 地址库匹配已在扫描线程内完成（见 ScanThread._build_library_lookup：
         # 整库预加载为内存索引 + O(1) 查找），主线程只负责渲染。
         # 旧实现在此逐条查 SQLite，/16 网段会产生约 6.5 万次主线程查询并冻结界面。
         self._upsert_table_row(result)
+        # 摘要条实时计数。引擎只对存活主机走富化回调（见 `_on_scan_finished`
+        # 里那段说明），所以这里收到的必然是"扫出东西"的行。
+        if result.status == "online":
+            self._scan_online += 1
+        if getattr(result, "services", None):
+            self._scan_services += 1
+        self.scan_status.set_counts(self._scan_online, self._scan_services)
 
     def _on_scan_finished(self, results):
         try:
@@ -529,7 +544,7 @@ class ScanMixin:
             self.stop_btn.setEnabled(False)
             self.act_export.setEnabled(True)
             self.act_clear.setEnabled(True)
-            self.progress_bar.setVisible(False)
+            self.scan_status.finish()
             self._update_stats()
             # 审计：记录扫描完成
             _st = ui_logic.count_scan_status(results)
@@ -551,7 +566,7 @@ class ScanMixin:
             self.stop_btn.setEnabled(False)
             self.act_export.setEnabled(True)
             self.act_clear.setEnabled(True)
-            self.progress_bar.setVisible(False)
+            self.scan_status.finish()
             self.status_bar.showMessage(f"扫描异常: {e}")
 
     def _run_conflict_detection(self, silent=False):

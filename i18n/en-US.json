@@ -767,5 +767,16 @@
   "帮助": "Help",
   "应用": "Apply",
   "恢复默认": "Restore Defaults",
-  "网关": "Gateway"
+  "网关": "Gateway",
+
+  "存活探测": "Liveness probe",
+  "ARP 补全": "ARP completion",
+  "mDNS 组播发现": "mDNS multicast discovery",
+
+  "准备中...": "Preparing...",
+  "阶段: {name} ({i}/{n})": "Phase: {name} ({i}/{n})",
+  "已扫 {c}/{t}": "Scanned {c}/{t}",
+  "在线 {n}": "Online {n}",
+  "有服务 {n}": "With services {n}",
+  "用时 {t}": "Elapsed {t}"
 }

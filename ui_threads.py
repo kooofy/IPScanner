@@ -14,6 +14,8 @@ class ScanThread(QThread):
     result_ready = pyqtSignal(object)       # ScanResult
     finished_signal = pyqtSignal(list)      # all results
     log_signal = pyqtSignal(str)            # log message
+    # phase_name（语言无关规范值）, index, total —— 供扫描摘要条显示"现在在干嘛"
+    phase_changed = pyqtSignal(str, int, int)
 
     def __init__(self, ip_ranges, timeout_ms=1000, max_threads=100, scan_ports=False,
                  protocols=None, tcp_scan_mode="connect", mdns_discovery=True, ports=None,
@@ -58,6 +60,9 @@ class ScanThread(QThread):
         def on_result(result: ScanResult):
             self.result_ready.emit(result)
 
+        def on_phase(name, index, total):
+            self.phase_changed.emit(name, index, total)
+
         self.log_signal.emit(f"开始扫描 {len(self.ip_ranges)} 个网段...")
         results = self.scanner.scan(
             self.ip_ranges,
@@ -70,6 +75,7 @@ class ScanThread(QThread):
             ports=self.ports,
             progress_callback=on_progress,
             result_callback=on_result,
+            phase_callback=on_phase,
             library_lookup=self._build_library_lookup(),
             snmp_v3_user=self.snmp_v3_user,
         )

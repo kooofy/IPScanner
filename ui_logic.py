@@ -78,6 +78,25 @@ def count_scan_status(results) -> dict:
     return {"total": total, "online": online, "offline": offline, "unknown": total - online - offline}
 
 
+def format_elapsed(seconds) -> str:
+    """把秒数格式化成 `mm:ss`（满 1 小时则 `h:mm:ss`）。
+
+    负值/非数值一律按 0 处理 —— 计时起点由 `time.perf_counter()` 给出，正常
+    不会倒退，但显示层不该因为一个异常值抛异常把整条扫描流程带崩。
+    """
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        total = 0
+    if total < 0:
+        total = 0
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def format_identify_summary(kind: str, ok: int, fail: int, total: int, fail_reason: str = "") -> str:
     """构造 WMI/NetBIOS 识别完成消息。
 
