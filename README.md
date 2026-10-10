@@ -276,6 +276,12 @@ python cli.py scan -r 192.168.1.0/24 --save-snapshot --switch-map
 python cli.py locate --mac AA:BB:CC:DD:EE:FF
 python cli.py locate --ip 192.168.1.50 --format json
 
+# 被动发现：不发任何网络包地看"最近谁在我身边出现过"
+python cli.py watch                       # 读 ARP 表 + 只听 mDNS，单次轮询
+python cli.py watch --no-mdns             # 只读 ARP 表（最快，几十毫秒）
+python cli.py watch --fail-on-change      # 有新设备时退出码 2（便于计划任务告警）
+python cli.py watch --interval 60         # 每 60 秒轮询一次，Ctrl+C 停止
+
 # 对比资产变更（相对上一次快照；有变更时退出码为 2）
 python cli.py diff -r 192.168.1.0/24 --fail-on-change
 
@@ -293,12 +299,18 @@ python cli.py history --show 12 --format csv -o snapshot12.csv
 | --- | --- |
 | `0` | 成功 |
 | `1` | 错误（如 `--fail-if-empty` 且无结果） |
-| `2` | 检测到变更（仅 `diff --fail-on-change`） |
+| `2` | 检测到变更（`diff --fail-on-change`、`watch --fail-on-change`） |
 | `3` | 环境错误（如数据目录不可写） |
 | `4` | 未定位到设备（仅 `locate`；查询本身成功，是一个合法结论而非错误） |
 
 > `locate` 的数据来自扫描时按需采集的交换机转发表。没采集过时它**不会猜**，
 > 而是说明是哪一种「不知道」（从未采集 / 采集失败 / 转发表里没有它）并给出下一步动作。
+
+> `watch` 是**被动**的：默认只读本机 ARP 表并**只听** mDNS 组播（绑 5353、加入组播组、
+> 只收不发），**一个包都不发**，因此不惊动 IDS 与流量审计。它只报「新出现」的设备，
+> 不报「消失」—— ARP 条目会过期，设备从表里消失不等于它下线了。
+> 它**默认也不写快照**（快照有 20 条上限，持续轮询会把历史冲掉）；
+> 要落库请用 `watch --once --save-snapshot`，交给计划任务定时调用。
 
 **语言**：`--lang zh-CN` / `--lang en-US`，默认跟随系统。
 
@@ -394,6 +406,7 @@ IPScanner/
 │  ├─ library_mixin.py        #   地址库
 │  ├─ oui_mixin.py            #   OUI 更新
 │  ├─ network_tool_mixin.py   #   内置网络工具
+│  ├─ watch_mixin.py          #   持续发现（被动发现定时轮询 + 新设备并入列表）
 │  └─ main_window_tree.py     #   结果树构建与刷新
 │
 ├─ ui_dialogs/                # 各类对话框（按用途拆包，见 docs/refactor/）
@@ -408,7 +421,7 @@ IPScanner/
 │  ├─ locate.py               #   设备定位（MAC/IP/主机名 → 交换机端口 + 最近变化）
 │  └─ switch_port.py          #   交换机端口映射
 ├─ ui_logic.py                # 与 UI 解耦的纯业务逻辑（便于单测）
-├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / 历史查询 / OUI 更新）
+├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / 历史查询 / OUI 更新 / 被动发现）
 ├─ ui_icons.py                # 图标与调色板工具（PC 图标预渲染、工具栏矢量图标、深色 QPalette）
 ├─ ui_msg.py                  # 对话框统一入口（顺带本地化 Qt 内置按钮文案）
 ├─ ui_utils.py                # 通用工具（网关探测、快照对比、IP 校验与排序键）
@@ -439,7 +452,8 @@ IPScanner/
 │  ├─ http.py                 #   HTTP / HTTPS / UPnP / SSH / FTP banner 与品牌提取
 │  ├─ classify.py             #   设备类型与型号推断
 │  ├─ osfp.py                 #   操作系统指纹
-│  ├─ dns.py                  #   mDNS / DNS-SD
+│  ├─ dns.py                  #   mDNS / DNS-SD（含「只听不发」模式）
+│  ├─ passive.py              #   被动发现（本机 ARP 整表 + mDNS 只听，零发包）
 │  ├─ netbios.py              #   NetBIOS NBSTAT
 │  ├─ wmi.py                  #   WMI / WinRM 远程识别（需管理员凭据）
 │  ├─ snmp.py                 #   SNMP v2c（团体字）

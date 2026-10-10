@@ -169,6 +169,22 @@ def get_snapshot(snapshot_id, db_path=None) -> dict:
     return {"time": row["time"], "devices": [dict(d) for d in devs]}
 
 
+def latest_device_ips(db_path=None) -> set:
+    """最近一次快照里的设备 IP 集合。没有任何快照时返回空集。
+
+    用途：被动发现（`scanner/passive.py`）的「已知设备」基线 ——
+    有了它，`PassiveWatcher` 报出来的才是"上次扫描之后新冒出来的设备"，
+    而不是把整张 ARP 表都当成新设备。
+    """
+    snaps = list_snapshots(db_path=db_path)
+    if not snaps:
+        return set()
+    snap = get_snapshot(snaps[-1]["id"], db_path=db_path)
+    if not snap:
+        return set()
+    return {d["ip"] for d in snap["devices"] if d.get("ip")}
+
+
 def load_all(db_path=None) -> list:
     """返回全部快照（旧 JSON 的等价物），按时间升序，结构完全一致。"""
     out = []

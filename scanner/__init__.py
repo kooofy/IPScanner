@@ -20,6 +20,7 @@ from .wmi import (wmi_query, merge_wmi, wmi_device_class, transport_label,
                   TRANSPORT_AUTO, TRANSPORT_DCOM, TRANSPORT_WINRM, TRANSPORTS)
 from .cred_store import WmiCredentialStore, SnmpV3CredentialStore
 from .netbios import netbios_query, merge_netbios
+from .passive import passive_discover, dump_arp_table, PassiveWatcher
 from .snmp import snmp_get_system, snmp_walk
 from .snmp_v3 import (snmp_v3_get_system, snmp_v3_walk, SnmpV3User,
                       auth_label, priv_label,
@@ -39,6 +40,7 @@ __all__ = [
     'transport_label', 'TRANSPORT_AUTO', 'TRANSPORT_DCOM', 'TRANSPORT_WINRM',
     'TRANSPORTS',
     'netbios_query', 'merge_netbios',
+    'passive_discover', 'dump_arp_table', 'PassiveWatcher',
     'snmp_get_system', 'snmp_walk',
     'snmp_v3_get_system', 'snmp_v3_walk', 'SnmpV3User',
     'SnmpV3CredentialStore', 'auth_label', 'priv_label',

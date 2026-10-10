@@ -48,6 +48,7 @@ from history_mixin import HistoryMixin
 from library_mixin import LibraryMixin
 from network_tool_mixin import NetworkToolMixin
 from oui_mixin import OuiMixin
+from watch_mixin import WatchMixin
 
 #: 列索引 → 规范中文名（顺序即表格列序，勿改）。
 COLUMN_LABELS = (
@@ -171,7 +172,7 @@ def _vsep() -> QFrame:
     return sep
 
 
-class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, NetworkToolMixin, OuiMixin, QMainWindow):
+class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, NetworkToolMixin, OuiMixin, WatchMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(tr("局域网终端扫描工具 — IP Scanner"))
@@ -236,6 +237,11 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self._init_ui()
         self._init_menu()
         self._connect_signals()
+
+        # 持续发现的定时器/线程状态。**必须在 `_load_settings()` 之前**：
+        # 信号已经接上，载入时 `setChecked(True)` 会立刻触发 `_on_watch_toggled`，
+        # 那时定时器与 watcher 字段必须已经存在。
+        self._init_watch()
 
         # 载入持久化配置 (主题/扫描参数/网段/窗口几何/列布局)
         self._load_settings()
@@ -460,6 +466,15 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.switch_map_check = QAction(tr("读取交换机转发表"), self, checkable=True)
         self.switch_map_check.setToolTip(
             tr("扫描末尾读取各交换机转发表，记录设备与端口的对应关系（需要 SNMP）"))
+
+        # 持续发现：打开界面后周期性地「被动」发现设备（读本机 ARP 表 + 监听 mDNS，
+        # **不发任何网络包**），新出现的设备自动并入列表。
+        # **默认关**：它会在后台占住 mDNS 的 5353 端口并持续改动表格，
+        # 只想跑一次扫描的用户不该被它打扰。与「读取交换机转发表」同一处理。
+        self.watch_check = QAction(tr("持续发现"), self, checkable=True)
+        self.watch_check.setToolTip(
+            tr("周期读取本机 ARP 表并监听 mDNS，把新出现的设备并入列表"
+               "（被动，不发包；默认关）"))
 
         # 筛选已由常驻的 FilterChipBar 承担（见上方 tb2），
         # 「视图 > 筛选」菜单与 chip 共用 _set_filter() 这一个入口。
@@ -784,6 +799,11 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         self.switch_map_check.setIcon(_mi(QStyle.SP_DriveNetIcon))
         settings_menu.addAction(self.switch_map_check)
+
+        # 持续发现：与上面两项并列 —— 三者都是"会碰网络的采集行为"，
+        # 且都默认关，放一起用户一眼能看出这是一组需要自己开的东西。
+        self.watch_check.setIcon(_mi(QStyle.SP_BrowserReload))
+        settings_menu.addAction(self.watch_check)
 
         settings_menu.addSeparator()
 
@@ -1419,6 +1439,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 默认关：需要 SNMP，且会在网络里产生额外流量（见控件创建处注释）
         self.switch_map_check.setChecked(
             s.value("scan/switch_map", False, type=bool))
+        # 持续发现同样默认关（见控件创建处注释）
+        self.watch_check.setChecked(s.value("scan/watch", False, type=bool))
         self.tcp_scan_mode = s.value("scan/tcp_mode", "connect", type=str)
         if self.tcp_scan_mode not in ("connect", "syn", "udp"):
             self.tcp_scan_mode = "connect"
@@ -1529,6 +1551,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("scan/port_scan", self.port_scan_check.isChecked())
         s.setValue("scan/mdns", self.mdns_check.isChecked())
         s.setValue("scan/switch_map", self.switch_map_check.isChecked())
+        s.setValue("scan/watch", self.watch_check.isChecked())
         s.setValue("scan/tcp_mode", self.tcp_scan_mode)
         s.setValue("scan/level", self.scan_level)
         s.setValue("scan/protocols", self.selected_protocols)
@@ -1562,6 +1585,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 扫描参数变化时刷新空状态页的配置摘要
         self.port_scan_check.toggled.connect(lambda _c: self._update_empty_hint())
         self.mdns_check.toggled.connect(lambda _c: self._update_empty_hint())
+        # 持续发现：勾上/取消 = 起停后台轮询（详见 watch_mixin.py）
+        self.watch_check.toggled.connect(self._on_watch_toggled)
 
     def _build_view_toggle(self) -> QWidget:
         """构建「列表 / 概览」视图切换控件（docs/reviews/UI_REVIEW.md P3-2）。"""

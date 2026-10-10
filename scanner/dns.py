@@ -157,7 +157,8 @@ def _parse_mdns_packet(data: bytes, by_ip: dict, src_ip: str):
         _log.debug("解析 mDNS 报文失败（来自 %s，已跳过）: %s", src_ip, e)
 
 
-def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
+def mdns_discover(timeout: float = 2.5,
+                  listen_only: bool = False) -> Dict[str, dict]:
     """
     mDNS / DNS-SD 网络发现：向本地组播组发送浏览查询，收集所有响应。
 
@@ -169,6 +170,13 @@ def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
     - 若 5353 被系统 mDNS/Bonjour 占用（Windows 常见），回退到随机源端口：
       向组播组发送查询，响应设备会单播回我们的源端口，仍可被收到（仅
       失去「被动监听其他设备组播」能力，但足以发现手机等主动响应的设备）。
+
+    ``listen_only=True`` —— **只听模式：一个包都不发**。
+    绑 5353、加入组播组，然后只收（其他主机的 announcement、以及它们
+    对别人查询的响应）。给「被动发现」用：零发包 → 不惊动 IDS / 流量审计。
+    代价是发现能力弱于主动查询（安静网络里可能长时间收不到东西），
+    且**必须**占用 5353 —— 拿不到就返回空（见下方 warning），
+    因为退到随机端口在只听模式下收不到任何组播。
     """
     by_ip: Dict[str, dict] = {}
     sock = None
@@ -181,6 +189,14 @@ def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
             sock.bind(("", _MDNS_PORT))
             _bound_5353 = True
         except OSError:
+            if listen_only:
+                # 只听模式退到随机端口毫无意义（没人会单播给我们，我们又
+                # 不发包去换响应）。静默返回空会让调用方误判成"网络里没设备"，
+                # 必须留痕说明是端口被占。
+                _log.warning(
+                    "mDNS 只听模式无法绑定 5353（多半被系统 mDNS/Bonjour 占用），"
+                    "本次收不到任何组播；如需发现设备请改用主动查询模式。")
+                return by_ip
             # 5353 被系统占用：回退随机端口（仍可收单播响应）
             try:
                 sock.bind(("", 0))
@@ -200,26 +216,30 @@ def mdns_discover(timeout: float = 2.5) -> Dict[str, dict]:
         # 手机（iPhone/iPad）通常广播 companion-link / airdrop；Android 投屏
         # 经 googlecast；Apple TV 经 airplay/raop。主动问这些类型能显著提高
         # 手机被直接识别的概率（即便 MAC 为随机地址）。
-        _svc_types = [
-            "_services._dns-sd._udp.local",
-            "local",                      # ANY
-            "_companion-link._tcp.local",
-            "_airdrop._tcp.local",
-            "_airplay._tcp.local",
-            "_raop._tcp.local",
-            "_googlecast._tcp.local",
-            "_printer._tcp.local",
-            "_ipp._tcp.local",
-            "_homekit._tcp.local",
-        ]
-        for name in _svc_types:
-            qtype = 255 if name == "local" else 12   # ANY / PTR
-            q = _build_dns_query(name, qtype, random.randint(1, 65535))
-            try:
-                sock.sendto(q, (_MDNS_GROUP, _MDNS_PORT))
-            except OSError as e:
-                # 组播发送失败（无网卡 / 被防火墙拦 / 无组播路由）→ 发现会整体失效
-                _log.warning("mDNS 组播发送失败（%s），本次发现可能不完整: %s", name, e)
+        #
+        # listen_only=True 时**整段跳过**：不发包，只靠下面的 recvfrom 收
+        # 别人自发广播的内容。
+        if not listen_only:
+            _svc_types = [
+                "_services._dns-sd._udp.local",
+                "local",                      # ANY
+                "_companion-link._tcp.local",
+                "_airdrop._tcp.local",
+                "_airplay._tcp.local",
+                "_raop._tcp.local",
+                "_googlecast._tcp.local",
+                "_printer._tcp.local",
+                "_ipp._tcp.local",
+                "_homekit._tcp.local",
+            ]
+            for name in _svc_types:
+                qtype = 255 if name == "local" else 12   # ANY / PTR
+                q = _build_dns_query(name, qtype, random.randint(1, 65535))
+                try:
+                    sock.sendto(q, (_MDNS_GROUP, _MDNS_PORT))
+                except OSError as e:
+                    # 组播发送失败（无网卡 / 被防火墙拦 / 无组播路由）→ 发现会整体失效
+                    _log.warning("mDNS 组播发送失败（%s），本次发现可能不完整: %s", name, e)
 
         end = time.time() + timeout
         while time.time() < end:

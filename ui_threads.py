@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""扫描线程：ScanThread（主扫描）与 MdnsThread（mDNS 发现）。"""
+"""后台线程集合：把一切会阻塞界面的活儿挪出主线程。
+
+扫描（`ScanThread`）、mDNS（`MdnsThread`）、WMI / NetBIOS 识别、
+交换机转发表（`SwitchMapThread`）、OUI 库更新、历史查询与快照对比、
+被动发现（`PassiveWatchThread`）—— 共同点只有一个：
+**它们在主线程跑就会冻界面**，所以一律 QThread。
+"""
 import threading
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -427,3 +433,40 @@ class SnapshotCompareThread(QThread):
             self.failed.emit(str(e))
             return
         self.finished_signal.emit(diffs, base["time"], target["time"])
+
+
+class PassiveWatchThread(QThread):
+    """一轮被动发现（后台线程）。
+
+    **必须在后台线程跑**：mDNS 只听模式要占住 5353 听满 `mdns_timeout`，
+    放主线程就是界面卡住那么久 —— 与扫描末尾的 mDNS 阶段同一个道理。
+
+    线程**持有**调用方传进来的 `PassiveWatcher`（而不是每轮新建）：
+    台账与「已知设备」集合要跨轮累积，否则每轮都会把整张 ARP 表重报成新设备。
+    调用方在轮询期间不碰这个 watcher（靠 in-flight 判断保证），所以没有竞争。
+    """
+
+    finished_signal = pyqtSignal(list, list)   # 台账全部设备, 本次新出现
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, watcher, mdns=True, mdns_active=False,
+                 mdns_timeout=1.5):
+        super().__init__()
+        self.watcher = watcher
+        self.mdns = mdns
+        self.mdns_active = mdns_active
+        self.mdns_timeout = mdns_timeout
+
+    def run(self):
+        try:
+            ledger, fresh = self.watcher.poll(mdns=self.mdns,
+                                              mdns_active=self.mdns_active,
+                                              mdns_timeout=self.mdns_timeout)
+        except Exception as e:  # noqa: BLE001
+            # 被动发现失败只影响这一轮（网卡切换/权限不足都可能），
+            # 不该把界面拖下水；留日志便于排查。
+            _log.warning("被动发现失败: %s", e, exc_info=True)
+            self.log_signal.emit(tr("被动发现失败: {err}").format(err=e))
+            self.finished_signal.emit([], [])
+            return
+        self.finished_signal.emit(list(ledger), list(fresh))

@@ -13,16 +13,19 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import cli
+import history_store
 import i18n
 from scanner.models import ScanResult
 
@@ -593,6 +596,125 @@ class LocateCommandTest(unittest.TestCase):
         args = cli.build_parser().parse_args(
             ["scan", "-r", "192.168.1.0/24", "--switch-map", "--save-snapshot"])
         self.assertTrue(args.switch_map)
+
+
+class WatchCommandTest(unittest.TestCase):
+    """`watch` 子命令：被动发现（默认不发包、默认不写快照）。
+
+    全程 mock 掉 `dump_arp_table` —— 真去读本机 ARP 表的话，断言会随
+    跑测试的机器而变（每台机器的邻居都不一样），等于没测。
+    """
+
+    ARP = {"10.0.0.1": "aa:bb:cc:00:00:01",
+           "10.0.0.2": "aa:bb:cc:00:00:02",
+           "10.0.0.3": "aa:bb:cc:00:00:03"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "watch.db")
+        import scanner.passive as passive
+        p = mock.patch.object(passive, "dump_arp_table",
+                              return_value=dict(self.ARP))
+        self._arp = p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ── 输出 ──
+
+    def test_once_lists_all_devices_as_new_when_db_is_empty(self):
+        code, out, _err = _run_main(["watch", "--no-mdns", "--db", self.db])
+        self.assertEqual(code, cli.EXIT_OK)
+        for ip in self.ARP:
+            self.assertIn(ip, out)
+        self.assertIn("3", out)          # 台账 3 台
+
+    def test_json_is_language_neutral(self):
+        """JSON 字段名与取值都语言无关，脚本可依赖（与 locate 同一约定）。"""
+        _c, out, _e = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                 "-f", "json"])
+        data = json.loads(out)
+        self.assertEqual(data["device_count"], 3)
+        self.assertEqual(data["new_count"], 3)
+        self.assertEqual(sorted(d["ip"] for d in data["devices"]),
+                         sorted(self.ARP))
+        self.assertEqual(data["devices"][0]["discovery_method"], "arp")
+        self.assertEqual(data["devices"][0]["status"], "online")
+
+    def test_baseline_from_latest_snapshot_suppresses_known(self):
+        """基线里已有的 IP 不该被报成"新出现"。"""
+        history_store.save_snapshot(
+            [{"ip": "10.0.0.1"}, {"ip": "10.0.0.2"}], db_path=self.db)
+        _c, out, _e = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                 "-f", "json"])
+        data = json.loads(out)
+        self.assertEqual(data["device_count"], 3)
+        self.assertEqual(data["new_count"], 1)
+        self.assertEqual([d["ip"] for d in data["new_devices"]], ["10.0.0.3"])
+
+    # ── 退出码 ──
+
+    def test_fail_on_change_exits_2(self):
+        code, _out, _err = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                      "--fail-on-change"])
+        self.assertEqual(code, cli.EXIT_CHANGES)
+        self.assertNotEqual(code, cli.EXIT_ERROR)
+
+    def test_fail_on_change_exits_0_when_nothing_new(self):
+        history_store.save_snapshot(
+            [{"ip": ip} for ip in self.ARP], db_path=self.db)
+        code, _out, _err = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                      "--fail-on-change"])
+        self.assertEqual(code, cli.EXIT_OK)
+
+    # ── 落库策略 ──
+
+    def test_does_not_write_snapshot_by_default(self):
+        """默认**不写快照** —— 否则持续轮询会在十分钟内冲掉全部历史。"""
+        before = len(history_store.list_snapshots(db_path=self.db))
+        _run_main(["watch", "--no-mdns", "--db", self.db])
+        self.assertEqual(len(history_store.list_snapshots(db_path=self.db)),
+                         before)
+
+    def test_save_snapshot_writes_exactly_one(self):
+        code, _out, _err = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                      "--save-snapshot", "--note", "冒烟"])
+        self.assertEqual(code, cli.EXIT_OK)
+        snaps = history_store.list_snapshots(db_path=self.db)
+        self.assertEqual(len(snaps), 1)
+        self.assertEqual(snaps[0]["device_count"], 3)
+
+    def test_interval_with_save_snapshot_is_rejected(self):
+        """持续轮询 + 每周期落库必然冲掉历史 —— 直接拒绝，不留坑。"""
+        code, _out, err = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                     "--interval", "1", "--save-snapshot"])
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("--save-snapshot", err)
+        self.assertEqual(history_store.list_snapshots(db_path=self.db), [])
+
+    def test_interval_loops_the_given_number_of_rounds(self):
+        code, out, _err = _run_main(["watch", "--no-mdns", "--db", self.db,
+                                     "--interval", "0.01", "--count", "2"])
+        self.assertEqual(code, cli.EXIT_OK)
+        # 每轮一行标题；第二轮不该再报新设备
+        self.assertEqual(out.count("[第 1 轮]"), 1)
+        self.assertEqual(out.count("[第 2 轮]"), 1)
+
+    # ── 参数 ──
+
+    def test_once_and_interval_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.build_parser().parse_args(["watch", "--once", "--interval", "5"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_mdns_flags_parse(self):
+        args = cli.build_parser().parse_args(["watch", "--no-mdns"])
+        self.assertTrue(args.no_mdns)
+        args = cli.build_parser().parse_args(["watch", "--mdns-active"])
+        self.assertTrue(args.mdns_active)
 
 
 if __name__ == "__main__":

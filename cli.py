@@ -862,6 +862,153 @@ def cmd_locate(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── 被动 / 持续发现 ──────────────────────────
+
+#: 被动发现的来源 -> 人看的短标签。语义与 `ScanResult.to_dict()` 里的
+#: 「ARP探测 / mDNS发现」一致，只是这里更短。
+_WATCH_SOURCE_TEXT = {"arp": "ARP 表", "mdns": "mDNS"}
+
+
+def _render_watch_text(ledger, fresh) -> str:
+    """一次轮询的结果 → 人看的几行。文案**不翻译**（与 cli.py 其它消息一致）。"""
+    lines = [f"台账设备: {len(ledger)} 台"]
+    if not fresh:
+        lines.append("本次新出现: 无")
+        return "\n".join(lines)
+    lines.append(f"本次新出现: {len(fresh)} 台")
+    for r in sorted(fresh, key=lambda x: _ip_sort_key(x.ip)):
+        src = _WATCH_SOURCE_TEXT.get(r.discovery_method, r.discovery_method or "—")
+        tail = f"  {r.hostname}" if r.hostname else ""
+        lines.append(f"  {r.ip:<15} {r.mac or '—':<17} {src}{tail}")
+    return "\n".join(lines)
+
+
+def _watch_payload(ledger, fresh, round_no=None) -> dict:
+    """JSON 输出。字段名与取值**语言无关**，脚本可依赖。
+
+    `round_no` 为 None（单次轮询）时带上完整 `devices`；
+    持续轮询时只给本轮的增量 —— 每轮重发整张台账既浪费又难用。
+    """
+    def _one(r):
+        return {"ip": r.ip, "mac": r.mac, "hostname": r.hostname,
+                "vendor": r.vendor, "status": r.status,
+                "discovery_method": r.discovery_method,
+                "services": list(r.services)}
+
+    payload = {
+        "device_count": len(ledger),
+        "new_count": len(fresh),
+        "new_devices": [_one(r) for r in
+                        sorted(fresh, key=lambda x: _ip_sort_key(x.ip))],
+    }
+    if round_no is None:
+        payload["devices"] = [_one(r) for r in
+                              sorted(ledger, key=lambda x: _ip_sort_key(x.ip))]
+    else:
+        payload["round"] = round_no
+    return payload
+
+
+def _watch_baseline(args) -> set:
+    """「已知设备」基线 = 最近一次快照里的 IP。
+
+    没有快照时基线为空 —— 那第一次轮询会把整张 ARP 表都报成"新设备"。
+    这是**如实**的：库里确实没有它们的记录（与 locate 的 no_device 同一立场）。
+    """
+    import history_store
+    try:
+        return history_store.latest_device_ips(db_path=_db_path(args))
+    except Exception as e:  # noqa: BLE001
+        # 基线读不到不该让 watch 整体失败：退化成"没有基线"，
+        # 结果偏保守（可能多报新设备），但功能仍然可用。
+        warn(f"读取被动发现基线失败，本次不带基线运行: {e}")
+        return set()
+
+
+def cmd_watch(args) -> int:
+    """被动发现：**不发包**地看「最近谁在我身边出现过」。
+
+    默认只做单次轮询（给 `scheduler` 定时调用用）；`--interval` 才进入持续轮询。
+
+    **默认不写快照**：快照有 20 条硬上限（`history_store.prune`），
+    每周期写一条会在十分钟内把真实扫描历史全冲掉。要落库得显式加
+    `--save-snapshot`，且只允许单次轮询 —— 持续轮询 + 落库必然冲掉历史，
+    这里直接拒绝而不是留个坑。
+    """
+    from scanner.passive import PassiveWatcher
+
+    interval = getattr(args, "interval", None)
+    looping = bool(interval)
+
+    if looping and args.save_snapshot:
+        warn("--interval（持续轮询）与 --save-snapshot 不能同时用："
+             "每周期写一条快照会在十分钟内冲掉全部历史（快照上限 20 条）。"
+             "要定时落库请用 `watch --once --save-snapshot` 交给 scheduler。")
+        return EXIT_ERROR
+    if looping and args.output:
+        warn("--interval（持续轮询）下 --output 无意义（每轮都会覆盖），本次忽略。")
+
+    watcher = PassiveWatcher(known_ips=_watch_baseline(args))
+
+    def _cycle():
+        return watcher.poll(mdns=not args.no_mdns,
+                            mdns_active=args.mdns_active,
+                            mdns_timeout=args.mdns_timeout)
+
+    # ── 单次轮询（默认） ──
+    if not looping:
+        ledger, fresh = _cycle()
+        if args.save_snapshot:
+            _save_watch_snapshot(args, ledger)
+        if args.format == "json":
+            emit(render_json(_watch_payload(ledger, fresh)), args.output)
+        else:
+            emit(_render_watch_text(ledger, fresh), args.output)
+        # `--fail-on-change` 与 diff 的语义保持一致：有新设备 → 退出码 2。
+        return EXIT_CHANGES if (args.fail_on_change and fresh) else EXIT_OK
+
+    # ── 持续轮询 ──
+    limit = getattr(args, "count", 0) or 0
+    rounds = 0
+    total_new = 0
+    try:
+        while True:
+            rounds += 1
+            ledger, fresh = _cycle()
+            total_new += len(fresh)
+            if args.format == "json":
+                sys.stdout.write(render_json(
+                    _watch_payload(ledger, fresh, round_no=rounds)) + "\n")
+            else:
+                sys.stdout.write(f"[第 {rounds} 轮]\n"
+                                 + _render_watch_text(ledger, fresh) + "\n")
+            sys.stdout.flush()
+            if limit and rounds >= limit:
+                break
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        # Ctrl+C 是用户主动停止，属**正常结束路径**，不是错误。
+        # 这里不能写成 `pass`：tests/test_logging_policy.py 的棘轮按**计数**
+        # 卡静默处理器，补注释也过不了计数那一关。
+        log("收到中断信号，正在停止持续发现…")
+    log(f"持续发现已停止：共 {rounds} 轮，累计新出现 {total_new} 台设备。")
+    return EXIT_OK
+
+
+def _save_watch_snapshot(args, ledger):
+    """把被动发现的台账存成一条快照（仅在显式 `--save-snapshot` 时调用）。"""
+    import history_store
+    devices = _snapshot_devices(sorted(ledger, key=lambda x: _ip_sort_key(x.ip)))
+    note = args.note or "被动发现"
+    try:
+        sid = history_store.save_snapshot(devices, note=note,
+                                          db_path=_db_path(args))
+    except Exception as e:  # noqa: BLE001
+        warn(f"保存快照失败: {e}")
+        return
+    log(f"已保存快照 #{sid}（{len(devices)} 台设备）")
+
+
 # ────────────────────────────── 计划任务 ──────────────────────────────
 
 def cmd_schedule(args) -> int:
@@ -1072,7 +1219,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ipscanner",
         description="IPScanner 无头命令行：网段扫描、资产变更对比、历史查询。",
-        epilog="退出码: 0 成功 / 1 错误 / 2 检测到变更(--fail-on-change) / 3 环境错误",
+        epilog="退出码: 0 成功 / 1 错误 / 2 检测到变更(--fail-on-change) / 3 环境错误 / "
+               "4 未定位到设备(locate)",
         parents=[common],
     )
     p.add_argument("--version", action="version",
@@ -1172,6 +1320,41 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("-f", "--format", choices=("text", "json"), default="text")
     lp.add_argument("-o", "--output", metavar="文件")
     lp.set_defaults(func=cmd_locate)
+
+    # ── watch ──
+    wp = sub.add_parser("watch", help="被动发现：不发包地看最近谁在网络上出现过",
+                        parents=[common],
+                        description="读本机 ARP 表 + 监听 mDNS 组播，并入一份内存台账，"
+                                    "只报「新出现」的设备（ARP 条目会过期，"
+                                    "报「消失」是假阳性）。默认不发任何网络包"
+                                    "（mDNS 走只听模式）；默认也不写快照 —— "
+                                    "快照上限 20 条，持续轮询会把历史冲掉。"
+                                    "定时落库请用 --once --save-snapshot。")
+    wp.add_argument("--mdns-timeout", type=float, default=2.5, metavar="秒",
+                    help="监听 mDNS 组播的时长（默认 2.5）")
+    # `--once` 与 `--interval` 互斥：默认（两个都不给）就是单次轮询，
+    # `--once` 是把它**显式写出来** —— 注册到 scheduler 里时能自解释，
+    # 也让「为什么这次只跑一遍」在命令本身里就看得见。
+    wp_mode = wp.add_mutually_exclusive_group()
+    wp_mode.add_argument("--once", action="store_true",
+                         help="只轮询一次后退出（默认行为；显式写法便于定时任务自解释）")
+    wp_mode.add_argument("--interval", type=float, metavar="秒",
+                         help="持续轮询间隔（秒）；给了就进入持续轮询")
+    wp.add_argument("--count", type=int, default=0, metavar="N",
+                    help="持续轮询最多跑 N 轮（0 = 不限，默认 0）")
+    wp.add_argument("--no-mdns", action="store_true",
+                    help="完全不碰 mDNS，只读 ARP 表（最快，~几十毫秒）")
+    wp.add_argument("--mdns-active", action="store_true",
+                    help="mDNS 改用主动查询（会发组播包，发现更全；"
+                         "默认只听不发，零发包）")
+    wp.add_argument("--save-snapshot", action="store_true",
+                    help="把台账存为一条快照（默认不存；只能配合单次轮询）")
+    wp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")
+    wp.add_argument("--fail-on-change", action="store_true",
+                    help="本次有新设备时以退出码 2 结束（便于脚本判断）")
+    wp.add_argument("-f", "--format", choices=("text", "json"), default="text")
+    wp.add_argument("-o", "--output", metavar="文件")
+    wp.set_defaults(func=cmd_watch)
 
     # ── schedule ──
     cp = sub.add_parser("schedule", help="注册/卸载/查询定时扫描计划任务",
