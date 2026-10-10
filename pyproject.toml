@@ -11,7 +11,7 @@
 
 [project]
 name = "ipscanner"
-version = "1.7.6"
+version = "1.7.7"
 description = "局域网终端扫描与资产识别工具（PyQt5 GUI + 无头 CLI）"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -11,9 +11,35 @@
 
 ## [Unreleased]
 
-下一版（v1.8）的四项已排期，见 [`docs/ROADMAP_V1.8.md`](docs/ROADMAP_V1.8.md)：
-定位查询（MAC/IP → 交换机端口）、被动发现（ARP 表轮询 + 复用已有 mDNS）、
-历史查询后台化、发布与可见性包。
+下一版（v1.8）剩余两项已排期，见 [`docs/ROADMAP_V1.8.md`](docs/ROADMAP_V1.8.md)：
+定位查询（MAC/IP → 交换机端口）、被动发现（ARP 表轮询 + 复用已有 mDNS）。
+
+## [1.7.7] - 2026-10-10
+
+### 修复
+- **历史条件查询不再冻住界面**。查询原本同步跑在 GUI 线程，8 万行量级要 2.5 秒，
+  期间窗口完全无响应；现已搬进后台线程，并带进度提示与「停止」。
+  实测全量查询 2562 ms → 1363 ms。
+- 历史对比对话框不再一次性把所有快照的设备明细读进内存，改为按需读那两份。
+
+### 新增
+- **历史查询分页**：每页 500 行 +「加载更多」；**导出始终是完整结果**，不受分页影响。
+- 历史查询的**网段 / IP 子串过滤下推到 SQL**，结果与 Python 侧逐行等价（有对拍测试）。
+- `CHANGELOG.md`（本文件）。
+- `.github/workflows/release.yml`：推 `v*` tag 自动跑测试、构建两个包、生成
+  `SHA256SUMS.txt` 并创建 Release；构建前会校验 tag 与 `version.py` 一致。
+- `CODE_SIGNING_POLICY.md` / `CODE_OF_CONDUCT.md`：代码签名政策（含签名批准角色）与
+  贡献者行为准则 —— 为申请免费代码签名做准备。
+
+### 文档
+- README 首屏改为三句话，并新增「横向对比」小节（对照 Advanced IP Scanner /
+  SoftPerfect / Total Network Inventory），其中**如实列出本项目短板**。
+- 新增 [`docs/SIGNPATH_APPLICATION.md`](docs/SIGNPATH_APPLICATION.md)：免费代码签名的
+  申请材料、提交前的准备清单、拿到证书后接入 `release.yml` 的位置。
+- 新增 [`docs/ROADMAP_V1.8.md`](docs/ROADMAP_V1.8.md)：v1.8 路线图（15 项砍到 4 项）。
+- 新增 [`docs/PRODUCT_ADVISORY.md`](docs/PRODUCT_ADVISORY.md) 产品建议书，以及
+  [`docs/reviews/PRODUCT_ADVISORY_REVIEW.md`](docs/reviews/PRODUCT_ADVISORY_REVIEW.md)
+  对其 17 项实测声明的逐条复核（1 处勘误）。
 
 ## [1.7.6] - 2026-10-10
 
@@ -22,11 +48,6 @@
   `__init__.py` re-export 门面），全仓最大文件降到 484 行。四个 Mixin 与全部既有测试的
   `from ui_dialogs import X` 导入面**一行未改**；拆分为逐字节搬迁，无逻辑改动。
   （关闭 `docs/reviews/CODE_REVIEW.md` 的 P1-4）
-
-### 新增
-- `CHANGELOG.md`（本文件）。
-- `.github/workflows/release.yml`：推 `v*` tag 自动跑测试、构建两个包、生成
-  `SHA256SUMS.txt` 并创建 Release；构建前会校验 tag 与 `version.py` 一致。
 
 ### 修复
 - 修正 `docs/reviews/` 归档中「macOS / Linux CI 未做」的错误结论 —— 三平台 CI 实由
@@ -121,7 +142,8 @@
 
 ---
 
-[Unreleased]: https://github.com/kooofy/IPScanner/compare/v1.7.6...HEAD
+[Unreleased]: https://github.com/kooofy/IPScanner/compare/v1.7.7...HEAD
+[1.7.7]: https://github.com/kooofy/IPScanner/compare/v1.7.6...v1.7.7
 [1.7.6]: https://github.com/kooofy/IPScanner/compare/v1.7.5...v1.7.6
 [1.7.5]: https://github.com/kooofy/IPScanner/compare/v1.7.4...v1.7.5
 [1.7.4]: https://github.com/kooofy/IPScanner/compare/v1.7.3...v1.7.4
