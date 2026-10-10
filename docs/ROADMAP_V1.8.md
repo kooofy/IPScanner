@@ -122,6 +122,35 @@ Python 聚合（4 万行 605 ms；`/16` × 20 快照量级会到秒级）。
 - 查询带 `LIMIT`，翻页结果一致；
 - 取消能真正中断查询。
 
+**落地记录（2026-10-10，已完成）**：
+- `ui_threads.py` 新增 `HistoryQueryThread` / `SnapshotCompareThread`；
+  `HistoryQueryDialog` 的查询与导出、`HistoryCompareDialog` 的读快照都搬进后台线程，
+  并带「停止」与取消。
+- `query_history(..., limit=None, offset=0, cancel_event=None)`：分页 + 真取消
+  （`QueryCancelled`）。
+- 分页展示（每页 500 行 + 「加载更多」）；**导出始终是完整结果**，不受分页影响。
+- 对比对话框改为 `list_snapshots()` 填下拉框 + 按需读那两份快照
+  （旧实现在 `__init__` 里 `load_all()`，把全部快照的设备明细都读进来）。
+
+**实测（本机，20 份快照 × 4000 台 = 8 万行）**：
+
+| 查询 | 耗时 |
+|---|---|
+| 全量（无过滤） | **1363 ms** |
+| 带网段过滤（`10.3.0.0/16`） | **228 ms** |
+| 带 IP 子串过滤 | 181 ms |
+
+- 聚合循环改用**整数下标**取 `sqlite3.Row`（原按列名取），全量查询 2562 ms → 1363 ms。
+- **网段 / IP 子串过滤下推到 SQL**：结果与 Python 侧完全等价（有对拍测试），
+  行数在聚合前就被砍掉 —— 这是收益最大的一处。
+- ⚠ **`device_class` 刻意不下推**：它比较的是聚合后的「最新已知类型」，按行过滤会把
+  `first_seen` 从「首次出现」改成「首次是打印机」。原计划的「类型过滤下推」**不做**，
+  理由写进了 `history_store.query_history` 的注释与
+  `tests/test_history_query.py::QueryHistoryPushdownTest.test_device_class_is_not_pushed_down`。
+- ⚠ **`limit` 不降低查询耗时**：截取发生在过滤与排序之后（否则翻页会看到随机子集），
+  所以 LIMIT 买到的是「表格填充量」与「翻页正确性」，不是「查得更快」。
+  真正的大库提速要靠**聚合本身下沉到 SQL**，属 v2 资产表那一档的改造。
+
 ### 1.4 发布与可见性包（零 / 低成本高杠杆）
 
 | 项 | 值 |

@@ -7,6 +7,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from bounded_pool import run_bounded
 from scanner import NetworkScanner, ScanResult
 from i18n import tr
+import history_store
 
 
 class ScanThread(QThread):
@@ -307,3 +308,82 @@ class OuiUpdateThread(QThread):
 
         result = update_oui_db(progress_callback=_progress)
         self.finished_signal.emit(result)
+
+
+class HistoryQueryThread(QThread):
+    """历史条件查询：把 `history_store.query_history()` 挪到后台线程执行。
+
+    **为什么需要它（实测）**：`query_history()` 会把**所有快照的所有设备行**取回来、
+    在 Python 侧聚合成"每台设备一条"。默认保留 20 份快照、/16 网段下这是约 130 万行，
+    耗时到秒级。此前它同步跑在 GUI 线程上，用户点「查询」界面会整段冻结 ——
+    连"取消"都点不动，因为处理点击的也是那条被占住的线程。
+
+    **取消**：`stop()` 置位后，`query_history` 在**分块取数的间隙**抛 `QueryCancelled`，
+    所以取消能真正中断读盘，而不是等整张表读完再把结果丢掉。
+    """
+
+    finished_signal = pyqtSignal(list)   # 结果行
+    failed = pyqtSignal(str)             # 查询失败原因
+    cancelled_signal = pyqtSignal()      # 被 stop() 取消
+
+    def __init__(self, filters, db_path=None, limit=None, offset=0):
+        super().__init__()
+        self.filters = dict(filters or {})
+        self.db_path = db_path
+        self.limit = limit
+        self.offset = offset
+        self._cancel = threading.Event()
+
+    def stop(self):
+        """请求取消（线程安全，可从 GUI 线程调用）。"""
+        self._cancel.set()
+
+    def run(self):
+        try:
+            rows = history_store.query_history(
+                db_path=self.db_path, limit=self.limit, offset=self.offset,
+                cancel_event=self._cancel, **self.filters)
+        except history_store.QueryCancelled:
+            self.cancelled_signal.emit()
+            return
+        except Exception as e:      # noqa: BLE001
+            self.failed.emit(str(e))
+            return
+        if self._cancel.is_set():
+            # 取消恰好在查询跑完的瞬间置位：按"已取消"处理，别把结果当成用户要的。
+            self.cancelled_signal.emit()
+            return
+        self.finished_signal.emit(rows)
+
+
+class SnapshotCompareThread(QThread):
+    """读取两份快照并做差异对比（后台线程）。
+
+    对比对话框此前在 `__init__` 里调 `load_all()` —— 把**全部**快照的设备明细都读
+    进来，只为填两个下拉框和算一次 diff。默认 20 份快照、/16 网段下是百万行级读盘，
+    打开对话框即卡住。现在下拉框只用 `list_snapshots()`（每份一行元信息），
+    真正需要的两份快照到后台线程里按需读取。
+    """
+
+    finished_signal = pyqtSignal(list, float, float)   # diffs, base_time, target_time
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_id, target_id, db_path=None):
+        super().__init__()
+        self.base_id = base_id
+        self.target_id = target_id
+        self.db_path = db_path
+
+    def run(self):
+        try:
+            base = history_store.get_snapshot(self.base_id, self.db_path)
+            target = history_store.get_snapshot(self.target_id, self.db_path)
+            if not base or not target:
+                self.failed.emit("快照不存在或已被保留上限裁剪")
+                return
+            from ui_utils import _compare_snapshots
+            diffs = _compare_snapshots(base, target)
+        except Exception as e:      # noqa: BLE001
+            self.failed.emit(str(e))
+            return
+        self.finished_signal.emit(diffs, base["time"], target["time"])

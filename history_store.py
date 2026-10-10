@@ -261,6 +261,14 @@ _AGG_FIELDS = (
     "open_ports", "location", "user", "remark",
 )
 
+# SELECT 的列顺序必须与下面聚合循环里的**整数下标**一一对应。
+# 用整数下标而不是列名取 sqlite3.Row 的字段是刻意的：按列名取值每行要做十几次
+# 名字查找，8 万行就是近百万次；实测这是聚合环节最大的一笔开销。
+_COL_SNAP_TIME = 0
+_COL_IP = 1
+_COL_FIELD0 = 2
+_SELECT_COLS = "s.time AS snap_time, d.ip, " + ", ".join("d." + f for f in _AGG_FIELDS)
+
 
 def _parse_network(network):
     """把 '192.168.1.0/24' / '192.168.1' 等解析为 ip_network；非法返回 None。"""
@@ -282,8 +290,55 @@ def _ip_in_network(ip, net):
         return False
 
 
+# 取消的检查间隔（行数）。太小会让每行都做一次 Event.is_set()，太大则取消
+# 要等很久才生效。2 万行在 Python 侧只跑几十毫秒，取消失效的感知延迟可以忽略。
+_CANCEL_CHECK_ROWS = 20000
+
+
+class QueryCancelled(Exception):
+    """查询被调用方主动取消（见 `query_history` 的 `cancel_event` 参数）。
+
+    做成异常而不是"返回 None"：调用方（后台线程）必须能区分「用户点了停止」
+    与「查询结果为空」—— 前者不该把空表格当成查询结果渲染出来。
+    """
+
+
+def _sql_like_escape(text) -> str:
+    """转义 LIKE 的元字符，供过滤下推使用。
+
+    用户输入的 `192.168.1._` 里那个 `_` 在 LIKE 里表示"任意单字符"，不转义就会
+    连 `192.168.1.5` 一起匹配 —— 下推后结果与 Python 侧不一致，而这类"只在
+    特定输入下才偏"的偏差是最难查的一类 bug。
+    """
+    return (str(text).replace("\\", "\\\\")
+                     .replace("%", "\\%")
+                     .replace("_", "\\_"))
+
+
+def _network_like_prefix(net):
+    """把 IPv4 网段转成可下推的 LIKE 前缀；无法安全表达时返回 None。
+
+    只在**前缀长度是 8 的整数倍**时成立（/8、/16、/24 ……）：
+
+        /24 → '192.168.1.%'      /16 → '10.0.%'      /8 → '192.%'
+
+    末尾那个点不能省 —— 少了它，`192.168.1.%` 会错误匹配到 `192.168.10.5`。
+
+    其余前缀长度（/22、/25 等）返回 None：交由 Python 侧过滤，**结果不变**，
+    只是少了一次下推。宁可不下推，也不能下推错。
+    """
+    if net is None or net.version != 4:
+        return None
+    p = net.prefixlen
+    if p < 8 or p % 8:
+        return None
+    octets = str(net.network_address).split(".")
+    return ".".join(octets[:p // 8]) + ".%"
+
+
 def query_history(device_class=None, network=None, first_seen_after=None,
-                  first_seen_before=None, ip_substr=None, db_path=None) -> list:
+                  first_seen_before=None, ip_substr=None, db_path=None,
+                  limit=None, offset=0, cancel_event=None) -> list:
     """跨快照聚合查询历史设备，支持按类型 / 网段 / 首见时间 / IP 关键字过滤。
 
     返回每条记录包含：ip, status, mac, hostname, vendor, device_class,
@@ -294,10 +349,46 @@ def query_history(device_class=None, network=None, first_seen_after=None,
     - devices 表无首见时间列，first/last seen 通过按快照时间升序遍历推导；
     - 同一 IP 在不同快照中的属性以「最近一次出现且非空」的值为准（展示当前状态）；
     - device_class 过滤基于最新已知类型做子串匹配。
+
+    Args:
+        limit:  只返回排序后的前 N 条（None = 不限）。截取发生在**过滤与排序
+                之后**，所以语义是"末见时间最近的 N 台"，而不是"任意 N 台"。
+        offset: 跳过前 N 条。与 `limit` 组合即可翻页；同一份数据、同一组条件下
+                翻页结果可复现（排序键相同时依赖 SQL 的 `s.time, d.id` 确定顺序
+                + Python 稳定排序）。
+        cancel_event: `threading.Event`；置位后抛 `QueryCancelled`。检查点落在
+                读盘的循环里，因此能真正中断**查询**，而不是等整张表读完再丢结果。
+
+    Raises:
+        QueryCancelled: `cancel_event` 在取数过程中被置位。
     """
     net = _parse_network(network)
 
-    # 单条 JOIN 取回全部设备行（按快照时间升序），再在内存里聚合。
+    ipk = (ip_substr or "").strip().lower()
+
+    # ── 过滤下推 ─────────────────────────────────────────────────────────
+    # 只下推**纯 ip 的函数**：`ip_substr` 与网段。这两个条件对同一个 IP 的判定
+    # 与聚合结果无关，所以下推到行级与留在 Python 侧**结果完全等价**，但能把
+    # 参与 Python 聚合的行数提前砍掉（/16 × 20 快照约 130 万行，这一层省的是
+    # 最贵的那部分）。
+    #
+    # device_class **刻意不下推**：它比较的是聚合后的「最新已知类型」。若按行
+    # 过滤，早于"变成打印机"之前的那些行会被丢掉，first_seen 就会从「这台设备
+    # 第一次出现」悄悄变成「这台设备第一次是打印机」—— 与文档承诺不符。
+    where = ["d.ip IS NOT NULL", "TRIM(d.ip) <> ''"]
+    params = []
+    # 用 TRIM(d.ip) 而不是裸 d.ip：聚合时 Python 侧对 ip 做了 .strip()，下推若
+    # 直接比原列，一条存成 " 192.168.1.5 " 的记录会被 SQL 先滤掉、Python 却认为
+    # 它该留下 —— 下推与判定口径必须对齐。
+    if ipk:
+        where.append("TRIM(d.ip) LIKE ? ESCAPE '\\'")
+        params.append("%" + _sql_like_escape(ipk) + "%")
+    prefix = _network_like_prefix(net)
+    if prefix:
+        where.append("TRIM(d.ip) LIKE ? ESCAPE '\\'")
+        params.append(prefix)
+
+    # 单条 JOIN 取回设备行（按快照时间升序），再在内存里聚合。
     #
     # 旧写法是 `for snap in list_snapshots(): get_snapshot(snap["id"])` ——
     # 典型的 N+1：N 个快照就是 N+1 次查询，而且每次 get_snapshot 都会把该快照
@@ -307,63 +398,75 @@ def query_history(device_class=None, network=None, first_seen_after=None,
     # 按时间**升序**遍历是刻意的：这样每遇到一个更新的快照就必然满足
     # snap_time > last_seen，于是"非空即覆盖"自然等价于「最近一次出现且非空」。
     # 若改成降序，最新快照里为空的字段将永远填不上旧值 —— 与文档承诺不符。
-    with _conn(db_path) as conn:
-        rows = conn.execute(
-            "SELECT s.time AS snap_time, d.ip, d.status, d.mac, d.hostname, "
-            "       d.vendor, d.device_class, d.os_guess, d.open_ports, "
-            "       d.location, d.user, d.remark "
-            "  FROM devices d JOIN snapshots s ON s.id = d.snapshot_id "
-            " WHERE d.ip IS NOT NULL AND TRIM(d.ip) <> '' "
-            " ORDER BY s.time ASC, d.id ASC"
-        ).fetchall()
+    sql = ("SELECT " + _SELECT_COLS +
+           "  FROM devices d JOIN snapshots s ON s.id = d.snapshot_id "
+           " WHERE " + " AND ".join(where) +
+           " ORDER BY s.time ASC, d.id ASC")
 
     agg = {}  # ip -> 聚合记录
-    for r in rows:
-        ip = (r["ip"] or "").strip()
-        if not ip:
-            continue
-        snap_time = r["snap_time"]
-        cur = agg.get(ip)
-        if cur is None:
-            cur = {
-                "ip": ip,
-                "first_seen": snap_time,
-                "last_seen": snap_time,
-            }
-            for f in _AGG_FIELDS:
-                cur[f] = r[f] or ""
-            agg[ip] = cur
-        else:
-            if snap_time > cur["last_seen"]:
-                cur["last_seen"] = snap_time
-                # 最新快照覆盖属性（仅非空，避免清空历史好值）
-                for f in _AGG_FIELDS:
-                    v = r[f] or ""
-                    if v:
-                        cur[f] = v
-            if snap_time < cur["first_seen"]:
-                cur["first_seen"] = snap_time
+    with _conn(db_path) as conn:
+        # 先查一次：表为空时下面的循环体一次都不执行，没有这一句"取消"就会失效。
+        if cancel_event is not None and cancel_event.is_set():
+            raise QueryCancelled()
+        n = 0
+        for r in conn.execute(sql, params):
+            n += 1
+            # 每 _CANCEL_CHECK_ROWS 行查一次取消 —— 检查点在读盘过程中，
+            # 所以取消能真正中断查询，而不是等整张表读完再丢结果。
+            if (cancel_event is not None and (n % _CANCEL_CHECK_ROWS) == 0
+                    and cancel_event.is_set()):
+                raise QueryCancelled()
+            ip = (r[_COL_IP] or "").strip()
+            if not ip:
+                continue
+            snap_time = r[_COL_SNAP_TIME]
+            rec = agg.get(ip)
+            if rec is None:
+                rec = {"ip": ip, "first_seen": snap_time, "last_seen": snap_time}
+                for i, f in enumerate(_AGG_FIELDS):
+                    rec[f] = r[_COL_FIELD0 + i] or ""
+                agg[ip] = rec
+            else:
+                if snap_time > rec["last_seen"]:
+                    rec["last_seen"] = snap_time
+                    # 最新快照覆盖属性（仅非空，避免清空历史好值）
+                    for i, f in enumerate(_AGG_FIELDS):
+                        v = r[_COL_FIELD0 + i] or ""
+                        if v:
+                            rec[f] = v
+                if snap_time < rec["first_seen"]:
+                    rec["first_seen"] = snap_time
 
     # 过滤
     # device_class 是语言无关的规范值（见 scanner/classify.py），但用户在英文
     # 界面里输入的是 "Printer"、历史库里存的却是「打印机」。用 i18n.canonical()
     # 把两边都还原为源串再比较，跨语言查询才不会静默返回空结果。
     dc = _canon(device_class).lower()
-    ipk = (ip_substr or "").strip().lower()
     results = []
-    for cur in agg.values():
-        if dc and dc not in _canon(cur.get("device_class", "")).lower():
+    for rec in agg.values():
+        if dc and dc not in _canon(rec.get("device_class", "")).lower():
             continue
-        if ipk and ipk not in (cur.get("ip", "") or "").lower():
+        # ipk / net 上面已经下推给 SQL 了，这里**再判一次是刻意的**：
+        # 下推只负责"少取点行"，判定权始终留在这一份 Python 逻辑上。两者若因
+        # 边界情形（比如存了带空格的 IP）出现分歧，也是下推多取、这里滤掉，
+        # 不会漏结果。
+        if ipk and ipk not in (rec.get("ip", "") or "").lower():
             continue
-        if net is not None and not _ip_in_network(cur.get("ip", ""), net):
+        if net is not None and not _ip_in_network(rec.get("ip", ""), net):
             continue
-        fs = cur.get("first_seen")
+        fs = rec.get("first_seen")
         if first_seen_after is not None and (fs is None or fs < first_seen_after):
             continue
         if first_seen_before is not None and (fs is None or fs > first_seen_before):
             continue
-        results.append(cur)
+        results.append(rec)
 
     results.sort(key=lambda r: r.get("last_seen", 0), reverse=True)
+
+    # limit / offset 在过滤与排序**之后**截取 —— 所以 limit 的语义是"末见时间
+    # 最近的 N 台"，而不是"任意 N 台"（后者翻页会看到随机子集）。
+    off = max(0, int(offset or 0))
+    if off or limit is not None:
+        end = None if limit is None else off + max(0, int(limit))
+        results = results[off:end]
     return results
