@@ -46,20 +46,39 @@
 **为什么是它**：把产品从「扫描器」变成「台账」的**最便宜**一步，也是局域网里被问得
 最多的问题。同类里 Netdisco 靠这个功能立身。
 
-**现状（已实测）**：`switch_mapper.py` 已经逐台走 `dot1dTpFdbTable`（L126），并把
-`bridge_port → if_index → port_name` 解析出来了（L212–L220）。
-**缺的不是采集，是索引与查询。**
+**现状（已实测，2026-10-10 复核后修正）**：`switch_mapper.py` 已经逐台走 `dot1dTpFdbTable`
+（L126），并把 `bridge_port → if_index → port_name` 解析出来了（L212–L220）；
+`SwitchInfo.sys_name` + `PortMapping.port_name` **就是**「(交换机, 端口)」二元组 ——
+**采集端不用改**。
+
+⚠ **但「缺的不是采集，是索引与查询」这句话只对了一半**：**端口映射从未被持久化**。
+实测：`map_switch_ports` 只被 `topology_discovery.py:1119` 与 `ui_threads.py:283`
+（`SwitchMapThread`）**按需调用**，结果留在内存里用完即弃；`history_store.py` 的快照库里
+只有 `snapshots` 与 `devices` 两张表，**没有任何端口 / 交换机相关表或列**。
+
+→ 所以「上次在 X 口、本次在 Y 口」**目前无从谈起**：没有历史端口数据可比。
+**必须先补一层持久化**，本项工时因此比原估略高。
 
 **做法**：
-- 建跨交换机索引 `MAC → [(switch, port, snapshot_time)]`，从每次扫描的 FDB 结果聚合；
-- 历史直接查快照库（复用已有的 `device_timeline` 索引模式）；
+- **新增 `port_map` 表**（随快照写入）：`(snapshot_id, switch_ip, switch_name, mac,
+  port_name, port_confidence)`，加 `mac COLLATE NOCASE` 索引与 `snapshot_id` 索引
+  （沿用 `devices` 表已有的索引模式）；
+- 每次扫描保存快照时，把各交换机的 `SwitchInfo.mappings` 一并落库；
+- **`locate(mac | ip | hostname)` 纯查询**：取该 MAC 最近一次出现的快照 → 当前
+  `(switch_name, port_name)`；再回溯上一次**端口不同**的快照 → 得出「上次在 X 口」；
 - UI：一个搜索框（输入 MAC / IP / 主机名 → 当前端口 + 最近变化）；
 - CLI：`ipscanner locate --mac <mac>` 输出 JSON。
+
+⚠ **端口名要带可信度标注**：`switch_mapper.py:214` 在 `if_index` 解析不出来时会回退成
+`f"Port {bridge_port}"` —— 那**不是真实端口名**，只是桥接端口号。落库时必须区分
+「真端口名」与「仅端口号」，展示时后者要标注不确定，不能当成端口名糊弄过去
+（延续本项目的「诚实降级」原则）。
 
 **验收（可写成测试）**：
 - 给定 3 台交换机 + 1 个终端 MAC，`locate(mac)` 返回 `(switch_name, port_name)`；
 - 同一 MAC 在两次快照间换了端口时，返回「上次在 X 口，本次在 Y 口」；
-- 交换机不支持 BRIDGE-MIB（数据不全）时**明确标注「位置未知」**，不猜（延续「诚实降级」）。
+- 交换机不支持 BRIDGE-MIB（数据不全）时**明确标注「位置未知」**，不猜；
+- 端口名只有桥接端口号（无真实 ifName）时，结果里带 `index_only` 标注。
 
 ### 1.2 被动 / 持续发现模式（扫描器 → 台账的那一步）
 

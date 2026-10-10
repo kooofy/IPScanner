@@ -38,6 +38,10 @@ class PortMapping:
     port_name: str = ""         # 端口名称 (ifDescr 或 ifName)
     if_index: int = 0           # SNMP ifIndex
     bridge_port: int = 0        # 桥接端口号
+    # port_name 是否来自**真实接口名**（ifName / ifDescr）。
+    # 为 False 时 port_name 只是桥接端口号（如 "Port 5"）——**那不是端口名**，
+    # 上层展示时必须标注不确定，不能把它当成 GigabitEthernet0/5 糊弄过去。
+    port_is_real: bool = True
     # 以下为关联扫描结果后填充（可选）
     ip: str = ""
     hostname: str = ""
@@ -211,13 +215,20 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
 
         bridge_port = int.from_bytes(vbytes, "big")
         if_index = bp_to_if.get(bridge_port, 0)
-        port_name = if_to_name.get(if_index, f"Port {bridge_port}")
+        # ifName / ifDescr 里查不到这个 ifIndex 时，只能退回桥接端口号。
+        # 那不是端口名 —— 用 port_is_real=False 标出来，让上层有机会如实展示。
+        real_name = if_to_name.get(if_index)
+        if real_name:
+            port_name, port_is_real = real_name, True
+        else:
+            port_name, port_is_real = f"Port {bridge_port}", False
 
         mappings.append(PortMapping(
             mac=mac,
             port_name=port_name,
             if_index=if_index,
             bridge_port=bridge_port,
+            port_is_real=port_is_real,
         ))
 
     # 按端口名称排序
@@ -225,6 +236,28 @@ def map_switch_ports(ip: str, community: str = "public", timeout: float = 1.5,
     info.mappings = mappings
     _progress(f"完成：共 {len(mappings)} 条 MAC 映射")
     return info
+
+
+def switch_info_to_dict(info: SwitchInfo) -> dict:
+    """把 SwitchInfo 转成 ``history_store.save_port_map()`` 能吃的普通 dict。
+
+    转换放在这里而不是 history_store：它需要知道 SwitchInfo / PortMapping 的字段，
+    而 history_store 应保持与 switch_mapper 无耦合（它只认 dict）。
+
+    只输出「事实」（`port_is_real`），不输出存储用的规范值字符串 ——
+    事实到持久化编码的翻译由存储层负责，避免领域层反向依赖存储层。
+    """
+    return {
+        "switch_ip": info.ip,
+        # sys_name 为空时退回 IP：至少让上层有个能显示的标识，且这不是猜测
+        # （IP 就是这台交换机的地址）。
+        "switch_name": info.sys_name or info.ip,
+        "error": info.error,
+        "mappings": [
+            {"mac": m.mac, "port_name": m.port_name, "port_is_real": m.port_is_real}
+            for m in info.mappings
+        ],
+    }
 
 
 def cross_reference(mappings: List[PortMapping], scan_results) -> List[PortMapping]:

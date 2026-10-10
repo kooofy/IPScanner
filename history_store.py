@@ -22,6 +22,17 @@ DB_PATH = os.path.join(data_dir(), "scan_history.db")
 
 _PRAGMAS = ("PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON")
 
+# ── locate_device() 的结果码 ──
+# 存储层只产出**语言无关的规范值**，展示时再经 i18n 的 tr() 翻译（仓库铁律）。
+LOCATE_NO_DEVICE = "no_device"                  # 库里压根没有这台设备
+LOCATE_NO_SWITCH_DATA = "no_switch_data"        # 从未扫过交换机（或未落库）
+LOCATE_SWITCH_SCAN_FAILED = "switch_scan_failed"  # 扫了交换机，但都没取到转发表
+LOCATE_MAC_NOT_IN_FDB = "mac_not_in_fdb"        # 交换机正常，但转发表里没有这个 MAC
+
+# 端口名可信度：'named' = 真实 ifName/ifDescr；'index_only' = 只有桥接端口号
+PORT_SOURCE_IF_NAME = "if_name"
+PORT_SOURCE_BRIDGE_PORT = "bridge_port"
+
 
 def _init_db(conn):
     conn.executescript(
@@ -55,6 +66,38 @@ def _init_db(conn):
         -- mac 用 NOCASE 索引：MAC 大小写不敏感，但写入时未做归一化。
         CREATE INDEX IF NOT EXISTS idx_dev_mac ON devices(mac COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_dev_ip ON devices(ip);
+
+        -- ── 交换机端口映射（「这台设备插在哪个口」的数据来源）──
+        -- 与 devices 不同：端口映射不是每次扫描都有（要 SNMP + BRIDGE-MIB），
+        -- 所以单独建表，且**允许某次快照一行都没有**（没扫交换机 / 交换机不支持）。
+        -- 两张表都带 snapshot_id 外键 + CASCADE，prune() 删快照时会自动跟着清。
+        CREATE TABLE IF NOT EXISTS switch_map (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            switch_ip   TEXT DEFAULT '',
+            switch_name TEXT DEFAULT '',
+            status      TEXT DEFAULT '',      -- 'ok' | 'error'
+            error       TEXT DEFAULT '',
+            mac_count   INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS port_map (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            switch_ip   TEXT DEFAULT '',
+            switch_name TEXT DEFAULT '',
+            mac         TEXT DEFAULT '',
+            port_name   TEXT DEFAULT '',
+            -- 'if_name'     = 来自真实 ifName / ifDescr，可信
+            -- 'bridge_port' = if_index 解析失败，port_name 只是桥接端口号（不可信）
+            port_source TEXT DEFAULT '',
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sm_snapshot ON switch_map(snapshot_id);
+        CREATE INDEX IF NOT EXISTS idx_pm_snapshot ON port_map(snapshot_id);
+        -- locate_device() 按 MAC 查最近端口，属交互热路径，必须走索引；
+        -- 与 devices.mac 同理用 NOCASE（MAC 大小写不敏感，写入时未归一化）。
+        CREATE INDEX IF NOT EXISTS idx_pm_mac ON port_map(mac COLLATE NOCASE);
         """
     )
     conn.commit()
@@ -179,6 +222,200 @@ def device_timeline(mac="", ip="", db_path=None, limit=None) -> list:
     if limit:
         out = out[-int(limit):]
     return out
+
+
+def save_port_map(snapshot_id, switches, db_path=None) -> int:
+    """把一次扫描中各交换机的端口映射写入 switch_map / port_map。
+
+    端口映射与设备列表**分开存**：它不是每次扫描都有（需要 SNMP，且交换机得支持
+    BRIDGE-MIB），所以单独建表，并允许某次快照一行都没有。
+
+    Args:
+        snapshot_id: 已保存的快照 id。
+        switches:    可迭代，每项为 dict：
+                     ``{"switch_ip", "switch_name", "error",
+                        "mappings": [{"mac", "port_name", "port_is_real"}, ...]}``
+                     `error` 非空表示这台交换机没取到转发表 —— 仍会写一条 switch_map，
+                     好让 locate_device() 能区分「没扫过」与「扫了但失败」。
+                     `port_is_real` 为 False 表示 `port_name` 只是桥接端口号（不是真
+                     端口名），由本函数翻成 `port_source` 落库。
+        db_path:     历史库路径；None 表示默认位置。
+
+    Returns:
+        写入 port_map 的行数（即 (交换机, MAC) 对总数）。
+    """
+    map_rows = []
+    sw_rows = []
+    for sw in switches or []:
+        err = (sw.get("error") or "").strip()
+        mappings = sw.get("mappings") or []
+        sw_rows.append((
+            snapshot_id, sw.get("switch_ip", ""), sw.get("switch_name", ""),
+            "error" if err else "ok", err, len(mappings),
+        ))
+        if err:
+            # 取不到转发表的交换机不产生端口行 —— 上面那条 switch_map 记录
+            # 让 locate_device() 能说出「为什么位置未知」。
+            continue
+        for m in mappings:
+            mac = (m.get("mac") or "").strip().upper()
+            if not mac:
+                continue
+            # 产出方（switch_mapper）只报告「这个端口名是不是真实接口名」这个**事实**，
+            # 由存储层翻成持久化的规范值 —— 避免领域层反向依赖存储层或共享常量表。
+            source = (PORT_SOURCE_IF_NAME if m.get("port_is_real", True)
+                      else PORT_SOURCE_BRIDGE_PORT)
+            map_rows.append((
+                snapshot_id, sw.get("switch_ip", ""), sw.get("switch_name", ""),
+                mac, m.get("port_name", ""), source,
+            ))
+
+    if not sw_rows:
+        return 0
+
+    with _conn(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO switch_map "
+            "(snapshot_id, switch_ip, switch_name, status, error, mac_count) "
+            "VALUES (?,?,?,?,?,?)", sw_rows,
+        )
+        if map_rows:
+            conn.executemany(
+                "INSERT INTO port_map "
+                "(snapshot_id, switch_ip, switch_name, mac, port_name, port_source) "
+                "VALUES (?,?,?,?,?,?)", map_rows,
+            )
+        conn.commit()
+    return len(map_rows)
+
+
+def locate_device(mac="", ip="", hostname="", db_path=None) -> dict:
+    """定位一台设备接在**哪台交换机的哪个端口**，并给出与上一次的差异。
+
+    回答的是局域网运维里被问得最多的问题：「这台机器插在哪个口？」
+    数据来自各次扫描落库的交换机转发表（见 save_port_map）。
+
+    **匹配优先用 MAC**，没有 MAC 时才退回 IP / 主机名 —— 与 device_timeline 同理：
+    IP 会被 DHCP 回收后分配给另一台机器，MAC 才是设备身份。
+
+    查不到时**如实说明是哪一种「未知」，绝不猜**（延续本项目的诚实降级原则）。
+    `reason` 按下列优先级取值：
+
+    ========================== ==============================================
+    ``no_device``              压根没有这台设备：查询为空、库是空的，
+                               或按 IP / 主机名反查不到设备。
+    ``no_switch_data``         有快照，但从未扫过交换机（或未落库）。
+    ``switch_scan_failed``     扫了交换机，但每一台都取不到转发表。
+    ``mac_not_in_fdb``         交换机正常，但转发表里没有这个 MAC。
+    ========================== ==============================================
+
+    注意 ``no_switch_data`` 的**前提是至少存在一条快照**：空库里连设备都没见过，
+    此时报 ``no_device``，不能拿 ``no_switch_data`` 搪塞。
+
+    Args:
+        mac:      设备 MAC（大小写不敏感）。
+        ip:       设备 IP（仅当 mac 为空时使用）。
+        hostname: 设备主机名（仅当 mac 与 ip 都为空时使用）。
+        db_path:  历史库路径；None 表示默认位置。
+
+    Returns:
+        ``{"found", "reason", "mac", "ip", "hostname", "current", "previous",
+           "moved", "switch_count", "port_confidence"}``
+
+        - `current` / `previous`：``{"snapshot_id","time","switch_ip","switch_name",
+          "port_name","port_source"}``；`previous` 是**上一次端口不同**的那条记录。
+        - `moved`：两次快照之间确实换了端口。
+        - `port_confidence`：`'named'`（真实端口名）/ `'index_only'`（只有桥接端口号，
+          展示时应标注不确定）。
+    """
+    _mac = (mac or "").strip().upper()
+    _ip = (ip or "").strip()
+    _host = (hostname or "").strip()
+
+    result = {
+        "found": False,
+        "reason": LOCATE_NO_DEVICE,
+        "mac": _mac, "ip": _ip, "hostname": _host,
+        "current": None, "previous": None,
+        "moved": False, "switch_count": 0,
+        "port_confidence": "",
+    }
+    if not (_mac or _ip or _host):
+        return result
+
+    with _conn(db_path) as conn:
+        # 1) 只给了 IP / 主机名时，先从**最近一次快照**的设备列表反查 MAC。
+        if not _mac:
+            if _ip:
+                row = conn.execute(
+                    "SELECT mac, ip, hostname FROM devices WHERE ip=? "
+                    "ORDER BY snapshot_id DESC LIMIT 1", (_ip,)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT mac, ip, hostname FROM devices WHERE hostname=? "
+                    "ORDER BY snapshot_id DESC LIMIT 1", (_host,)).fetchone()
+            if not row:
+                return result                       # reason 保持 no_device
+            _mac = (row["mac"] or "").strip().upper()
+            result["mac"] = _mac
+            result["ip"] = row["ip"] or _ip
+            result["hostname"] = row["hostname"] or _host
+            if not _mac:
+                # 库里有这台设备但没记 MAC —— 拿不到身份，无法定位
+                return result
+
+        # 2) 该 MAC 在各快照里的端口记录，新 → 旧。
+        #    COLLATE NOCASE 必须显式写，否则比较式与 idx_pm_mac 的排序规则不一致、索引用不上。
+        rows = conn.execute(
+            "SELECT s.id AS snapshot_id, s.time AS time, p.switch_ip, p.switch_name, "
+            "p.port_name, p.port_source "
+            "FROM port_map p JOIN snapshots s ON s.id = p.snapshot_id "
+            "WHERE p.mac = ? COLLATE NOCASE ORDER BY s.id DESC", (_mac,)).fetchall()
+
+        # 3) 最近一次快照里交换机的概况 —— 用于区分「没扫过」与「扫了但没这台 MAC」
+        sw_total = sw_ok = 0
+        last = conn.execute(
+            "SELECT id FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        if last:
+            for r in conn.execute(
+                    "SELECT status, COUNT(*) AS c FROM switch_map "
+                    "WHERE snapshot_id=? GROUP BY status", (last["id"],)).fetchall():
+                sw_total += r["c"]
+                if r["status"] == "ok":
+                    sw_ok += r["c"]
+        result["switch_count"] = sw_total
+
+    if rows:
+        result["found"] = True
+        result["reason"] = ""
+        result["current"] = dict(rows[0])
+        result["port_confidence"] = (
+            "index_only"
+            if result["current"].get("port_source") == PORT_SOURCE_BRIDGE_PORT
+            else "named"
+        )
+        cur_key = (result["current"]["switch_name"], result["current"]["port_name"])
+        for r in rows[1:]:
+            d = dict(r)
+            if (d["switch_name"], d["port_name"]) != cur_key:
+                result["previous"] = d
+                break
+        result["moved"] = result["previous"] is not None
+        return result
+
+    # 库里一次快照都没有（`last is None`）→ 这台设备必然未知，
+    # 保持 no_device，不能降级成 no_switch_data：
+    # 后者说的是「扫过设备、但没扫过交换机」，前提是**至少存在快照**。
+    if last is None:
+        return result
+
+    if sw_total == 0:
+        result["reason"] = LOCATE_NO_SWITCH_DATA
+    elif sw_ok == 0:
+        result["reason"] = LOCATE_SWITCH_SCAN_FAILED
+    else:
+        result["reason"] = LOCATE_MAC_NOT_IN_FDB
+    return result
 
 
 def prune(max_keep=20, db_path=None):
