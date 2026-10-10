@@ -50,6 +50,8 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 | Download page URL | `https://github.com/kooofy/IPScanner/releases` |
 | Tagline | `Open-source LAN scanner and asset inventory for Windows networks` |
 | Category | `developer-tools` |
+| Build System | `GitHub Actions` |
+| Reputation | 见下方 §3.1 —— **本项目最弱的一栏，必须先读** |
 | Description | 见下方引文 |
 
 > ⚠ **`Homepage URL` 与 `Download page URL` 别填反**：前者是「项目主页」，
@@ -90,6 +92,49 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 >
 > The build recipes (`IPScanner.spec`, `IPScanner_cli.spec`) and the release workflow
 > are committed, so the release build is reproducible from the tagged source.
+
+### 3.1 `Reputation` —— 本项目最弱的一栏（诚实评估）
+
+**实测数据（2026-10-10，用 GitHub API 拉的，不是估计）**：
+
+| 指标 | 值 |
+|---|---|
+| 仓库创建 | 2026-07-17 |
+| **转为公开** | **2026-10-10（就是今天）** |
+| stars / forks / watchers / subscribers | **0 / 0 / 0 / 0** |
+| Releases 数量 | 9（v1.0 → v1.7.7） |
+| **产物下载次数** | **0**（私有期间根本下载不了） |
+| 媒体报道 / 博客 / 社区讨论 | **无**（搜过，命中的全是同名但无关的工具） |
+
+**结论：这一栏目前拿不出任何「被广泛使用」的证据，而且原因很明确 ——
+仓库今天才公开，在此之前外部根本无法使用它。** 不要试图用无关数据凑数：
+审核方点开链接就能看出 stars/downloads 是 0，硬编反而更糟。
+
+**可以如实写的（工程可信度，不是使用量 —— 但正是签名要担保的那个性质）**：
+
+> IPScanner was developed in a private repository until 2026-10-10, when it was
+> published under GPL-3.0; external usage metrics are therefore not yet meaningful.
+> What the project can demonstrate is verifiable engineering provenance:
+>
+> - 69 commits over 84 days of continuous development (2026-07-18 → 2026-10-10),
+>   with 9 tagged releases (v1.0 → v1.7.7).
+> - 1,135 automated tests across 57 test files, run on every push.
+> - Public CI across three platforms — Python 3.10–3.13 on ubuntu-latest and
+>   macos-latest, plus Windows PyInstaller packaging verification:
+>   https://github.com/kooofy/IPScanner/actions
+> - Reproducible release builds: the PyInstaller recipes (`IPScanner.spec`,
+>   `IPScanner_cli.spec`) and the release workflow are committed, and every release
+>   publishes `SHA256SUMS.txt`:
+>   https://github.com/kooofy/IPScanner/releases
+> - Full public commit history from the first commit; the only maintainer is the
+>   sole author of record.
+
+**⚠ 若本项目已在真实环境里被使用**（单位 / 公司 / 实验室 / 客户网络等），
+**一定要补上这一条 —— 它是目前唯一真实可用的「使用量」证据**，比上面所有工程指标
+都更有说服力。写法：说明场景、规模、使用时长，并指明可核实的联系人身份。
+
+**另一条路**：若希望这一栏更有分量，可先公开一段时间积累真实下载与反馈，再提交申请。
+代价是审批本来就有的等待期还要往后推。
 
 ---
 
