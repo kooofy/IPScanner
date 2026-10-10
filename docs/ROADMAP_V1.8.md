@@ -181,6 +181,25 @@ Python 聚合（4 万行 605 ms；`/16` × 20 快照量级会到秒级）。
 - 推 `v*` tag 能自动产出带 `SHA256SUMS` 的 Release；
 - SignPath 申请已提交（拿到证书后补签首个版本）。
 
+**落地记录（2026-10-10）**：
+- ✅ README 首屏三句话 + 新增「横向对比」小节（对照 Advanced IP Scanner /
+  SoftPerfect / TNI 6，来源 `docs/research/`）。
+- ✅ `CHANGELOG.md`（Keep a Changelog 格式，覆盖 1.0 → 1.7.6）。
+- ✅ `.github/workflows/release.yml`：推 `v*` tag → 校验 tag 与 `version.py` 一致 →
+  跑测试 → 构建两个包 → `IPScanner_<版本>-win64.zip` + `IPScanner_cli_<版本>.exe` →
+  `SHA256SUMS.txt` → `gh release create`。用 runner 预装的 `gh`，不引第三方 action。
+- ⏳ **SignPath 申请待提交**（需要项目所有者操作）：材料已备好，见
+  [`docs/SIGNPATH_APPLICATION.md`](SIGNPATH_APPLICATION.md) —— 含资格自查、
+  **四个**表单字段的可粘贴内容（仓库 / 许可 / 下载页 / 描述）、
+  **提交前的加分准备清单**（§4）、以及拿到证书后接进 `release.yml` 的位置。
+  - 复核时发现原材料只写了 3 个字段，实际表单还要求 **License**；并且审核方会看
+    「项目是否按开源项目方式运营」—— 因此补了两份仓库侧文件：
+    [`CODE_SIGNING_POLICY.md`](../CODE_SIGNING_POLICY.md)（说明签什么、谁有权批准签名，
+    含程序要求的署名声明）与 [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)。
+  - ✅ 「**不要买 EV**」这条**已联网复核**：2024 年起微软取消 EV 的即时信任特权，
+    OV / EV 都靠下载量累积信誉。README 里原先「EV 证书需要企业资质与年费」的表述
+    据此改写。
+
 ---
 
 ## 2. 工时汇总

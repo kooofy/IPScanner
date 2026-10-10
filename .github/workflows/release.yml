@@ -1,0 +1,125 @@
+name: Release
+
+# 触发：推送 v* tag（如 v1.7.7）。
+#
+# 与 ci.yml 的分工：
+#   ci.yml    —— 每次 push / PR 都验（测试矩阵 + 打包验证），不发产物；
+#   release.yml —— 只在发版时跑，产出并上传分发文件。
+#
+# 发版流程收敛为四步：改 version.py → 提交 → `git tag v<版本>` → `git push origin <tag>`。
+# 文件名、Release 标题、压缩包名全部由 version.py 派生，不用手工改任何地方。
+on:
+  push:
+    tags: ["v*"]
+
+# 创建 Release 需要写权限；其余保持最小。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布 (${{ github.ref_name }})
+    runs-on: windows-latest
+    env:
+      # 无显示环境：测试会 import PyQt5，必须走 offscreen 平台插件。
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 校验 tag 与 version.py 一致
+        # 本工作流唯一的「防呆」硬检查。tag 可以打在任何一个 commit 上，
+        # 与 version.py 不一致时会产出一个「压缩包叫 1.7.6、关于对话框写着 1.7.5」
+        # 的发行版 —— 这种不一致用户能直接看到，却没有别的环节会拦住它。
+        shell: pwsh
+        run: |
+          $ver = (python -c "import version; print(version.__version__)").Trim()
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          if ($ver -ne $tag) {
+            throw "tag 与 version.py 不一致：tag=v$tag，version.py=$ver"
+          }
+          Write-Host "版本号一致：$ver"
+
+      - name: 静态检查 (ruff)
+        run: python -m ruff check .
+
+      - name: 单元测试
+        # 刻意再跑一遍（CI 已经跑过）：tag 可能打在一个从未经过 CI 的 commit 上，
+        # 而发出去的二进制一旦有缺陷就收不回来。
+        run: python run_tests.py
+
+      - name: 构建 GUI 版（onedir）
+        run: pyinstaller --noconfirm IPScanner.spec
+
+      - name: 构建 CLI 版（onefile）
+        run: pyinstaller --noconfirm IPScanner_cli.spec
+
+      - name: 验证 CLI 产物可独立执行
+        # 打包后的 exe 不依赖源码目录，这一步能真实暴露「模块没被收进去」。
+        run: |
+          .\dist\IPScanner_cli.exe --version
+          .\dist\IPScanner_cli.exe scan -r 127.0.0.1/32 --no-ports --no-mdns --format json
+
+      - name: 打包分发产物
+        # 产物命名与历次 Release 保持一致：
+        #   IPScanner_<版本>-win64.zip   （GUI，onedir 整个目录）
+        #   IPScanner_cli_<版本>.exe     （CLI，单文件）
+        shell: pwsh
+        run: |
+          $ver = (python -c "import version; print(version.__version__)").Trim()
+          $dir = "dist\IPScanner_$ver"
+          if (-not (Test-Path "$dir\IPScanner_$ver.exe")) {
+            throw "GUI 产物缺失：$dir\IPScanner_$ver.exe"
+          }
+          # 传目录（而非 "$dir\*"）：解压后是一个完整的 IPScanner_<版本>\ 目录，
+          # 而不是把几十个文件散在当前目录里 —— onedir 必须整目录分发。
+          Compress-Archive -Path "$dir" -DestinationPath "dist\IPScanner_$ver-win64.zip" -Force
+          Copy-Item "dist\IPScanner_cli.exe" "dist\IPScanner_cli_$ver.exe" -Force
+          Get-ChildItem "dist\IPScanner_$ver-win64.zip", "dist\IPScanner_cli_$ver.exe" |
+            Select-Object Name, Length
+
+      - name: 生成 SHA256SUMS
+        # 输出格式与 *nix 的 sha256sum 一致（<hash>  <文件名>，两空格分隔），
+        # 消费端可以直接 `sha256sum -c SHA256SUMS.txt`。
+        shell: pwsh
+        run: |
+          $ver = (python -c "import version; print(version.__version__)").Trim()
+          $files = @("dist\IPScanner_$ver-win64.zip", "dist\IPScanner_cli_$ver.exe")
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -Algorithm SHA256 -Path $f).Hash.ToLower()
+            "$h  $(Split-Path $f -Leaf)"
+          }
+          # 必须显式「无 BOM + LF」：GNU coreutils 的 `sha256sum -c` 会把 BOM 当成
+          # 第一个文件名的首字节、把 CRLF 的 \r 当成文件名的一部分，两种都直接校验失败。
+          # 而 Windows 上的 Set-Content 在 PS 5.1 写 BOM、在 PS 7 也仍写 CRLF。
+          $enc = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) "dist\SHA256SUMS.txt"),
+            (($lines -join "`n") + "`n"), $enc)
+          Get-Content "dist\SHA256SUMS.txt"
+
+      - name: 创建 Release 并上传产物
+        # 用 runner 预装的 gh，而不是第三方 release action —— 少一条供应链依赖，
+        # 与项目「运行期零第三方依赖」的取向一致。
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ver = (python -c "import version; print(version.__version__)").Trim()
+          gh release create "${{ github.ref_name }}" `
+            "dist\IPScanner_$ver-win64.zip" `
+            "dist\IPScanner_cli_$ver.exe" `
+            "dist\SHA256SUMS.txt" `
+            --title "IPScanner $ver" `
+            --generate-notes
