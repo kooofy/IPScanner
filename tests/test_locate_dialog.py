@@ -3,6 +3,11 @@
 
 本机 offscreen Qt **没有字体**，截图全白 —— 所以断言一律走控件文本与可见性，
 不看图（项目铁律）。
+
+⚠ **界面文案断言必须跟着当前语言走**：对话框里的字都经 `tr()` 渲染，
+写死中文在英文 runner（CI）上必挂。规则是「要么断言规范值（
+`history_store.LOCATE_*`），要么用 `tr()` / `locate_reason_label()`
+这些**同一个**渲染函数拼出期望值再比较」。
 """
 import os
 import shutil
@@ -21,6 +26,10 @@ from tests._qt_app import ensure_qt_app  # noqa: E402
 ensure_qt_app()
 
 import history_store  # noqa: E402
+from i18n import tr  # noqa: E402
+from scanner.constants import (  # noqa: E402
+    locate_reason_hint, locate_reason_label,
+)
 from ui_dialogs.locate import LocateDeviceDialog, classify_query  # noqa: E402
 
 
@@ -118,27 +127,38 @@ class LocateDialogTest(unittest.TestCase):
         """只有桥接端口号时必须标出来 —— 不能当端口名糊弄过去（诚实降级）。"""
         self._seed(port="Port 5", real=False)
         self.dlg.locate(self.MAC)
-        self.assertIn("仅桥接端口号", self.dlg.result_label.text())
+        self.assertIn(tr("仅桥接端口号（不可信）"), self.dlg.result_label.text())
 
     def test_not_found_shows_reason_and_actionable_hint(self):
-        """没采集过转发表 → 说明原因，并告诉用户怎么开启。"""
+        """没采集过转发表 → 说明原因，并告诉用户怎么开启。
+
+        断言一律**跟着当前语言**（`locate_reason_label/hint` 走 `tr()`），
+        不写死中文文案：CI 是英文系统，写死中文本地过、CI 必挂。
+        """
         history_store.save_snapshot(
             [{"ip": "192.168.1.50", "status": "online", "mac": self.MAC,
               "hostname": "FIN-PC-01"}], db_path=self.db)
         r = self.dlg.locate(self.MAC)
         self.assertFalse(r["found"])
-        self.assertIn("从未采集过交换机转发表", self.dlg.result_label.text())
+        # 规范值才是跨语言可信的契约；界面文案只是它的渲染结果。
+        self.assertEqual(r["reason"], history_store.LOCATE_NO_SWITCH_DATA)
+        self.assertIn(locate_reason_label(history_store.LOCATE_NO_SWITCH_DATA),
+                      self.dlg.result_label.text())
         self.assertTrue(self._hint_shown())
-        self.assertIn("读取交换机转发表", self.dlg.hint_label.text())
+        self.assertIn(locate_reason_hint(history_store.LOCATE_NO_SWITCH_DATA),
+                      self.dlg.hint_label.text())
 
     def test_unknown_device_hint_points_at_scanning(self):
-        self.dlg.locate("FF:FF:FF:FF:FF:FF")
-        self.assertIn("没有这台设备的记录", self.dlg.result_label.text())
+        r = self.dlg.locate("FF:FF:FF:FF:FF:FF")
+        self.assertEqual(r["reason"], history_store.LOCATE_NO_DEVICE)
+        self.assertIn(locate_reason_label(history_store.LOCATE_NO_DEVICE),
+                      self.dlg.result_label.text())
         self.assertTrue(self._hint_shown())
 
     def test_empty_input_shows_prompt_and_hides_hint(self):
         self.assertIsNone(self.dlg._do_locate())
-        self.assertIn("请输入", self.dlg.result_label.text())
+        self.assertEqual(self.dlg.result_label.text(),
+                         tr("请输入 MAC、IP 或主机名。"))
         self.assertFalse(self._hint_shown())
 
     def test_second_query_clears_previous_hint(self):

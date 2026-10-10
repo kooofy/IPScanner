@@ -45,6 +45,22 @@ def _run_main(argv):
     return code, out.getvalue(), err.getvalue()
 
 
+@contextlib.contextmanager
+def _lang(code):
+    """临时把界面语言切成 ``code``，退出时还原。
+
+    给「断言渲染后文案」的测试用：CLI 的语言由 ``--lang`` / 系统语言决定，
+    与调用前的环境语言**可能不同**，所以期望值必须在**同一个**语言下算出来。
+    配合在命令行里显式写死 ``--lang``，断言就与 runner 的系统语言无关。
+    """
+    prev = i18n.current_lang()
+    i18n.init(code)
+    try:
+        yield
+    finally:
+        i18n.init(prev)
+
+
 class RenderTest(unittest.TestCase):
 
     def test_table_basic(self):
@@ -530,12 +546,22 @@ class LocateCommandTest(unittest.TestCase):
         self.assertIn(self.MAC, out)
 
     def test_not_found_exits_4_with_reason_and_hint(self):
-        """有快照但没采集过转发表 → 退出码 4（不是 1），且要给出下一步动作。"""
+        """有快照但没采集过转发表 → 退出码 4（不是 1），且要给出下一步动作。
+
+        原因/提示文案由 `locate_reason_label()` / `locate_reason_hint()` 渲染
+        （与 GUI 共用同一份映射，随 `--lang` / 系统语言变），所以：
+        ① 命令行**显式写死 `--lang zh-CN`**，去掉对 runner 系统语言的依赖；
+        ② 期望值用**同一个**渲染函数在 zh-CN 下算出来 —— 不写死中文字面量。
+        """
         self._seed(with_switch_data=False)
-        code, out, _err = _run_main(["locate", "--mac", self.MAC, "--db", self.db])
+        code, out, _err = _run_main(["locate", "--mac", self.MAC, "--db", self.db,
+                                     "--lang", "zh-CN"])
         self.assertEqual(code, cli.EXIT_NOT_FOUND)
         self.assertNotEqual(code, cli.EXIT_ERROR)
-        self.assertIn("从未采集过交换机转发表", out)
+        from scanner.constants import locate_reason_hint, locate_reason_label
+        with _lang("zh-CN"):
+            self.assertIn(locate_reason_label(self.hs.LOCATE_NO_SWITCH_DATA), out)
+            self.assertIn(locate_reason_hint(self.hs.LOCATE_NO_SWITCH_DATA), out)
         self.assertIn("--switch-map", out)       # 提示里必须告诉用户怎么开
 
     def test_mac_not_in_fdb_reason(self):
