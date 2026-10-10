@@ -190,7 +190,7 @@ Python 聚合（4 万行 605 ms；`/16` × 20 快照量级会到秒级）。
   `SHA256SUMS.txt` → `gh release create`。用 runner 预装的 `gh`，不引第三方 action。
 - ⏳ **SignPath 申请待提交**（需要项目所有者操作）：材料已备好，见
   [`docs/SIGNPATH_APPLICATION.md`](SIGNPATH_APPLICATION.md) —— 含资格自查、
-  **五个**表单字段的可粘贴内容（主页 / 仓库 / 许可 / 下载页 / 描述）、
+  **七个**表单字段的可粘贴内容（主页 / 仓库 / 许可 / 下载页 / Tagline / 分类 / 描述）、
   **提交前的加分准备清单**（§4）、以及拿到证书后接进 `release.yml` 的位置。
   - 复核时发现原材料只写了 3 个字段，实际表单还要求 **License**；并且审核方会看
     「项目是否按开源项目方式运营」—— 因此补了两份仓库侧文件：

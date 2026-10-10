@@ -48,12 +48,32 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 | Project repository URL | `https://github.com/kooofy/IPScanner` |
 | License | `GPL-3.0`（仓库根目录有 [`LICENSE`](../LICENSE)） |
 | Download page URL | `https://github.com/kooofy/IPScanner/releases` |
+| Tagline | `Open-source LAN scanner and asset inventory for Windows networks` |
+| Category | `developer-tools` |
 | Description | 见下方引文 |
 
 > ⚠ **`Homepage URL` 与 `Download page URL` 别填反**：前者是「项目主页」，
 > 表单说明里明确写了「可以是专门网站，**也可以是仓库页**」—— 本项目没有独立官网，
 > 填仓库页即可（同一行两栏填同一个 URL 是正常的，不是笔误）。
 > 后者必须指向**能免费下载产物**的 Releases 页，别填仓库首页。
+
+**`Tagline` 备选**（一句话、不带句号，会被展示在基金会官网上）：
+
+1. `Open-source LAN scanner and asset inventory for Windows networks` ← 推荐，与现有项目风格一致
+2. `Discover, identify and inventory every device on your local network — no cloud account required` ← 带上差异化卖点
+3. `Scan your local network and inventory every device on it` ← 最短
+
+**`Category` 的选项**（从基金会官网 `fdn-website` 的 `_data/projects.yml` 反推，332 个项目
+实际用到的）：`developer-tools`（87）/ `gaming`（94）/ `productivity`（74）/ `science`（28）/
+`graphics`（15）/ `audio`（11）/ `other`（10）/ `educational`（6）/ `accessibility`（6）。
+
+选 **`developer-tools`** 的依据是**同类先例**，不是猜：
+
+- `NETworkManager`（「A powerful tool for managing networks and troubleshoot network…」）
+  —— 与 IPScanner 定位最接近，归在 `developer-tools`；
+- 同档还有 `sniffnet`（流量监控）、`dnsmonster`（被动 DNS）、`Smartmontools`、
+  `OpenModScan`（Modbus 工具）—— 都是面向技术用户的网络/诊断工具；
+- `productivity` 那档收的偏消费级（`NetSpeedTray` 任务栏网速、条码工具、IRC 客户端）。
 
 > IPScanner is an open-source LAN scanning and asset-inventory tool for
 > Windows-centric networks, written in Python + PyQt5 and licensed under GPL-3.0.
