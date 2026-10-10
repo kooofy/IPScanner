@@ -38,7 +38,7 @@ from conflict_detector import Conflict, SEVERITY_HIGH
 from detail_panel import DeviceDetailPanel
 from main_window_tree import (
     ResultTreeItem, TreeMixin, _ROLE_DEV_IP, _ROLE_CHANGE, _ROLE_BASE_TIP,
-    _CHANGE_GLYPH,
+    _CHANGE_GLYPH, _CHANGE_LABEL,
 )
 from scanner.models import ScanResult
 
@@ -313,6 +313,27 @@ class RowMarkTest(unittest.TestCase):
         blank.setText(0, "占位")
         self.h._apply_row_marks(blank, "")
         self.assertEqual(blank.text(0), "占位")
+
+
+class ChangeTypeWiringTest(unittest.TestCase):
+    """每个变更类型都必须接上角标与标签 —— 漏了只会**静默不显示**，抓不到。"""
+
+    def _types(self):
+        import change_detector as cd
+        return sorted(v for k, v in vars(cd).items()
+                      if k.startswith("CHANGE_") and isinstance(v, str))
+
+    def test_every_change_type_has_glyph_and_label(self):
+        types = self._types()
+        self.assertTrue(types, "没扫到任何 CHANGE_* 常量，测试本身失效了")
+        for t in types:
+            self.assertIn(t, _CHANGE_GLYPH, f"{t} 缺少行内角标")
+            self.assertIn(t, _CHANGE_LABEL, f"{t} 缺少规范标签")
+
+    def test_glyphs_are_distinct(self):
+        """两个变更类型不能共用同一个角标，否则行内根本分不出是哪一种。"""
+        glyphs = list(_CHANGE_GLYPH.values())
+        self.assertEqual(len(set(glyphs)), len(glyphs), f"角标重复: {glyphs}")
 
 
 class ChangeFilterMatchTest(unittest.TestCase):
