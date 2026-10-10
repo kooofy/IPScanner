@@ -909,20 +909,24 @@ def _watch_payload(ledger, fresh, round_no=None) -> dict:
     return payload
 
 
-def _watch_baseline(args) -> set:
-    """「已知设备」基线 = 最近一次快照里的 IP。
+def _watch_baseline(args) -> list:
+    """「已知设备」基线 = 最近一次快照里的**设备列表**。
+
+    给整份设备列表（而不是只给 IP）：`PassiveWatcher` 还需要主机名 / 厂商
+    这些**指纹**字段，才能把"换了随机 MAC 的老设备"从"新设备"里分出来
+    （路线图 §3 耦合提示 #11）。
 
     没有快照时基线为空 —— 那第一次轮询会把整张 ARP 表都报成"新设备"。
     这是**如实**的：库里确实没有它们的记录（与 locate 的 no_device 同一立场）。
     """
     import history_store
     try:
-        return history_store.latest_device_ips(db_path=_db_path(args))
+        return history_store.latest_devices(db_path=_db_path(args))
     except Exception as e:  # noqa: BLE001
         # 基线读不到不该让 watch 整体失败：退化成"没有基线"，
         # 结果偏保守（可能多报新设备），但功能仍然可用。
         warn(f"读取被动发现基线失败，本次不带基线运行: {e}")
-        return set()
+        return []
 
 
 def cmd_watch(args) -> int:
@@ -948,7 +952,7 @@ def cmd_watch(args) -> int:
     if looping and args.output:
         warn("--interval（持续轮询）下 --output 无意义（每轮都会覆盖），本次忽略。")
 
-    watcher = PassiveWatcher(known_ips=_watch_baseline(args))
+    watcher = PassiveWatcher(known_devices=_watch_baseline(args))
 
     def _cycle():
         return watcher.poll(mdns=not args.no_mdns,

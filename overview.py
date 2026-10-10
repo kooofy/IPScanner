@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
 
 from change_detector import (
     CHANGE_NEW_DEVICE, CHANGE_DEVICE_GONE, CHANGE_IP_CHANGED,
-    CHANGE_MAC_CHANGED, CHANGE_HOSTNAME_CHANGED,
+    CHANGE_MAC_CHANGED, CHANGE_HOSTNAME_CHANGED, CHANGE_MAC_RANDOMIZED,
 )
 from conflict_detector import SEVERITY_HIGH, SEVERITY_WARNING
 from scanner import device_class_label
@@ -218,7 +218,8 @@ class OverviewPanel(QWidget):
         rows = []
         # 顺序固定，便于"每次看同一个位置"；缺失的类型不显示
         for ctype in (CHANGE_NEW_DEVICE, CHANGE_IP_CHANGED, CHANGE_MAC_CHANGED,
-                      CHANGE_HOSTNAME_CHANGED, CHANGE_DEVICE_GONE):
+                      CHANGE_HOSTNAME_CHANGED, CHANGE_MAC_RANDOMIZED,
+                      CHANGE_DEVICE_GONE):
             n = counts.get(ctype, 0)
             if n:
                 rows.append(self._kv(self._change_label(ctype), str(n)))
@@ -283,6 +284,7 @@ class OverviewPanel(QWidget):
             CHANGE_MAC_CHANGED: tr("MAC 变更"),
             CHANGE_HOSTNAME_CHANGED: tr("主机名变更"),
             CHANGE_DEVICE_GONE: tr("设备消失"),
+            CHANGE_MAC_RANDOMIZED: tr("随机 MAC 重现"),
         }.get(ctype, ctype)
 
     def _kv(self, name: str, value: str, tone: str = "") -> QWidget:

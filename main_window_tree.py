@@ -13,7 +13,7 @@ from scanner import (ScanResult, PROTOCOL_PORTS, format_ports_display,
 import audit_log
 from change_detector import (
     CHANGE_NEW_DEVICE, CHANGE_DEVICE_GONE, CHANGE_IP_CHANGED,
-    CHANGE_MAC_CHANGED, CHANGE_HOSTNAME_CHANGED,
+    CHANGE_MAC_CHANGED, CHANGE_HOSTNAME_CHANGED, CHANGE_MAC_RANDOMIZED,
 )
 from conflict_detector import SEVERITY_HIGH
 from ui_icons import get_pc_icons
@@ -71,6 +71,9 @@ _CHANGE_GLYPH = {
     CHANGE_MAC_CHANGED: "⇄",
     CHANGE_HOSTNAME_CHANGED: "✎",
     CHANGE_DEVICE_GONE: "✗",
+    # 随机 MAC 重现：用「循环」意象，与「被替换（⇄）」区分开 ——
+    # 前者是同一台设备换了地址，后者是换了台设备。
+    CHANGE_MAC_RANDOMIZED: "↻",
 }
 
 #: 变更类型的规范中文标签（与 `Change.type_label` 同源，但那边依赖 tr()，
@@ -81,6 +84,7 @@ _CHANGE_LABEL = {
     CHANGE_MAC_CHANGED: "MAC 变更",
     CHANGE_HOSTNAME_CHANGED: "主机名变更",
     CHANGE_DEVICE_GONE: "设备消失",
+    CHANGE_MAC_RANDOMIZED: "随机 MAC 重现",
 }
 
 class ResultTreeItem(QTreeWidgetItem):

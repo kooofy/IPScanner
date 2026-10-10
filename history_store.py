@@ -169,20 +169,32 @@ def get_snapshot(snapshot_id, db_path=None) -> dict:
     return {"time": row["time"], "devices": [dict(d) for d in devs]}
 
 
-def latest_device_ips(db_path=None) -> set:
-    """最近一次快照里的设备 IP 集合。没有任何快照时返回空集。
+def latest_devices(db_path=None) -> list:
+    """最近一次快照里的**设备字典列表**（结构同 ``get_snapshot()["devices"]``）。
 
-    用途：被动发现（`scanner/passive.py`）的「已知设备」基线 ——
-    有了它，`PassiveWatcher` 报出来的才是"上次扫描之后新冒出来的设备"，
-    而不是把整张 ARP 表都当成新设备。
+    没有任何快照时返回空列表。
+
+    用途：被动发现（`scanner/passive.py`）的「已知设备」基线。给整份设备列表
+    而不是只给 IP 集合，是因为 `PassiveWatcher` 还需要**设备指纹**
+    （主机名 / 厂商）—— 同一台设备换了随机 MAC 或换了 IP 时，靠指纹把它认成
+    老设备，而不是重复报一次「新设备」。
     """
     snaps = list_snapshots(db_path=db_path)
     if not snaps:
-        return set()
+        return []
     snap = get_snapshot(snaps[-1]["id"], db_path=db_path)
     if not snap:
-        return set()
-    return {d["ip"] for d in snap["devices"] if d.get("ip")}
+        return []
+    return list(snap["devices"])
+
+
+def latest_device_ips(db_path=None) -> set:
+    """最近一次快照里的设备 IP 集合。没有任何快照时返回空集。
+
+    用途：被动发现的「已知设备」基线 —— 有了它，`PassiveWatcher` 报出来的
+    才是"上次扫描之后新冒出来的设备"，而不是把整张 ARP 表都当成新设备。
+    """
+    return {d["ip"] for d in latest_devices(db_path=db_path) if d.get("ip")}
 
 
 def load_all(db_path=None) -> list:

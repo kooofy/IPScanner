@@ -7,12 +7,15 @@
 - MAC 变更 (MAC_CHANGED)：同一 IP 对应了不同 MAC（设备被替换）
 - IP 变更 (IP_CHANGED)：同一 MAC 出现在不同 IP（设备换了地址）
 - 主机名变更 (HOSTNAME_CHANGED)：同一 MAC 的主机名发生变化
+- 随机 MAC 重现 (MAC_RANDOMIZED)：MAC 变了，但**设备指纹**判定为同一台
+  （隐私 MAC / 本地管理地址；见 `device_fingerprint.py`）
 
 纯标准库，无 PyQt 依赖，便于单元测试。
 """
 from dataclasses import dataclass
 from typing import List, Dict
 from i18n import tr
+from device_fingerprint import is_randomized_mac, same_device
 
 
 # ── 变更类型 ──
@@ -21,6 +24,7 @@ CHANGE_DEVICE_GONE = "device_gone"
 CHANGE_MAC_CHANGED = "mac_changed"
 CHANGE_IP_CHANGED = "ip_changed"
 CHANGE_HOSTNAME_CHANGED = "hostname_changed"
+CHANGE_MAC_RANDOMIZED = "mac_randomized"
 
 # ── 严重度 ──
 SEVERITY_HIGH = "high"
@@ -48,6 +52,7 @@ class Change:
             CHANGE_MAC_CHANGED: tr("MAC 变更"),
             CHANGE_IP_CHANGED: tr("IP 变更"),
             CHANGE_HOSTNAME_CHANGED: tr("主机名变更"),
+            CHANGE_MAC_RANDOMIZED: tr("随机 MAC 重现"),
         }.get(self.change_type, self.change_type)
 
     @property
@@ -57,6 +62,35 @@ class Change:
             SEVERITY_WARNING: tr("警告"),
             SEVERITY_INFO: tr("提示"),
         }.get(self.severity, self.severity)
+
+
+def _randomized_mac_pairs(cur_online: Dict[str, object],
+                          prev_online: Dict[str, dict]) -> List[tuple]:
+    """找出「MAC 变了、但指纹判定为同一台」的 ``(当前 MAC, 上次 MAC)`` 配对。
+
+    只在**至少一侧是随机 MAC**时配对：两侧都是真实 MAC 却不同，那是换了台
+    设备（第 1 步的 MAC_CHANGED 更准确），不该被指纹并掉。
+    贪心 1:1 配对（同一台设备只认一次），先排序保证结果稳定、可测。
+    """
+    candidates = []
+    for cur_mac, r in cur_online.items():
+        for prev_mac, d in prev_online.items():
+            if cur_mac == prev_mac:
+                continue
+            if not (is_randomized_mac(cur_mac) or is_randomized_mac(prev_mac)):
+                continue
+            if same_device(r, d):
+                candidates.append((cur_mac, prev_mac))
+    candidates.sort()
+
+    used_cur, used_prev, pairs = set(), set(), []
+    for cur_mac, prev_mac in candidates:
+        if cur_mac in used_cur or prev_mac in used_prev:
+            continue
+        used_cur.add(cur_mac)
+        used_prev.add(prev_mac)
+        pairs.append((cur_mac, prev_mac))
+    return pairs
 
 
 def detect_changes(current_results, previous_devices: List[dict]) -> List[Change]:
@@ -104,9 +138,71 @@ def detect_changes(current_results, previous_devices: List[dict]) -> List[Change
         if ip:
             prev_ip_mac[ip] = mac
 
-    # ── 1. MAC 变更：同一 IP 对应了不同 MAC（设备被替换）──
+    # ── 0. 随机 MAC 重现：MAC 变了，但指纹判定为同一台 ──
+    # iOS/Android/Windows 的「私有 Wi-Fi 地址」会让同一台设备每次接入换一个
+    # MAC。只按 MAC 认，就会把它同时报成「新设备」+「设备消失」（同 IP 时还会
+    # 误报「设备被替换」）—— 三连假阳性，正是 §3 耦合提示 #11 说的那种噪声。
+    # 指纹一致时先认回来，把这几条压成一条 info 提示。
     checked_macs = set()
+    for cur_mac, prev_mac in _randomized_mac_pairs(cur_online, prev_online):
+        r = cur_online[cur_mac]
+        d = prev_online[prev_mac]
+        parts = [tr("设备换了随机 MAC（指纹一致，判定为同一台）："
+                    "{old} → {new}").format(old=prev_mac, new=cur_mac)]
+        old_ip = (d.get("ip") or "").strip()
+        if old_ip and r.ip and old_ip != r.ip:
+            parts.append(tr("IP 同时变化：{old} → {new}").format(
+                old=old_ip, new=r.ip))
+        changes.append(Change(
+            change_type=CHANGE_MAC_RANDOMIZED,
+            severity=SEVERITY_INFO,
+            description="；".join(parts),
+            ip=r.ip,
+            mac=cur_mac,
+            hostname=(r.hostname or d.get("hostname") or ""),
+            old_value=prev_mac,
+            new_value=cur_mac,
+        ))
+        # 两侧 MAC 都记为已处理：抑制紧随其后的「新增 / 消失 / MAC 变更 /
+        # IP 变更 / 主机名变更」—— 那几条对本例都是同一个事实的碎片。
+        checked_macs.add(cur_mac)
+        checked_macs.add(prev_mac)
+
+    # (b) 同一 IP 上换成了**另一个随机 MAC**，但没取到可核对的指纹。
+    #     mDNS 不应答时就没有主机名可比 —— 而「隐私 MAC 轮换」恰恰经常
+    #     发生在手机刚回到网络、服务还没广播出来的时候。此时两边都是 LAA，
+    #     「设备被替换（严重）」这个断言站不住脚：更可能是同一台手机的 MAC
+    #     轮换。如实降级成 info，说清"没能判定是不是同一台"，不假装知道。
     for ip, cur_mac in cur_ip_mac.items():
+        if cur_mac in checked_macs:
+            continue
+        prev_mac = prev_ip_mac.get(ip, "")
+        if not prev_mac or prev_mac == cur_mac:
+            continue
+        if not (is_randomized_mac(cur_mac) and is_randomized_mac(prev_mac)):
+            continue
+        changes.append(Change(
+            change_type=CHANGE_MAC_RANDOMIZED,
+            severity=SEVERITY_INFO,
+            description=tr("同一 IP 上的 MAC 换成了另一个随机 MAC"
+                           "（未取到可核对的指纹，未判定是否同一台）："
+                           "{old} → {new}").format(old=prev_mac, new=cur_mac),
+            ip=ip,
+            mac=cur_mac,
+            hostname=(cur_online.get(cur_mac).hostname
+                      if cur_online.get(cur_mac) else "") or "",
+            old_value=prev_mac,
+            new_value=cur_mac,
+        ))
+        checked_macs.add(cur_mac)
+        checked_macs.add(prev_mac)
+
+    # ── 1. MAC 变更：同一 IP 对应了不同 MAC（设备被替换）──
+    for ip, cur_mac in cur_ip_mac.items():
+        # 第 0 步已按指纹认回的随机 MAC 设备要跳过：否则同一件事会被
+        # 报成「设备被替换（严重）」+「随机 MAC 重现（提示）」两条自相矛盾的话。
+        if cur_mac in checked_macs:
+            continue
         prev_mac = prev_ip_mac.get(ip, "")
         if prev_mac and cur_mac and prev_mac != cur_mac:
             prev_dev = prev_online.get(prev_mac, {})

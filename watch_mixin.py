@@ -49,15 +49,17 @@ class WatchMixin:
         from scanner.passive import PassiveWatcher
 
         try:
-            baseline = history_store.latest_device_ips(db_path=self.history_db)
+            baseline = history_store.latest_devices(db_path=self.history_db)
         except Exception as e:  # noqa: BLE001
             # 基线读不到不该让开关点不动：退化成"没有基线"，
             # 结果偏保守（第一轮可能多报新设备），功能仍然可用。
             _log.warning("读取被动发现基线失败，本次不带基线运行: %s", e,
                          exc_info=True)
-            baseline = set()
+            baseline = []
 
-        self._watch_watcher = PassiveWatcher(known_ips=baseline)
+        # 基线给整份设备列表（不是只有 IP）：watcher 还要靠主机名 / 厂商
+        # 这些指纹把"换了随机 MAC 的老设备"从"新设备"里分出来。
+        self._watch_watcher = PassiveWatcher(known_devices=baseline)
         self._watch_new_total = 0
         self._watch_timer.start()
         # 立刻跑一轮：勾上开关后不该等满一个周期才看到反应。

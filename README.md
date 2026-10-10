@@ -128,7 +128,10 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
 ### 资产管理与分析
 
 - **历史快照**：每次扫描可存为快照，支持跨快照聚合查询（按设备类型 / 网段 / IP 过滤）。
-- **变更对比**：对比两次快照，列出新增 / 消失 / 属性变更的设备。
+- **变更对比**：对比两次快照，列出新增 / 消失 / 属性变更的设备。手机默认开启的
+  「私有 Wi-Fi 地址」会让同一台设备每次接入换一个随机 MAC —— 变更检测会先用
+  **设备指纹**（主机名 / 厂商 / 型号 / 序列号）把同一台认回来，报「随机 MAC 重现」
+  而不是「新增 + 消失」；指纹对不上时如实报，不猜。
 - **定时扫描 + 变更告警**：注册为系统计划任务（Windows `schtasks` / Linux·macOS `crontab`），
   无人值守地周期性扫描并在资产变化时推送告警到 Webhook / 企业微信 / 钉钉 / 邮件
   （零第三方依赖；敏感值支持 `env:` 间接引用，不落盘）。
@@ -469,6 +472,7 @@ IPScanner/
 ├─ switch_mapper.py           # SNMP 交换机端口映射（BRIDGE-MIB 转发表 → MAC/端口）
 ├─ conflict_detector.py       # IP 冲突检测
 ├─ change_detector.py         # 资产变更检测
+├─ device_fingerprint.py      # 随机化 MAC 识别：设备指纹（主机名/厂商/型号/序列号）配对
 ├─ notifier.py                # 变更告警渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
 ├─ scheduler.py               # 定时扫描调度（schtasks / crontab，命令构造为纯函数）
 ├─ history_store.py           # 历史快照存储（SQLite：快照 / 设备 / 交换机端口映射）

@@ -21,6 +21,13 @@
 ARP 条目会过期，设备从表里消失**不等于**它下线了 ——
 报「消失」是假阳性。宁可不说，也不要给用户一份会自己造谣的台账。
 
+**「新出现」要过两道关：IP 与指纹**
+------------------------------------
+只看 IP 的话，一台开了「隐私 MAC」的手机换个地址就会被当成新设备。
+所以 `PassiveWatcher` 同时记「见过的 IP」与「见过的设备指纹」
+（`device_fingerprint.py`，主机名 / 厂商）：IP 没见过、但指纹认得出来，
+那是**老设备换了 MAC / IP**，不是新设备。
+
 **不写快照**
 ------------
 快照有 20 条硬上限（`history_store.prune`）。被动发现每周期写一条，
@@ -34,6 +41,7 @@ from typing import Callable, Dict, List, Optional, Set
 
 from app_logging import get_logger
 
+from device_fingerprint import fingerprint
 from .dns import mdns_discover
 from .engine import _merge_mdns
 from .models import ScanResult, get_mac_vendor
@@ -218,16 +226,29 @@ def passive_discover(*, mdns: bool = True, mdns_active: bool = False,
 class PassiveWatcher:
     """把周期性被动发现的结果并进一份**内存台账**，并给出「新出现」的设备。
 
-    ``known`` 是「已经见过」的 IP 集合 —— 决定什么算"新"。
-    用最近一次扫描快照的 IP 做基线（`history_store.latest_device_ips()`）
-    最自然：那样报出来的就是"上次扫描之后新冒出来的设备"。
-    不给基线的话，第一次轮询会把整张 ARP 表都当成新设备。
+    ``known`` 是「已经见过」的 IP 集合，``known_fingerprints`` 是「已经见过」
+    的**设备指纹**集合 —— 两者一起决定什么算"新"。只看 IP 的话，一台开了
+    「隐私 MAC」的手机换个地址就会被重复报成新设备（路线图 §3 #11）。
+
+    基线最自然是最近一次扫描快照的设备列表（`history_store.latest_devices()`）：
+    那样报出来的就是"上次扫描之后新冒出来的设备"。不给基线的话，第一次轮询
+    会把整张 ARP 表都当成新设备。
     """
 
     def __init__(self, known_ips: Optional[Set[str]] = None,
+                 known_devices: Optional[list] = None,
                  library_lookup: Optional[Callable] = None):
         self.ledger: Dict[str, ScanResult] = {}
         self.known: Set[str] = {str(ip) for ip in (known_ips or ())}
+        self.known_fingerprints: Set[str] = set()
+        # 基线既能直接给 IP 集合，也能给完整设备列表（后者还能拿到指纹）。
+        for d in (known_devices or ()):
+            ip = (d.get("ip") if isinstance(d, dict) else getattr(d, "ip", "")) or ""
+            if ip:
+                self.known.add(str(ip))
+            fp = fingerprint(d)
+            if fp:
+                self.known_fingerprints.add(fp)
         self._library_lookup = library_lookup
 
     def poll(self, *, mdns: bool = True, mdns_active: bool = False,
@@ -241,9 +262,21 @@ class PassiveWatcher:
                                  mdns_timeout=mdns_timeout,
                                  library_lookup=self._library_lookup)
         fresh: List[ScanResult] = []
+        fps = {ip: fingerprint(r) for ip, r in found.items()}
         for ip, r in found.items():
-            if ip not in self.known:
-                fresh.append(r)
+            if ip in self.known:
+                continue
+            # IP 没见过，但指纹认得出来 → 老设备换了 MAC / IP，不是新设备。
+            fp = fps[ip]
+            if fp and fp in self.known_fingerprints:
+                continue
+            fresh.append(r)
+        # 指纹与 IP 都要跨轮累积，否则下一轮又会把同一台设备重报一次。
+        # ⚠ 累积必须放在**判断之后**：同一轮里两台设备指纹相同（同一台机器的
+        # 两个网卡、或快照里主机名重复）时，两台都要报出来，不能互相压制。
+        for fp in fps.values():
+            if fp:
+                self.known_fingerprints.add(fp)
         self.ledger.update(found)
         self.known.update(found)
         return list(self.ledger.values()), fresh

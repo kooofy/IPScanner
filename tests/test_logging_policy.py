@@ -23,6 +23,7 @@ import ast
 import io
 import logging
 import os
+import re
 import sys
 import unittest
 
@@ -37,6 +38,12 @@ import app_logging
 # 扫描范围：项目自身的 .py，排除虚拟环境与构建产物
 _SKIP_DIRS = {"venv", ".venv", "env", "build", "dist", "dist_new",
               "__pycache__", ".git", ".workbuddy-ai", ".ruff_cache"}
+
+#: 只匹配**内置 `print` 的调用**。早先这里是裸子串 `"print("`，
+#: 于是 `fingerprint(` 这类正常名字会被误判成"用了 print"（踩过：
+#: `device_fingerprint` 引入后 `scanner/passive.py` 直接被打红）。
+#: 前一个字符是标识符字符或点号时不算 —— 前者是名字的一部分，后者是方法调用。
+_PRINT_CALL = re.compile(r"(?<![\w.])print\s*\(")
 
 
 def _project_py_files():
@@ -232,9 +239,10 @@ class EntryPointWiringTest(unittest.TestCase):
                 p = os.path.join(root, n)
                 with io.open(p, encoding="utf-8") as fh:
                     src = fh.read()
-                for kw in ("sys.stderr.write", "print("):
-                    if kw in src:
-                        offenders.append(f"{_rel(p)} 使用了 {kw}")
+                if "sys.stderr.write" in src:
+                    offenders.append(f"{_rel(p)} 使用了 sys.stderr.write")
+                if _PRINT_CALL.search(src):
+                    offenders.append(f"{_rel(p)} 使用了 print(")
         self.assertEqual(offenders, [], "\n  ".join(offenders))
 
 
