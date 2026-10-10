@@ -4,8 +4,44 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%20~%203.13-blue.svg)](pyproject.toml)
 
-局域网终端扫描与资产识别工具。PyQt5 图形界面 + 无头命令行，面向**内网巡检、资产盘点、
-IP 冲突排查**等日常运维场景，参考 Advanced IP Scanner / Angry IP Scanner 的交互习惯。
+局域网终端扫描与资产识别工具 —— PyQt5 图形界面 + 无头命令行，面向**内网巡检、资产盘点、
+IP 冲突排查**等日常运维场景。
+
+- **一条命令扫完一个网段** —— `python cli.py scan -r 192.168.1.0/24 --format json`
+- **不限设备 · 不限站点 · 无需账号 · 无需上云** —— 纯本地运行，数据只落在你自己的机器上
+- **Windows 免安装包 + CLI + JSON** —— GUI 版解压即用，CLI 版单文件可直接进计划任务
+
+---
+
+## 横向对比
+
+同类工具里最常被拿来对照的是 **Advanced IP Scanner**（免费、仅 Windows）、
+**SoftPerfect Network Scanner**（桌面功能最密）与 **Total Network Inventory / TNI 6**
+（最便宜的付费台账）。下表只列「决定要不要装」的那几项，以各家官方页面为准
+（核对日期 2026-10，来源见 [`docs/research/`](docs/research/)）。
+
+| | **IPScanner** | Advanced IP Scanner | SoftPerfect | TNI 6 |
+|---|:---:|:---:|:---:|:---:|
+| 价格 / 许可 | **免费 · GPL-3.0 开源** | 免费（闭源） | 试用限 10 台；商用 ¥329 起 | 30 天试用；~$90 / 25 节点 |
+| 平台 | Windows 为主，macOS / Linux 可运行 | 仅 Windows | Win / macOS / Linux | Windows 控制台（可扫多平台） |
+| 设备 / 站点上限 | **无** | 无 | 无（授权按安装数计） | 按节点数授权 |
+| 账号 / 上云 | **不需要** | 不需要 | 不需要 | 不需要 |
+| 命令行 / 自动化 | **有**（JSON / CSV，退出码语义固定） | 无 | 无 | 无 |
+| 历史快照 + 变更对比 | **有** | 无 | 无 | 有（Change Log） |
+| 定时扫描 + 告警 | **有**（系统计划任务 + 四类通知渠道） | 无 | 无 | 有 |
+| SNMP / 拓扑 | **有**（LLDP/CDP + BRIDGE-MIB，逐级退化不编造链路） | 无 | 无（拓扑另售） | 有（网络图，手工拖拽） |
+| 风险评分 | **有**（0–100 服务暴露面） | 无 | 无 | 无 |
+| 源码可审计 | **是** | 否 | 否 | 否 |
+
+> **怎么读这张表**：它只回答「要不要装」，不回答「谁更强」。SoftPerfect 的**探测**能力比本项目
+> 更多（IPv6、跨路由 MAC 识别、TLS 证书到期、Nmap 集成、远程执行），Advanced IP Scanner 有
+> 7000 万用户与 ~35 种语言 —— 这两项都是本项目**没有**的。IPScanner 的差异集中在
+> **台账**（快照 / 变更 / 拓扑）、**自动化**（CLI + 计划任务 + 告警）与**可审计**（GPL 源码）
+> 这三块，且**不需要账号、不设设备上限**。
+>
+> 本项目的短板同样写在这里：**只支持 IPv4**（IPv6 字面量在输入阶段即被拒绝）、
+> WMI 深度识别仅限 Windows 目标、发行版**未做代码签名**（见下文「Windows 上的
+> 「未知发布者」与杀软误报」）。
 
 ---
 
@@ -178,9 +214,16 @@ python main.py
 
 ### Windows 上的「未知发布者」与杀软误报
 
-发行版**未做代码签名**（EV 证书需要企业资质与年费），所以从 Release 下载的 zip 解压后
-首次运行，Windows 大概率弹出 **「Windows 已保护你的电脑」/ 未知发布者**。这是
-SmartScreen 对"没有签名记录的新程序"的默认反应，**不代表程序有问题**。
+发行版**当前未做代码签名**，所以从 Release 下载的 zip 解压后首次运行，Windows 大概率弹出
+**「Windows 已保护你的电脑」/ 未知发布者**。这是 SmartScreen 对"没有签名记录的新程序"的
+默认反应，**不代表程序有问题**。
+
+> 本项目已备好 [SignPath Foundation](https://signpath.org) 免费开源代码签名的申请材料
+> （见 [`docs/SIGNPATH_APPLICATION.md`](docs/SIGNPATH_APPLICATION.md)）；获批后发行版会带上
+> **可与本仓库相互验证**的签名，届时本节会同步更新。
+>
+> 另外提醒一句：**买 EV 证书并不能免除拦截** —— 2024 年起微软取消了 EV 的即时信任特权，
+> OV / EV 的新签名文件都得靠下载量累积信誉，而 EV 价格是 OV 的数倍。本项目不走这条路。
 
 继续运行：
 
@@ -353,7 +396,7 @@ IPScanner/
 │  ├─ audit.py                #   审计日志查看器
 │  └─ switch_port.py          #   交换机端口映射
 ├─ ui_logic.py                # 与 UI 解耦的纯业务逻辑（便于单测）
-├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / OUI 更新）
+├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / 历史查询 / OUI 更新）
 ├─ ui_icons.py                # 图标与调色板工具（PC 图标预渲染、工具栏矢量图标、深色 QPalette）
 ├─ ui_msg.py                  # 对话框统一入口（顺带本地化 Qt 内置按钮文案）
 ├─ ui_utils.py                # 通用工具（网关探测、快照对比、IP 校验与排序键）
@@ -422,16 +465,22 @@ IPScanner/
 ├─ docs/                      # 文档
 │  ├─ reviews/                #   历次代码 / 界面评审归档（均已关闭，只作历史记录）
 │  ├─ ui-review-round2/       #   第二轮界面验收截图（18 张）
-│  └─ refactor/               #   重构方案（ui_dialogs 拆包等）
+│  ├─ refactor/               #   重构方案（ui_dialogs 拆包等）
+│  └─ research/               #   同类产品与市场调研原始材料
 │
 ├─ IPScanner.spec             # GUI 版 PyInstaller 配方（onedir，产物名带版本号）
 ├─ IPScanner_cli.spec         # CLI 版 PyInstaller 配方（onefile）
-├─ .github/workflows/ci.yml   # CI：Windows × Python 3.10 / 3.11 / 3.12 / 3.13
+├─ .github/workflows/         # GitHub Actions
+│  ├─ ci.yml                  #   每次提交都验：测试矩阵 + 跨平台 + 打包验证
+│  └─ release.yml             #   发版：推 v* tag → 构建 + SHA256SUMS + Release
 ├─ pyproject.toml             # ruff 配置（版本号一致性由 test_scaffolding 断言）
 ├─ requirements.txt           # 运行期依赖
 ├─ requirements-dev.txt       # 开发 / 打包依赖
 ├─ run.bat / run.ps1          # Windows 启动脚本
 ├─ run_tests.py               # 测试入口（等价 python -m unittest discover）
+├─ CHANGELOG.md               # 版本历史（Keep a Changelog 格式）
+├─ CODE_SIGNING_POLICY.md     # 代码签名政策（签什么 / 谁有权批准签名）
+├─ CODE_OF_CONDUCT.md         # 贡献者行为准则（Contributor Covenant 2.1）
 └─ LICENSE                    # GPL-3.0
 ```
 
@@ -504,6 +553,16 @@ CLI 版显式排除了 PyQt5 与图形库，体积远小于 GUI 版，`console=T
 
 > ⚠️ onedir 产物**必须整个目录一起分发**，不能只拷 exe ——
 > 依赖与资源都在 `_internal/` 子目录里。
+
+### 自动发布
+
+推一个 `v*` tag 即触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：
+在 `windows-latest` 上跑测试 → 构建两个包 → 打包 `IPScanner_<版本>-win64.zip` →
+生成 `SHA256SUMS.txt` → 用 `gh` 创建 Release 并附上产物。
+
+工作流会**先校验 tag 与 `version.py` 一致**（`v1.7.6` 必须对应 `__version__ == "1.7.6"`），
+不一致立即失败 —— 避免发出一个「文件名写着 1.7.6、关于对话框写着 1.7.5」的版本。
+于是发版流程收敛为：改 `version.py` → 提交 → `git tag v<版本>` → 推送 tag。
 
 ---
 
@@ -581,6 +640,8 @@ python -m ruff check .
 - [ ] IPv6 扫描支持
 - [ ] WinRM 走 HTTPS(5986) + 可选的证书校验开关（当前固定 HTTP/5985）
 - [x] macOS / Linux 的 CI 覆盖（ubuntu / macos 单版本矩阵）
+
+各版本具体改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
