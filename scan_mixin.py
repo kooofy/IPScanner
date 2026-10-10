@@ -454,6 +454,7 @@ class ScanMixin:
             ports=get_ports_for_level(self.scan_level) if self.port_scan_check.isChecked() else None,
             library=self.library,
             snmp_v3_user=self.snmp_v3_creds.to_user() if self.snmp_v3_creds.has_creds() else None,
+            switch_map=self.switch_map_check.isChecked(),
         )
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()
@@ -551,7 +552,10 @@ class ScanMixin:
             # 变更检测：在保存新快照前，对比上一次快照
             self._run_change_detection(silent=True)
             # 保存历史快照用于对比 (P2-5)
-            self._save_snapshot(results)
+            # 端口映射（若本次扫描采集过）随快照一并落库，供「定位查询」使用
+            self._save_snapshot(
+                results,
+                switch_maps=getattr(self.scan_thread, "switch_maps", None))
 
             # 先关闭排序，避免批量添加时的性能问题
             self.table.setSortingEnabled(False)

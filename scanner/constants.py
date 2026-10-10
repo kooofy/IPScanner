@@ -67,6 +67,8 @@ _PHASE_TEXT = {
     "ping": "存活探测",
     "arp": "ARP 补全",
     "mdns": "mDNS 组播发现",
+    # 扫描末尾按需读取交换机转发表（见 topology_discovery.collect_switch_port_maps）
+    "switch_map": "读取交换机转发表",
 }
 
 
@@ -74,6 +76,47 @@ def phase_label(name: str) -> str:
     """扫描阶段代码 -> 当前语言的显示名（惰性翻译）。"""
     text = _PHASE_TEXT.get(name)
     return tr(text) if text else str(name)
+
+
+# 「定位查询」查不到时的原因显示名：惰性翻译。
+# 键是 `history_store` 里的 `LOCATE_*` **语言无关规范值**（存储层只产出规范值，
+# 翻译发生在展示层 —— 仓库铁律）。取值刻意都写成"说不出位置"的口径，
+# 而不是"设备不存在"：`mac_not_in_fdb` 只说明转发表里没有它，不代表这台机器不在网上。
+#
+# ⚠️ 这张表必须与 `history_store.LOCATE_*` 一一对应，
+# `tests/test_locate.py::LocateReasonLabelTest` 会强制校验（漏一个就红）。
+_LOCATE_REASON_TEXT = {
+    "no_device": "没有这台设备的记录",
+    "no_switch_data": "从未采集过交换机转发表",
+    "switch_scan_failed": "交换机转发表读取失败",
+    "mac_not_in_fdb": "交换机转发表里没有这台设备",
+}
+
+
+def locate_reason_label(reason: str) -> str:
+    """定位查询的未知原因代码 -> 当前语言的显示名（惰性翻译）。"""
+    text = _LOCATE_REASON_TEXT.get(reason)
+    return tr(text) if text else str(reason)
+
+
+# 「定位查询」查不到时给出的**下一步动作**。与上面的短标签分开：
+# 标签回答"为什么不知道"，提示回答"那我该怎么办" —— 后者才是有用的一半。
+# 没有对应提示（如 no_device 之外的未知代码）时返回空串，调用方不显示提示行。
+_LOCATE_REASON_HINT = {
+    "no_device": "历史库里没有这台设备的记录。先扫描一次并保存快照，再来定位。",
+    "no_switch_data": "还没有采集过交换机转发表。扫描时勾选「读取交换机转发表」"
+                      "（命令行加 --switch-map --save-snapshot）后重新扫描。",
+    "switch_scan_failed": "交换机响应了 SNMP，但转发表读不到 —— "
+                          "多数是设备不支持 BRIDGE-MIB，或团体字权限不足。",
+    "mac_not_in_fdb": "交换机转发表里没有它：设备可能已离线，"
+                      "或接在本次未读取转发表的交换机上。",
+}
+
+
+def locate_reason_hint(reason: str) -> str:
+    """定位查询的未知原因代码 -> 当前语言的可操作提示（惰性翻译）。"""
+    text = _LOCATE_REASON_HINT.get(reason)
+    return tr(text) if text else ""
 
 
 def get_ports_for_level(level: str):

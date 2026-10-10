@@ -59,6 +59,9 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CHANGES = 2
 EXIT_ENV = 3
+#: `locate` 专用：查询执行成功，但**没定位到**（设备未知 / 未采集过转发表 …）。
+#: 与 `EXIT_ERROR` 分开：那不是"命令出错"，是一个合法结论，脚本要能区分。
+EXIT_NOT_FOUND = 4
 
 # ── 输出字段（英文，语言无关） ──
 _RESULT_COLUMNS = (
@@ -465,6 +468,30 @@ def _run_scan(args):
 
 # ────────────────────────────── 子命令 ──────────────────────────────
 
+def _collect_switch_maps(args, results):
+    """读取各交换机转发表（`--switch-map`），返回落库用的 dict 列表。
+
+    失败只告警、返回 None —— 转发表读不到（设备不支持 BRIDGE-MIB / 团体字权限不足）
+    是常见情形，不该让一次已经成功的扫描因此判为失败。
+    """
+    from topology_discovery import collect_switch_port_maps
+
+    snmp_v3_user, err = _resolve_snmp_v3(args)
+    if err:
+        warn(f"跳过转发表读取: {err}")
+        return None
+
+    def _progress(phase, current, total, message):
+        if message and not getattr(args, "quiet", False):
+            log(message)
+
+    try:
+        return collect_switch_port_maps(
+            results, snmp_v3_user=snmp_v3_user, progress_callback=_progress)
+    except Exception as e:  # noqa: BLE001
+        warn(f"读取交换机转发表失败: {e}")
+        return None
+
 def cmd_scan(args) -> int:
     results, _scanner = _run_scan(args)
     if results is None:
@@ -500,6 +527,16 @@ def cmd_scan(args) -> int:
                 warn(f"读取历史快照失败，本次跳过变更对比: {e}")
                 notifiers = []
 
+    # 端口映射（可选）：在**保存快照之前**采集，存好快照后连同 snapshot_id 落库。
+    # 没有 --save-snapshot 就没有可挂靠的快照，采集了也无处安放 —— 直接说明并跳过。
+    switch_maps = None
+    if getattr(args, "switch_map", False):
+        if not args.save_snapshot:
+            warn("已指定 --switch-map 但没有 --save-snapshot："
+                 "端口映射必须挂在快照上，本次跳过转发表读取。")
+        else:
+            switch_maps = _collect_switch_maps(args, results)
+
     if args.save_snapshot:
         try:
             import history_store
@@ -507,6 +544,10 @@ def cmd_scan(args) -> int:
                 _snapshot_devices(results), note=args.note, db_path=_db_path(args)
             )
             log(f"已保存快照 #{sid}")
+            if switch_maps:
+                n = history_store.save_port_map(
+                    sid, switch_maps, db_path=_db_path(args))
+                log(f"已记录 {n} 条端口映射（来自 {len(switch_maps)} 台交换机）")
         except Exception as e:  # noqa: BLE001
             warn(f"保存快照失败: {e}")
 
@@ -754,6 +795,73 @@ def cmd_history(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────────── 定位查询 ──────────────────────────────
+
+def _render_locate_text(r) -> str:
+    """把 `locate_device()` 的结果排成人看的几行。
+
+    文案**不翻译** —— 与 cli.py 里其它所有消息一致（本文件整体不走 i18n，
+    `log`/`warn` 都是直写中文）。原因标签走共享助手，那是 GUI 也在用的同一份映射。
+    """
+    cur = r["current"]
+    lines = [
+        f"设备: {r['mac'] or '—'}",
+        f"IP: {r['ip'] or '—'}   主机名: {r['hostname'] or '—'}",
+        f"当前位置: {cur['switch_name'] or cur['switch_ip']} 端口 {cur['port_name'] or '—'}",
+        f"  快照 #{cur['snapshot_id']} · {_fmt_time(cur['time'])}",
+        "端口名可信度: " + (
+            "真实接口名" if r["port_confidence"] == "named"
+            else "仅桥接端口号（不可信，展示时请标注）"),
+    ]
+    prev = r["previous"]
+    if prev:
+        lines.append(
+            f"上次位置: {prev['switch_name'] or prev['switch_ip']} "
+            f"端口 {prev['port_name'] or '—'}")
+        lines.append(
+            f"  快照 #{prev['snapshot_id']} · {_fmt_time(prev['time'])}")
+        lines.append("已换过端口: 是")
+    else:
+        lines.append("已换过端口: 否")
+    return "\n".join(lines)
+
+
+def cmd_locate(args) -> int:
+    """回答「这台设备插在哪台交换机的哪个口」。
+
+    **JSON 输出保持语言无关**（`reason` 是 `history_store.LOCATE_*` 规范值），
+    text 输出才翻译、并附上「下一步怎么办」—— 脚本消费 JSON，人看 text。
+    """
+    import history_store
+    from scanner.constants import locate_reason_hint, locate_reason_label
+
+    r = history_store.locate_device(
+        mac=args.mac or "", ip=args.ip or "", hostname=args.hostname or "",
+        db_path=_db_path(args))
+
+    if args.format == "json":
+        out = dict(r)
+        for key in ("current", "previous"):
+            if out.get(key):
+                out[key] = dict(out[key])
+                out[key]["time_str"] = _fmt_time(out[key]["time"])
+        emit(render_json(out), args.output)
+        return EXIT_OK if r["found"] else EXIT_NOT_FOUND
+
+    if not r["found"]:
+        who = r["mac"] or r["ip"] or r["hostname"]
+        lines = [f"未定位到设备: {who}",
+                 f"原因: {locate_reason_label(r['reason'])}"]
+        hint = locate_reason_hint(r["reason"])
+        if hint:
+            lines.append(f"提示: {hint}")
+        emit("\n".join(lines), args.output)
+        return EXIT_NOT_FOUND
+
+    emit(_render_locate_text(r), args.output)
+    return EXIT_OK
+
+
 # ────────────────────────────── 计划任务 ──────────────────────────────
 
 def cmd_schedule(args) -> int:
@@ -995,6 +1103,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--library", action="store_true", help="启用地址库自动匹配（读 mac_library.db）")
     sp.add_argument("--save-snapshot", action="store_true", help="把本次结果存为历史快照")
     sp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")
+    sp.add_argument("--switch-map", action="store_true",
+                    help="扫描末尾读取各交换机转发表，记录设备与端口的对应关系"
+                         "（需配合 --save-snapshot；需要 SNMP，每台交换机 5 次 walk）")
     sp.add_argument("--notify", action="store_true",
                     help="检测到资产变更时推送告警（需先配置通知渠道）")
     sp.add_argument("--notify-config", metavar="文件",
@@ -1047,6 +1158,20 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
     hp.add_argument("-o", "--output", metavar="文件")
     hp.set_defaults(func=cmd_history)
+
+    # ── locate ──
+    lp = sub.add_parser("locate", help="定位设备接在哪台交换机的哪个端口",
+                        parents=[common],
+                        description="按 MAC / IP / 主机名，查这台设备接在交换机的哪个口，"
+                                    "以及与上一次相比是否换过端口。"
+                                    "数据来自扫描时（--switch-map）落库的交换机转发表。")
+    grp = lp.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--mac", metavar="MAC", help="设备 MAC（推荐：IP 会被 DHCP 回收后换台机器）")
+    grp.add_argument("--ip", metavar="IP", help="设备 IP")
+    grp.add_argument("--hostname", metavar="主机名", help="设备主机名")
+    lp.add_argument("-f", "--format", choices=("text", "json"), default="text")
+    lp.add_argument("-o", "--output", metavar="文件")
+    lp.set_defaults(func=cmd_locate)
 
     # ── schedule ──
     cp = sub.add_parser("schedule", help="注册/卸载/查询定时扫描计划任务",

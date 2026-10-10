@@ -6,8 +6,11 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from bounded_pool import run_bounded
 from scanner import NetworkScanner, ScanResult
+from app_logging import get_logger
 from i18n import tr
 import history_store
+
+_log = get_logger(__name__)
 
 
 class ScanThread(QThread):
@@ -20,7 +23,7 @@ class ScanThread(QThread):
 
     def __init__(self, ip_ranges, timeout_ms=1000, max_threads=100, scan_ports=False,
                  protocols=None, tcp_scan_mode="connect", mdns_discovery=True, ports=None,
-                 library=None, snmp_v3_user=None):
+                 library=None, snmp_v3_user=None, switch_map=False):
         super().__init__()
         self.ip_ranges = ip_ranges
         self.timeout_ms = timeout_ms
@@ -33,6 +36,13 @@ class ScanThread(QThread):
         self.library = library          # MacLibrary 实例（可选）：地址库自动匹配
         # SnmpV3User 或 None：为 None 时走 v2c 团体字探测（见 scanner.engine._identify_snmp）
         self.snmp_v3_user = snmp_v3_user
+        # 扫描末尾是否读取交换机转发表（供「定位查询」落库）。**默认关**：
+        # 每台交换机 5 次 SNMP walk，且会在网络里产生额外 SNMP 流量，必须用户显式开启。
+        self.switch_map = switch_map
+        #: 采集到的各交换机端口映射（`history_store.save_port_map()` 能吃的 dict 列表）。
+        #: 由 `run()` 在**本线程内**填充，主线程保存快照时取走落库 ——
+        #: 绝不能在主线程做，那是 5×交换机数 次 SNMP 往返，会把界面冻住。
+        self.switch_maps = []
         self.scanner = NetworkScanner()
 
     def _build_library_lookup(self):
@@ -86,7 +96,37 @@ class ScanThread(QThread):
         _at = getattr(self.scanner, "last_adaptive_timeout", None)
         if _at and abs(_at - 0.5) > 1e-6:
             self.log_signal.emit(f"RTT 自适应端口超时已收敛至 {_at:.2f}s")
+
+        if self.switch_map and results:
+            self.switch_maps = self._collect_switch_maps(results)
+
         self.finished_signal.emit(results)
+
+    def _collect_switch_maps(self, results):
+        """在本线程内读取各交换机转发表（供「定位查询」落库）。
+
+        只做采集，**不落库** —— 落库要等快照存好、拿到 snapshot_id 之后
+        （见 `HistoryMixin._save_snapshot`）。采集失败不该让整次扫描白跑，
+        但必须留痕，不能静默吞掉。
+        """
+        def on_progress(phase, current, total, message):
+            self.phase_changed.emit(phase, current, total)
+            if message:
+                self.log_signal.emit(message)
+
+        try:
+            from topology_discovery import collect_switch_port_maps
+            maps = collect_switch_port_maps(
+                results, snmp_v3_user=self.snmp_v3_user,
+                progress_callback=on_progress,
+            )
+        except Exception as e:      # noqa: BLE001
+            _log.warning("读取交换机转发表失败: %s", e, exc_info=True)
+            self.log_signal.emit(tr("读取交换机转发表失败: {err}").format(err=e))
+            return []
+        self.log_signal.emit(
+            tr("转发表读取完成: {n} 台交换机").format(n=len(maps)))
+        return maps
 
     def stop(self):
         self.scanner.stop()

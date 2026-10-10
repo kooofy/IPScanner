@@ -316,6 +316,10 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "scanner.constants._SCAN_LEVEL_TEXT":
                 list(_sc._SCAN_LEVEL_TEXT.values()),
             "scanner.constants._PHASE_TEXT": list(_sc._PHASE_TEXT.values()),
+            "scanner.constants._LOCATE_REASON_TEXT":
+                list(_sc._LOCATE_REASON_TEXT.values()),
+            "scanner.constants._LOCATE_REASON_HINT":
+                list(_sc._LOCATE_REASON_HINT.values()),
             # design_tokens 的行高档位显示名（同上：字面量表）。
             "design_tokens._DENSITY_TEXT": list(_DENSITY_TEXT.values()),
             # risk_rules 的风险等级 / 理由显示名（同上：字面量表，AST 收集不到）。

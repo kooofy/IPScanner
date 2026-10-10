@@ -243,6 +243,12 @@ def save_port_map(snapshot_id, switches, db_path=None) -> int:
 
     Returns:
         写入 port_map 的行数（即 (交换机, MAC) 对总数）。
+
+    **对同一 snapshot_id 是幂等的**：再次调用会先清掉该快照已有的
+    switch_map / port_map 行再写 —— 否则「同一快照重读一次转发表」会让
+    (MAC → 端口) 记录翻倍，`locate_device()` 的「上一次端口」判断就会读到
+    同一时刻的重复行，得出假的「换过端口」。`switches` 为空/None 时**什么都不做**
+    （那是「没找到交换机」，不是「这台交换机没有映射」，不该拿来清空已有数据）。
     """
     map_rows = []
     sw_rows = []
@@ -274,6 +280,9 @@ def save_port_map(snapshot_id, switches, db_path=None) -> int:
         return 0
 
     with _conn(db_path) as conn:
+        # 先清后写：保证同一快照不会残留上一次的端口记录（见 docstring）
+        conn.execute("DELETE FROM port_map WHERE snapshot_id=?", (snapshot_id,))
+        conn.execute("DELETE FROM switch_map WHERE snapshot_id=?", (snapshot_id,))
         conn.executemany(
             "INSERT INTO switch_map "
             "(snapshot_id, switch_ip, switch_name, status, error, mac_count) "
@@ -322,6 +331,8 @@ def locate_device(mac="", ip="", hostname="", db_path=None) -> dict:
         ``{"found", "reason", "mac", "ip", "hostname", "current", "previous",
            "moved", "switch_count", "port_confidence"}``
 
+        - `mac` / `ip` / `hostname`：查询用的身份，**并尽量从库里补齐** ——
+          只给 MAC 时会反查最近一次快照里的 IP 与主机名（给不出就是空串）。
         - `current` / `previous`：``{"snapshot_id","time","switch_ip","switch_name",
           "port_name","port_source"}``；`previous` 是**上一次端口不同**的那条记录。
         - `moved`：两次快照之间确实换了端口。
@@ -364,7 +375,18 @@ def locate_device(mac="", ip="", hostname="", db_path=None) -> dict:
                 # 库里有这台设备但没记 MAC —— 拿不到身份，无法定位
                 return result
 
-        # 2) 该 MAC 在各快照里的端口记录，新 → 旧。
+        # 2) 补齐 IP / 主机名：只给了 MAC 时从最近一次快照反查。
+        #    否则调用方拿到的 ip/hostname 只是它自己传进来的空串，
+        #    而库里明明有 —— 展示层只能显示一排"—"，白丢信息。
+        if not (result["ip"] and result["hostname"]):
+            row = conn.execute(
+                "SELECT ip, hostname FROM devices WHERE mac=? COLLATE NOCASE "
+                "ORDER BY snapshot_id DESC LIMIT 1", (_mac,)).fetchone()
+            if row:
+                result["ip"] = result["ip"] or (row["ip"] or "")
+                result["hostname"] = result["hostname"] or (row["hostname"] or "")
+
+        # 3) 该 MAC 在各快照里的端口记录，新 → 旧。
         #    COLLATE NOCASE 必须显式写，否则比较式与 idx_pm_mac 的排序规则不一致、索引用不上。
         rows = conn.execute(
             "SELECT s.id AS snapshot_id, s.time AS time, p.switch_ip, p.switch_name, "
@@ -372,7 +394,7 @@ def locate_device(mac="", ip="", hostname="", db_path=None) -> dict:
             "FROM port_map p JOIN snapshots s ON s.id = p.snapshot_id "
             "WHERE p.mac = ? COLLATE NOCASE ORDER BY s.id DESC", (_mac,)).fetchall()
 
-        # 3) 最近一次快照里交换机的概况 —— 用于区分「没扫过」与「扫了但没这台 MAC」
+        # 4) 最近一次快照里交换机的概况 —— 用于区分「没扫过」与「扫了但没这台 MAC」
         sw_total = sw_ok = 0
         last = conn.execute(
             "SELECT id FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()

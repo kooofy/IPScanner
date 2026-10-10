@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -200,6 +201,45 @@ class LocateLookupTest(_Base):
         self.assertTrue(r["found"])
         self.assertEqual(r["mac"], self.MAC)
 
+    def test_mac_query_backfills_ip_and_hostname(self):
+        """只给 MAC 也要把 IP / 主机名补出来 —— 否则展示层只能显示一排「—」。"""
+        self._seed()
+        r = history_store.locate_device(mac=self.MAC, db_path=self.db)
+        self.assertEqual(r["ip"], "192.168.1.50")
+        self.assertEqual(r["hostname"], "FIN-PC-01")
+
+    def test_unknown_mac_leaves_ip_and_hostname_empty(self):
+        """库里查不到就别硬填 —— 空串就是「不知道」。"""
+        self._seed()
+        r = history_store.locate_device(mac="FF:FF:FF:FF:FF:FF", db_path=self.db)
+        self.assertEqual(r["ip"], "")
+        self.assertEqual(r["hostname"], "")
+
+
+class LocateReasonLabelTest(_Base):
+    """展示层的原因映射必须与存储层的规范值一一对应（漏一个就显示原始代码）。"""
+
+    def test_label_table_covers_every_reason_code(self):
+        from scanner.constants import (_LOCATE_REASON_HINT, _LOCATE_REASON_TEXT,
+                                       locate_reason_hint, locate_reason_label)
+        codes = {
+            history_store.LOCATE_NO_DEVICE,
+            history_store.LOCATE_NO_SWITCH_DATA,
+            history_store.LOCATE_SWITCH_SCAN_FAILED,
+            history_store.LOCATE_MAC_NOT_IN_FDB,
+        }
+        self.assertEqual(set(_LOCATE_REASON_TEXT), codes)
+        self.assertEqual(set(_LOCATE_REASON_HINT), codes)
+        # 翻译表未就绪时也得返回非空文本（不崩、不返回 None）
+        for code in codes:
+            self.assertTrue(locate_reason_label(code))
+            self.assertTrue(locate_reason_hint(code))
+
+    def test_unknown_reason_passes_through(self):
+        from scanner.constants import locate_reason_hint, locate_reason_label
+        self.assertEqual(locate_reason_label("whatever"), "whatever")
+        self.assertEqual(locate_reason_hint("whatever"), "")
+
 
 class PortMapPersistenceTest(_Base):
     """落库与裁剪。"""
@@ -227,6 +267,36 @@ class PortMapPersistenceTest(_Base):
         self.assertEqual(history_store.save_port_map(sid, [], db_path=self.db), 0)
         self.assertEqual(
             history_store.save_port_map(sid, None, db_path=self.db), 0)
+
+    def test_resaving_same_snapshot_replaces_not_appends(self):
+        """同一快照重读一次转发表 —— 必须替换，否则端口记录翻倍、假报「换过端口」。"""
+        sid = self._snap(1000.0, [_dev("192.168.1.50", mac=self.MAC)])
+        sw = [_sw("10.0.0.2", "access-sw-1", [_pm(self.MAC, "Gi0/24")])]
+
+        self.assertEqual(history_store.save_port_map(sid, sw, db_path=self.db), 1)
+        self.assertEqual(history_store.save_port_map(sid, sw, db_path=self.db), 1)
+
+        r = history_store.locate_device(mac=self.MAC, db_path=self.db)
+        self.assertTrue(r["found"])
+        self.assertEqual(r["current"]["port_name"], "Gi0/24")
+        # 只有一条记录 → 没有「上一次」，也就不能报「换过端口」
+        self.assertIsNone(r["previous"])
+        self.assertFalse(r["moved"])
+        self.assertEqual(r["switch_count"], 1)
+
+    def test_resaving_can_shrink_to_new_state(self):
+        """重读后端口变了 —— 旧记录要被清掉，不能留下两条互相矛盾的当前端口。"""
+        sid = self._snap(1000.0, [_dev("192.168.1.50", mac=self.MAC)])
+        history_store.save_port_map(
+            sid, [_sw("10.0.0.2", "access-sw-1", [_pm(self.MAC, "Gi0/24")])],
+            db_path=self.db)
+        history_store.save_port_map(
+            sid, [_sw("10.0.0.2", "access-sw-1", [_pm(self.MAC, "Gi0/9")])],
+            db_path=self.db)
+
+        r = history_store.locate_device(mac=self.MAC, db_path=self.db)
+        self.assertEqual(r["current"]["port_name"], "Gi0/9")
+        self.assertIsNone(r["previous"])
 
     def test_prune_cascades_to_port_map_and_switch_map(self):
         """prune() 删旧快照时，端口映射必须跟着走（外键 CASCADE）。"""
@@ -282,6 +352,123 @@ class SwitchInfoBridgeTest(_Base):
     def test_port_mapping_defaults_to_real(self):
         from switch_mapper import PortMapping
         self.assertTrue(PortMapping(mac="AA:BB:CC:DD:EE:FF").port_is_real)
+
+
+class CollectSwitchPortMapsTest(_Base):
+    """扫描末尾的按需采集：`topology_discovery.collect_switch_port_maps`。
+
+    不发起真实 SNMP —— mock 掉 `_SnmpClient.get_system`（探测）与
+    `switch_mapper.map_switch_ports`（读转发表），只验证编排与降级语义。
+    """
+
+    PC_MAC = "AA:BB:CC:00:00:01"
+    SW_IP = "10.0.0.2"
+
+    def _switch_result(self, ip=SW_IP):
+        from scanner.models import ScanResult
+        return ScanResult(ip=ip, status="online", mac="00:11:22:33:44:55",
+                          device_class="交换机")
+
+    def _pc_result(self, ip="10.0.0.50"):
+        from scanner.models import ScanResult
+        return ScanResult(ip=ip, status="online", mac=self.PC_MAC,
+                          device_class="电脑")
+
+    def _run(self, results, fdb_map, snmp=None, **kw):
+        """fdb_map: {ip: SwitchInfo | Exception}；snmp: {ip: get_system 返回值}。
+
+        patch 对象记在 `self._map_mock` 上供断言 —— **不要再在 `with mock.patch(...)`
+        里调用本方法**：嵌套 patch 的 start/stop 顺序会错乱，把 `map_switch_ports`
+        永久替换成 MagicMock 泄漏给后续测试（曾把 test_snmp_v3 的两个用例打红）。
+        """
+        import topology_discovery as td
+        from switch_mapper import SwitchInfo
+
+        snmp = snmp if snmp is not None else {
+            self.SW_IP: {"sys_descr": "H3C Comware Software S5130",
+                         "sys_name": "access-sw-1"}}
+
+        def fake_map(ip, **_kw):
+            v = fdb_map.get(ip)
+            if isinstance(v, Exception):
+                raise v
+            return v if v is not None else SwitchInfo(ip=ip)
+
+        map_patch = mock.patch("switch_mapper.map_switch_ports",
+                               side_effect=fake_map)
+        self._map_mock = map_patch.start()
+        self.addCleanup(map_patch.stop)
+        for p in (mock.patch.object(td._SnmpClient, "get_system",
+                                    lambda self: snmp.get(self.ip, {})),):
+            p.start()
+            self.addCleanup(p.stop)
+        return td.collect_switch_port_maps(results, **kw)
+
+    def test_end_to_end_collect_then_save_then_locate(self):
+        """采集 → 落库 → 定位，整条链路一次跑通（本项功能的真正验收）。"""
+        from switch_mapper import PortMapping, SwitchInfo
+        info = SwitchInfo(ip=self.SW_IP, sys_name="access-sw-1", mappings=[
+            PortMapping(mac=self.PC_MAC, port_name="GE1/0/7",
+                        if_index=7, bridge_port=7),
+        ])
+        maps = self._run([self._switch_result(), self._pc_result()],
+                         {self.SW_IP: info})
+
+        self.assertEqual(len(maps), 1)
+        self.assertEqual(maps[0]["switch_name"], "access-sw-1")
+        self.assertTrue(maps[0]["mappings"][0]["port_is_real"])
+
+        sid = self._snap(1000.0, [_dev("10.0.0.50", mac=self.PC_MAC)])
+        history_store.save_port_map(sid, maps, db_path=self.db)
+
+        r = history_store.locate_device(mac=self.PC_MAC, db_path=self.db)
+        self.assertTrue(r["found"])
+        self.assertEqual(r["current"]["switch_name"], "access-sw-1")
+        self.assertEqual(r["current"]["port_name"], "GE1/0/7")
+        self.assertEqual(r["port_confidence"], "named")
+
+    def test_failed_switch_is_reported_not_dropped(self):
+        """读不到转发表的交换机必须**带 error 返回**，否则库里查不到它、
+        locate 会把「读取失败」误报成「从未采集过」。"""
+        from switch_mapper import SwitchInfo
+        maps = self._run([self._switch_result()], {
+            self.SW_IP: SwitchInfo(ip=self.SW_IP, error="无法获取 MAC 转发表。")})
+
+        self.assertEqual(len(maps), 1)
+        self.assertEqual(maps[0]["error"], "无法获取 MAC 转发表。")
+        self.assertEqual(maps[0]["mappings"], [])
+
+        sid = self._snap(1000.0, [_dev("10.0.0.50", mac=self.PC_MAC)])
+        history_store.save_port_map(sid, maps, db_path=self.db)
+        r = history_store.locate_device(mac=self.PC_MAC, db_path=self.db)
+        self.assertEqual(r["reason"], history_store.LOCATE_SWITCH_SCAN_FAILED)
+
+    def test_exception_while_reading_table_becomes_error_entry(self):
+        maps = self._run([self._switch_result()],
+                         {self.SW_IP: RuntimeError("boom")})
+        self.assertEqual(len(maps), 1)
+        self.assertIn("boom", maps[0]["error"])
+        self.assertEqual(maps[0]["mappings"], [])
+
+    def test_no_candidate_returns_empty_without_probing(self):
+        """只有普通终端 → 连 SNMP 都不探，直接返回空（零网络开销）。"""
+        maps = self._run([self._pc_result()], {})
+        self.assertEqual(maps, [])
+        self._map_mock.assert_not_called()
+
+    def test_candidate_without_snmp_response_is_skipped(self):
+        """像交换机但 SNMP 不响应 → 读不了转发表，跳过而不是硬试。"""
+        maps = self._run([self._switch_result()], {}, snmp={})
+        self.assertEqual(maps, [])
+        self._map_mock.assert_not_called()
+
+    def test_offline_switch_is_not_a_candidate(self):
+        from scanner.models import ScanResult
+        off = ScanResult(ip=self.SW_IP, status="offline",
+                         mac="00:11:22:33:44:55", device_class="交换机")
+        maps = self._run([off], {})
+        self.assertEqual(maps, [])
+        self._map_mock.assert_not_called()
 
 
 if __name__ == "__main__":

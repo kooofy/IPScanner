@@ -269,6 +269,13 @@ python cli.py scan -r 10.0.0.1-10.0.0.200 --online-only --format csv -o result.c
 # 扫描并存为历史快照
 python cli.py scan -r 192.168.1.0/24 --save-snapshot --note "周一巡检"
 
+# 扫描时顺带读取各交换机转发表（记录"哪台设备在哪个口"），随快照落库
+python cli.py scan -r 192.168.1.0/24 --save-snapshot --switch-map
+
+# 定位：这台设备接在哪台交换机的哪个口（含与上次的端口变化）
+python cli.py locate --mac AA:BB:CC:DD:EE:FF
+python cli.py locate --ip 192.168.1.50 --format json
+
 # 对比资产变更（相对上一次快照；有变更时退出码为 2）
 python cli.py diff -r 192.168.1.0/24 --fail-on-change
 
@@ -288,6 +295,10 @@ python cli.py history --show 12 --format csv -o snapshot12.csv
 | `1` | 错误（如 `--fail-if-empty` 且无结果） |
 | `2` | 检测到变更（仅 `diff --fail-on-change`） |
 | `3` | 环境错误（如数据目录不可写） |
+| `4` | 未定位到设备（仅 `locate`；查询本身成功，是一个合法结论而非错误） |
+
+> `locate` 的数据来自扫描时按需采集的交换机转发表。没采集过时它**不会猜**，
+> 而是说明是哪一种「不知道」（从未采集 / 采集失败 / 转发表里没有它）并给出下一步动作。
 
 **语言**：`--lang zh-CN` / `--lang en-US`，默认跟随系统。
 
@@ -394,6 +405,7 @@ IPScanner/
 │  ├─ topology.py             #   网络拓扑视图（LLDP / CDP / 转发表）
 │  ├─ reports.py              #   冲突 / 子网利用率 / 变更报告
 │  ├─ audit.py                #   审计日志查看器
+│  ├─ locate.py               #   设备定位（MAC/IP/主机名 → 交换机端口 + 最近变化）
 │  └─ switch_port.py          #   交换机端口映射
 ├─ ui_logic.py                # 与 UI 解耦的纯业务逻辑（便于单测）
 ├─ ui_threads.py              # 后台线程（扫描 / mDNS / WMI / NetBIOS / 拓扑 / 历史查询 / OUI 更新）
@@ -445,7 +457,7 @@ IPScanner/
 ├─ change_detector.py         # 资产变更检测
 ├─ notifier.py                # 变更告警渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
 ├─ scheduler.py               # 定时扫描调度（schtasks / crontab，命令构造为纯函数）
-├─ history_store.py           # 历史快照存储（SQLite）
+├─ history_store.py           # 历史快照存储（SQLite：快照 / 设备 / 交换机端口映射）
 ├─ audit_log.py               # 审计日志（SQLite）
 ├─ mac_library.py             # MAC 地址库（mac_library.db）
 ├─ oui_database.py            # MAC OUI 厂商库查询（oui.db）

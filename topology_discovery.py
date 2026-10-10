@@ -934,6 +934,100 @@ def discover_topology(results, progress_callback=None, *,
     return topo
 
 
+def collect_switch_port_maps(results, *, communities=None, timeout: float = 1.0,
+                             snmp_v3_user=None, max_switches: int = 16,
+                             probe_workers: int = 24,
+                             progress_callback=None) -> List[dict]:
+    """读取各交换机的转发表，返回 `history_store.save_port_map()` 能吃的 dict 列表。
+
+    用途：给「定位查询」（`history_store.locate_device`）留一份
+    (MAC → 交换机端口) 的数据。**不建图、不算链路** —— 那是 `discover_topology`
+    的活；这里只回答「谁挂在哪个口」。
+
+    与拓扑发现共用同一套候选筛选（`_select_candidates`）和 SNMP 探测
+    （`_probe_snmp`），所以「扫描没勾 SNMP 也能识别交换机」这条性质在这里同样成立。
+
+    **失败也如实返回**：读不到转发表的交换机会带 `error` 返回（而不是被丢掉），
+    这样落库后 `locate_device()` 才能区分「从未采集」与「采集了但失败」——
+    延续本项目的诚实降级原则。
+
+    代价：每台交换机 5 次 SNMP walk，因此调用方**必须显式开启**（见扫描选项
+    「读取交换机转发表」），不能默认跑；且**必须在后台线程调用**，
+    否则会冻住界面。
+
+    Args:
+        results:  ScanResult 列表（不会被就地修改）。
+        communities: SNMP v2c 团体字候选；None = 与拓扑发现同一默认。
+        timeout:  单次 SNMP 请求超时（秒）。
+        snmp_v3_user: SnmpV3User 或 None，口径与扫描引擎一致（v3 优先、v2c 兜底）。
+        max_switches: 最多对多少台候选设备读转发表（每台 5 次 walk，故有上限）。
+        probe_workers: SNMP 探测并发度。
+        progress_callback(phase, current, total, message): 可选进度回调。
+
+    Returns:
+        `[{"switch_ip", "switch_name", "error", "mappings": [...]}, ...]`
+    """
+    from switch_mapper import SwitchInfo, map_switch_ports, switch_info_to_dict
+
+    candidates = _select_candidates(results, "")[:max_switches]
+    if not candidates:
+        return []
+
+    _progress(progress_callback, "switch_map", 0, len(candidates),
+              tr("正在识别可管理的交换机（SNMP）..."))
+    snapshots = _probe_snmp(candidates, communities, timeout, snmp_v3_user,
+                            True, probe_workers, progress_callback,
+                            max(len(candidates), 1))
+
+    # 只有真回了 SNMP 系统信息的才算可管理设备：读转发表靠的就是 SNMP，
+    # 连 sysDescr 都取不到的目标再试也是白等。
+    targets = []
+    for r in candidates:
+        payload = snapshots.get(getattr(r, "ip", ""))
+        if not payload:
+            continue
+        sys_descr, sys_name, client = payload
+        if not (sys_descr or sys_name):
+            continue
+        targets.append((r, client))
+
+    if not targets:
+        _progress(progress_callback, "switch_map", 0, 1,
+                  tr("没有设备响应 SNMP，跳过转发表读取"))
+        return []
+
+    infos: List[SwitchInfo] = []
+    done = 0
+
+    def _fetch(item):
+        r, client = item
+        return map_switch_ports(
+            r.ip,
+            community=client.working_community or "public",
+            timeout=max(client.timeout, 1.5),
+            snmp_v3_user=client.user,
+        )
+
+    def _on_result(item, info, exc):
+        nonlocal done
+        done += 1
+        r, _client = item
+        if exc is not None:
+            _log.warning("读取 %s 的转发表失败: %s", r.ip, exc)
+            # 异常也要落成一条带 error 的记录，否则这台交换机在库里"不存在"，
+            # locate 会把「读取失败」误报成「从未采集过」
+            info = SwitchInfo(ip=r.ip, error=tr("读取转发表异常: {err}").format(err=exc))
+        _progress(progress_callback, "switch_map", done, len(targets),
+                  tr("读取转发表: {ip}").format(ip=r.ip))
+        if info is not None:
+            infos.append(info)
+
+    # 并发度单独收窄：每台交换机是 5 次串行 walk，不像单次 GET 那么轻
+    run_bounded(targets, _fetch, max_workers=min(probe_workers, 8),
+                on_result=_on_result)
+    return [switch_info_to_dict(i) for i in infos]
+
+
 def _has_snmp_response(snapshots: Dict[str, tuple]) -> bool:
     """探测结果里是否至少有一台设备真的回了 SNMP 系统信息。"""
     return any((payload[0] or payload[1]) for payload in snapshots.values())

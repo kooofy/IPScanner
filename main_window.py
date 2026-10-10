@@ -454,6 +454,13 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.mdns_check = QAction(tr("mDNS 设备发现"), self, checkable=True)
         self.mdns_check.setToolTip(tr("扫描末尾向本地组播组发现 mDNS/DNS-SD 设备"))
 
+        # 读取交换机转发表：扫描末尾经 SNMP 读 BRIDGE-MIB，记下"哪台设备在哪个口"。
+        # **默认关**：每台交换机 5 次 SNMP walk，且会在网络里产生额外 SNMP 流量，
+        # 所以要用户显式开启（采集到的数据供「定位查询」使用）。
+        self.switch_map_check = QAction(tr("读取交换机转发表"), self, checkable=True)
+        self.switch_map_check.setToolTip(
+            tr("扫描末尾读取各交换机转发表，记录设备与端口的对应关系（需要 SNMP）"))
+
         # 筛选已由常驻的 FilterChipBar 承担（见上方 tb2），
         # 「视图 > 筛选」菜单与 chip 共用 _set_filter() 这一个入口。
 
@@ -699,6 +706,13 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         act_history_query.triggered.connect(self._open_history_query)
         analysis_menu.addAction(act_history_query)
 
+        act_locate = QAction(tr("设备定位..."), self)
+        act_locate.setIcon(_mi(QStyle.SP_ComputerIcon))
+        act_locate.setShortcut(QKeySequence("Ctrl+L"))
+        act_locate.setToolTip(tr("按 MAC / IP / 主机名查出它接在哪台交换机的哪个端口"))
+        act_locate.triggered.connect(self._open_locate_dialog)
+        analysis_menu.addAction(act_locate)
+
         analysis_menu.addSeparator()
 
         self.act_conflict = QAction(tr("冲突检测"), self)
@@ -767,6 +781,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
         self.mdns_check.setIcon(_mi(QStyle.SP_FileDialogInfoView))
         settings_menu.addAction(self.mdns_check)
+
+        self.switch_map_check.setIcon(_mi(QStyle.SP_DriveNetIcon))
+        settings_menu.addAction(self.switch_map_check)
 
         settings_menu.addSeparator()
 
@@ -1137,6 +1154,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             "tcp_mode": self.tcp_scan_mode,
             "port_scan": self.port_scan_check.isChecked(),
             "mdns": self.mdns_check.isChecked(),
+            "switch_map": self.switch_map_check.isChecked(),
         }
 
     def _apply_scan_preset(self, name: str):
@@ -1160,6 +1178,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             self._sync_tcp_mode_menu()
         self.port_scan_check.setChecked(bool(cfg.get("port_scan", False)))
         self.mdns_check.setChecked(bool(cfg.get("mdns", True)))
+        self.switch_map_check.setChecked(bool(cfg.get("switch_map", False)))
         protos = [p for p in (cfg.get("protocols") or []) if p in PROTOCOL_PORTS]
         if protos:
             self.selected_protocols = protos
@@ -1397,6 +1416,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.port_scan_check.setChecked(s.value("scan/port_scan", False, type=bool))
         self.mdns_discovery = s.value("scan/mdns", True, type=bool)
         self.mdns_check.setChecked(self.mdns_discovery)
+        # 默认关：需要 SNMP，且会在网络里产生额外流量（见控件创建处注释）
+        self.switch_map_check.setChecked(
+            s.value("scan/switch_map", False, type=bool))
         self.tcp_scan_mode = s.value("scan/tcp_mode", "connect", type=str)
         if self.tcp_scan_mode not in ("connect", "syn", "udp"):
             self.tcp_scan_mode = "connect"
@@ -1506,6 +1528,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("scan/max_threads", self.threads_spin.value())
         s.setValue("scan/port_scan", self.port_scan_check.isChecked())
         s.setValue("scan/mdns", self.mdns_check.isChecked())
+        s.setValue("scan/switch_map", self.switch_map_check.isChecked())
         s.setValue("scan/tcp_mode", self.tcp_scan_mode)
         s.setValue("scan/level", self.scan_level)
         s.setValue("scan/protocols", self.selected_protocols)

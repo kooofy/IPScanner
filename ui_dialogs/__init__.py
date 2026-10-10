@@ -9,6 +9,7 @@ from .audit import AuditLogDialog
 from .credentials import SnmpV3CredentialDialog, WmiCredentialDialog
 from .history import HistoryCompareDialog, HistoryQueryDialog
 from .library import DeviceEditDialog, MacLibraryDialog
+from .locate import LocateDeviceDialog
 from .reports import (ChangeReportDialog, ConflictReportDialog,
                       SubnetUtilizationDialog)
 from .switch_port import SwitchPortDialog
@@ -20,5 +21,5 @@ __all__ = [
     "TopologyDialog",
     "WmiCredentialDialog", "SnmpV3CredentialDialog",
     "ConflictReportDialog", "SubnetUtilizationDialog", "ChangeReportDialog",
-    "AuditLogDialog", "SwitchPortDialog",
+    "AuditLogDialog", "SwitchPortDialog", "LocateDeviceDialog",
 ]

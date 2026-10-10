@@ -475,5 +475,99 @@ class LegacyCodepageTest(unittest.TestCase):
             self.assertEqual(kw["encoding"], "utf-8")
 
 
+class LocateCommandTest(unittest.TestCase):
+    """`locate` 子命令：文本可读、JSON 语言无关、退出码 4 表示「没定位到」。"""
+
+    MAC = "AA:BB:CC:DD:EE:FF"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "locate.db")
+        import history_store
+        self.hs = history_store
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
+    def _seed(self, with_switch_data=True):
+        sid = self.hs.save_snapshot(
+            [{"ip": "192.168.1.50", "status": "online", "mac": self.MAC,
+              "hostname": "FIN-PC-01"}], db_path=self.db)
+        if with_switch_data:
+            self.hs.save_port_map(sid, [{
+                "switch_ip": "10.0.0.2", "switch_name": "access-sw-1", "error": "",
+                "mappings": [{"mac": self.MAC, "port_name": "Gi0/24",
+                              "port_is_real": True}],
+            }], db_path=self.db)
+        return sid
+
+    def test_found_text_shows_switch_and_port(self):
+        self._seed()
+        code, out, _err = _run_main(["locate", "--mac", self.MAC, "--db", self.db])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("access-sw-1", out)
+        self.assertIn("Gi0/24", out)
+        self.assertIn("FIN-PC-01", out)          # 只给 MAC 也要补齐主机名
+
+    def test_found_json_is_language_neutral(self):
+        """JSON 里必须是规范值（reason / port_source），不能是中文文案。"""
+        self._seed()
+        code, out, _err = _run_main(["locate", "--mac", self.MAC, "-f", "json",
+                                     "--db", self.db])
+        self.assertEqual(code, cli.EXIT_OK)
+        data = json.loads(out)
+        self.assertTrue(data["found"])
+        self.assertEqual(data["port_confidence"], "named")
+        self.assertEqual(data["current"]["port_source"], "if_name")
+        self.assertEqual(data["reason"], "")
+
+    def test_locate_by_ip(self):
+        self._seed()
+        code, out, _err = _run_main(["locate", "--ip", "192.168.1.50",
+                                     "--db", self.db])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn(self.MAC, out)
+
+    def test_not_found_exits_4_with_reason_and_hint(self):
+        """有快照但没采集过转发表 → 退出码 4（不是 1），且要给出下一步动作。"""
+        self._seed(with_switch_data=False)
+        code, out, _err = _run_main(["locate", "--mac", self.MAC, "--db", self.db])
+        self.assertEqual(code, cli.EXIT_NOT_FOUND)
+        self.assertNotEqual(code, cli.EXIT_ERROR)
+        self.assertIn("从未采集过交换机转发表", out)
+        self.assertIn("--switch-map", out)       # 提示里必须告诉用户怎么开
+
+    def test_mac_not_in_fdb_reason(self):
+        self._seed()
+        code, out, _err = _run_main(["locate", "--mac", "FF:FF:FF:FF:FF:FF",
+                                     "-f", "json", "--db", self.db])
+        self.assertEqual(code, cli.EXIT_NOT_FOUND)
+        data = json.loads(out)
+        self.assertFalse(data["found"])
+        self.assertEqual(data["reason"], "mac_not_in_fdb")
+
+    def test_empty_db_reports_no_device(self):
+        """空库必须报 no_device，不能拿 no_switch_data 搪塞（两者含义不同）。"""
+        code, out, _err = _run_main(["locate", "--mac", self.MAC, "-f", "json",
+                                     "--db", self.db])
+        self.assertEqual(code, cli.EXIT_NOT_FOUND)
+        self.assertEqual(json.loads(out)["reason"], "no_device")
+
+    def test_requires_exactly_one_selector(self):
+        """--mac / --ip / --hostname 互斥且必填 —— 三者都不给应直接报参数错误。"""
+        with self.assertRaises(SystemExit) as cm:
+            cli.build_parser().parse_args(["locate"])
+        self.assertEqual(cm.exception.code, 2)
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["locate", "--mac", "a", "--ip", "b"])
+
+    def test_switch_map_flag_is_accepted_by_scan(self):
+        """--switch-map 必须在 scan 上可解析（真扫网段不在此测，见 test_locate 的采集测试）。"""
+        args = cli.build_parser().parse_args(
+            ["scan", "-r", "192.168.1.0/24", "--switch-map", "--save-snapshot"])
+        self.assertTrue(args.switch_map)
+
+
 if __name__ == "__main__":
     unittest.main()
