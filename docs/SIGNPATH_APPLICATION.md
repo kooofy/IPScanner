@@ -38,16 +38,22 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 
 ---
 
-## 3. 申请时要填的四个字段（可直接粘贴）
+## 3. 申请时要填的表单字段（可直接粘贴）
 
 提交入口：<https://signpath.org/apply.html>
 
 | 字段 | 填写内容 |
 |---|---|
+| Homepage URL | `https://github.com/kooofy/IPScanner` |
 | Project repository URL | `https://github.com/kooofy/IPScanner` |
 | License | `GPL-3.0`（仓库根目录有 [`LICENSE`](../LICENSE)） |
 | Download page URL | `https://github.com/kooofy/IPScanner/releases` |
 | Description | 见下方引文 |
+
+> ⚠ **`Homepage URL` 与 `Download page URL` 别填反**：前者是「项目主页」，
+> 表单说明里明确写了「可以是专门网站，**也可以是仓库页**」—— 本项目没有独立官网，
+> 填仓库页即可（同一行两栏填同一个 URL 是正常的，不是笔误）。
+> 后者必须指向**能免费下载产物**的 Releases 页，别填仓库首页。
 
 > IPScanner is an open-source LAN scanning and asset-inventory tool for
 > Windows-centric networks, written in Python + PyQt5 and licensed under GPL-3.0.
