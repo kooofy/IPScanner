@@ -36,6 +36,8 @@ audit_log.db
 audit_log.db-shm
 audit_log.db-wal
 crash.log
+# 通知去重状态（运行期产物，会自动重建；删掉只会让下次可能重复告警一次）
+alert_dedup.json
 
 # i18n 审计脚本生成的待翻译清单（工作产物，不入库）
 i18n/_todo_*.json

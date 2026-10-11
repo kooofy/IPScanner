@@ -28,7 +28,7 @@ IP 冲突排查**等日常运维场景。
 | 账号 / 上云 | **不需要** | 不需要 | 不需要 | 不需要 |
 | 命令行 / 自动化 | **有**（JSON / CSV，退出码语义固定） | 无 | 无 | 无 |
 | 历史快照 + 变更对比 | **有** | 无 | 无 | 有（Change Log） |
-| 定时扫描 + 告警 | **有**（系统计划任务 + 四类通知渠道） | 无 | 无 | 有 |
+| 定时扫描 + 告警 | **有**（系统计划任务 + 四类渠道 + 维护窗口/静音/去重） | 无 | 无 | 有（无 mute 窗口） |
 | SNMP / 拓扑 | **有**（LLDP/CDP + BRIDGE-MIB，逐级退化不编造链路） | 无 | 无（拓扑另售） | 有（网络图，手工拖拽） |
 | 风险评分 | **有**（0–100 服务暴露面） | 无 | 无 | 无 |
 | 源码可审计 | **是** | 否 | 否 | 否 |
@@ -133,7 +133,8 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
   **设备指纹**（主机名 / 厂商 / 型号 / 序列号）把同一台认回来，报「随机 MAC 重现」
   而不是「新增 + 消失」；指纹对不上时如实报，不猜。
 - **定时扫描 + 变更告警**：注册为系统计划任务（Windows `schtasks` / Linux·macOS `crontab`），
-  无人值守地周期性扫描并在资产变化时推送告警到 Webhook / 企业微信 / 钉钉 / 邮件
+  无人值守地周期性扫描并在资产变化时推送告警到 Webhook / 企业微信 / 钉钉 / 邮件；
+  支持**维护窗口 / 静音 / 通知去重**，不让告警变成噪声源
   （零第三方依赖；敏感值支持 `env:` 间接引用，不落盘）。
 - **IP 冲突检测**：识别同一 IP 对应多个 MAC 等异常，按严重级别分级。
 - **子网利用率**：按 `/24` 聚合统计在线/离线数量与利用率。
@@ -275,6 +276,10 @@ python cli.py scan -r 192.168.1.0/24 --save-snapshot --note "周一巡检"
 # 扫描时顺带读取各交换机转发表（记录"哪台设备在哪个口"），随快照落库
 python cli.py scan -r 192.168.1.0/24 --save-snapshot --switch-map
 
+# 有变更时推送告警（走 notify.json 里的渠道与告警策略）
+python cli.py scan -r 192.168.1.0/24 --save-snapshot --notify
+python cli.py scan -r 192.168.1.0/24 --save-snapshot --notify --no-policy  # 忽略维护窗口/静音/去重
+
 # 定位：这台设备接在哪台交换机的哪个口（含与上次的端口变化）
 python cli.py locate --mac AA:BB:CC:DD:EE:FF
 python cli.py locate --ip 192.168.1.50 --format json
@@ -393,6 +398,47 @@ python cli.py schedule --unregister
 - **无变更不发告警**：每 30 分钟推一条"无变更"只会把渠道变成噪音，
   真正需要被看见的变更反而被淹没；首次运行只告知"基线已建立"。
 
+**告警抑制**：光有渠道还不够 —— 同类产品被抱怨最多的一条就是**告警噪声**
+（打印机检修期间每半小时报一次"设备消失"、凌晨备份窗口里推一堆下线通知）。
+同一个 `notify.json` 里可以声明三类规则，**只作用于通知**：
+
+```json
+{
+  "channels": [ ... ],
+
+  "dedup": {"window_minutes": 60, "key": "device_type"},
+
+  "maintenance_windows": [
+    {"name": "夜间备份", "days": ["mon", "tue", "wed", "thu", "fri"],
+     "start": "01:00", "end": "04:00",
+     "ranges": ["10.0.0.0/24"], "types": ["device_gone"]}
+  ],
+
+  "mutes": [
+    {"name": "打印机检修", "mac": "AA:BB:CC:DD:EE:FF", "until": "2026-11-01"},
+    {"name": "测试网段", "range": "10.9.0.0/16", "types": ["new_device"]}
+  ]
+}
+```
+
+- **维护窗口**：`days` 可写 `mon`/`monday`/`周一`/`0`，或用 `工作日` / `周末` 简写；
+  省略 `days` 表示每天。支持跨午夜（`23:00`–`02:00`，此时 `days` 指**起始日**）。
+  `ranges` / `devices` / `types` 都是可选的额外限定，三者与「时段」是**与**关系。
+- **静音**：`mac` / `ip` / `range` 任选，可叠加 `types` 与 `until`。
+  `until` 只写日期（`2026-11-01`）时按**当天结束**处理。什么都没写的静音规则
+  会静音一切，属于漏配字段，会被忽略并记 warning。
+- **通知去重**：同一 `(设备, 变更类型)` 在 `window_minutes` 内只发一次；
+  `key` 可选 `device_type`（默认）/ `device` / `ip` / `type`。
+  **状态落盘**（数据目录 `alert_dedup.json`）—— 定时扫描由系统调度器以**独立进程**
+  拉起，只存内存等于没有去重。
+- **抑制 ≠ 隐藏**：被抑制的变更**照常计入退出码与审计日志**，只是不发通知。
+  「静音」是给人耳的，「退出码」是给机器的 —— CI 需要真实信号，不该被静音吃掉。
+  部分抑制时，告警正文会附一行「另有 N 条被抑制」，让收件人知道全貌。
+- **发送成功才记账**：渠道全部失败时不写去重状态，下一轮会重试 ——
+  否则一次网络抖动就会让这条变更永远沉默。
+- **失败安全**：配置写错一律**不抑制**（宁可多报，不可漏报）。
+- 需要排障时用 `scan --notify --no-policy` 忽略全部策略。
+
 ---
 
 ## 项目结构
@@ -474,6 +520,7 @@ IPScanner/
 ├─ change_detector.py         # 资产变更检测
 ├─ device_fingerprint.py      # 随机化 MAC 识别：设备指纹（主机名/厂商/型号/序列号）配对
 ├─ notifier.py                # 变更告警渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
+├─ alert_policy.py            # 告警抑制：维护窗口 / 静音 / 通知去重（状态落盘，零依赖）
 ├─ scheduler.py               # 定时扫描调度（schtasks / crontab，命令构造为纯函数）
 ├─ history_store.py           # 历史快照存储（SQLite：快照 / 设备 / 交换机端口映射）
 ├─ audit_log.py               # 审计日志（SQLite）
@@ -540,6 +587,8 @@ IPScanner/
 | `audit_log.db` | 审计日志 |
 | `mac_library.db` | 本地 MAC 地址库（含内部设备信息） |
 | `oui.db` | MAC 厂商库（随版本内置，支持在线更新） |
+| `notify.json` | 通知渠道与告警策略（维护窗口 / 静音 / 去重） |
+| `alert_dedup.json` | 通知去重状态（上次发送时刻；自动生成，可安全删除） |
 | `service_fingerprints.json` | 服务版本指纹规则（随版本内置，可在数据目录放置同名文件覆盖更新） |
 | `notify.json` | 定时扫描的变更告警通知渠道配置（见「定时扫描与变更告警」） |
 | `ipscanner.log` | 运行日志（1 MB × 3 轮转） |
@@ -665,7 +714,7 @@ python -m ruff check .
 
 - [x] SNMP v3（USM 认证与加密）
 - [x] SNMPv3 的 CLI 参数（`--snmpv3-user` 等；口令走环境变量，避免出现在进程列表）
-- [x] 定时扫描 + 资产变更告警（`schedule` 子命令 + 四类通知渠道）
+- [x] 定时扫描 + 资产变更告警（`schedule` 子命令 + 四类通知渠道 + 维护窗口/静音/去重）
 - [x] 服务版本指纹库（外部可更新数据文件，覆盖 Telnet/VNC/MySQL/Redis/PostgreSQL/MongoDB/RDP 等）
 - [ ] IPv6 扫描支持
 - [ ] WinRM 走 HTTPS(5986) + 可选的证书校验开关（当前固定 HTTP/5985）

@@ -510,11 +510,13 @@ def cmd_scan(args) -> int:
 
     # 变更告警：基线必须在**保存本次快照之前**取到，否则拿到的就是自己
     notifiers = []
+    notify_config = {}
     baseline_id = None
     if getattr(args, "notify", False):
         import notifier as _notifier
-        notifiers = _notifier.build_notifiers(
-            _notifier.load_config(getattr(args, "notify_config", None)))
+        notify_config = _notifier.load_config(
+            getattr(args, "notify_config", None))
+        notifiers = _notifier.build_notifiers(notify_config)
         if not notifiers:
             warn("已指定 --notify，但没有可用的通知渠道。"
                  "请检查通知配置（默认：数据目录下的 notify.json）")
@@ -569,19 +571,59 @@ def cmd_scan(args) -> int:
         emit(render_table(records, _RESULT_COLUMNS), args.output)
 
     if notifiers:
-        _notify_changes(results, baseline_id, notifiers, args)
+        _notify_changes(results, baseline_id, notifiers, args, notify_config)
     return EXIT_OK
 
 
-def _notify_changes(results, baseline_id, notifiers, args) -> None:
+def _load_alert_policy(args, config):
+    """从通知配置里编译告警策略。
+
+    返回 ``(policy, store)``；``--no-policy`` 或配置里没有任何策略时返回
+    ``(None, None)`` —— 调用方据此走「原样发送」的老路径，行为完全不变。
+    """
+    if getattr(args, "no_policy", False):
+        return None, None
+    import alert_policy as _policy
+    policy = _policy.AlertPolicy.from_config(config)
+    if not policy.enabled:
+        return None, None
+    return policy, policy.make_store()
+
+
+def _log_suppressed(result) -> None:
+    """把「哪些原因各抑制了几条」写进日志。
+
+    **CLI 文案不翻译**（与 `cli.py` 里其它所有消息一致），因此这里用中文
+    字面量而不是 `alert_policy.suppress_reason_label()`。
+    """
+    import alert_policy as _policy
+    names = {
+        _policy.SUPPRESS_MAINTENANCE: "维护窗口",
+        _policy.SUPPRESS_MUTED: "静音",
+        _policy.SUPPRESS_DEDUPED: "去重冷却",
+    }
+    parts = [f"{names.get(reason, reason)} {n} 条"
+             for reason, n in sorted(result.count_by_reason().items())]
+    log(f"告警策略抑制了 {len(result.suppressed)} 条变更"
+        f"（{' / '.join(parts)}）")
+
+
+def _notify_changes(results, baseline_id, notifiers, args, config=None) -> None:
     """对比基线快照并推送变更告警。
 
     **无变更时不发告警。** 定时任务每 30 分钟推一条"无变更"会把渠道变成噪音，
     真正需要被看见的变更反而会被淹没。同理，首次运行只告知"基线已建立"。
+
+    有变更时还要再过一层**告警策略**（`alert_policy.py`：维护窗口 / 静音 /
+    通知去重）。被抑制的条目不发送，但**照常留痕**，且**不影响退出码** ——
+    「静音」是给人耳的，「退出码」是给机器的，CI 需要真实信号。
     """
     import change_detector as cd
     import history_store
     import notifier as _notifier
+
+    policy, store = _load_alert_policy(args, config)
+    suppressed_note = ""
 
     if baseline_id is None:
         if getattr(args, "save_snapshot", False):
@@ -603,16 +645,46 @@ def _notify_changes(results, baseline_id, notifiers, args) -> None:
         if not changes:
             log(f"变更对比（当前扫描 → 快照 #{baseline_id}）：无变更，不发送告警")
             return
+        label = f"当前扫描 → 快照 #{baseline_id}"
+
+        if policy is not None:
+            decision = policy.evaluate(changes, store=store)
+            if decision.suppressed:
+                _log_suppressed(decision)
+            if not decision.notify:
+                warn(f"变更对比（{label}）：{cd.get_change_summary(changes)}"
+                     f" —— 全部 {len(decision.suppressed)} 条被策略抑制，未发送告警")
+                return
+            changes = decision.notify
+            suppressed_note = _policy_note(decision.suppressed)
+
         subject, body = _notifier.format_change_message(
-            changes, cd.get_change_summary(changes),
-            label=f"当前扫描 → 快照 #{baseline_id}")
+            changes, cd.get_change_summary(changes), label=label)
+        if suppressed_note:
+            body = f"{body}\n\n{suppressed_note}"
 
     log(f"发送变更告警：{subject}")
+    any_ok = False
     for name, ok, err in _notifier.send_all(notifiers, subject, body):
         if ok:
+            any_ok = True
             log(f"  已发送 [{name}]")
         else:
             warn(f"  发送失败 [{name}]: {err}")
+
+    # **发送成功才记账**：失败不记，下一轮会重试 —— 否则一次网络抖动
+    # 就会让这条变更永远沉默（去重把它当成"已经报过了"）。
+    if any_ok and policy is not None and store is not None and baseline_id is not None:
+        from datetime import datetime
+        now = datetime.now()
+        store.record(changes, now)
+        store.prune(now)
+        store.save()
+
+
+def _policy_note(suppressed) -> str:
+    import alert_policy as _policy
+    return _policy.render_suppression_note(suppressed)
 
 
 def _ip_sort_key(ip: str):
@@ -1262,6 +1334,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="检测到资产变更时推送告警（需先配置通知渠道）")
     sp.add_argument("--notify-config", metavar="文件",
                     help="通知配置文件路径（默认：数据目录下的 notify.json）")
+    sp.add_argument("--no-policy", action="store_true",
+                    help="忽略告警策略（维护窗口 / 静音 / 去重），所有变更都发送")
     sp.add_argument("--fail-if-empty", action="store_true", help="无任何结果时返回退出码 1")
     sp.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table",
                     help="输出格式（默认 table）")

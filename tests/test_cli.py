@@ -717,5 +717,156 @@ class WatchCommandTest(unittest.TestCase):
         self.assertTrue(args.mdns_active)
 
 
+class _FakeNotifier:
+    """记录调用的假渠道（不发起任何真实请求）。"""
+
+    def __init__(self, name="fake", fail=False):
+        self.name = name
+        self.fail = fail
+        self.sent = []
+
+    def send(self, subject, body):
+        if self.fail:
+            raise RuntimeError("channel down")
+        self.sent.append((subject, body))
+
+
+class NotifyPolicyTest(unittest.TestCase):
+    """`scan --notify` 与告警策略（维护窗口 / 静音 / 去重）的接线。
+
+    这里直接调 `cli._notify_changes`：它才是"要不要发"的决策点，
+    比走 `main()` 更容易把基线、配置、假渠道摆好。
+    """
+
+    GONE_MAC = "AA:BB:CC:00:00:01"      # 上次在线、本次消失
+    NEW_MAC = "AA:BB:CC:00:00:02"       # 本次新出现
+    GONE_IP = "10.0.0.5"
+    NEW_IP = "10.0.0.6"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.db = os.path.join(self.tmp, "hist.db")
+        self.state = os.path.join(self.tmp, "dedup.json")
+        history_store.save_snapshot([
+            {"ip": self.GONE_IP, "status": "online", "mac": self.GONE_MAC,
+             "hostname": "prn-1"},
+        ], note="基线", db_path=self.db)
+        self.baseline_id = history_store.list_snapshots(
+            db_path=self.db)[-1]["id"]
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
+    def _args(self, *extra):
+        return cli.build_parser().parse_args(
+            ["scan", "-r", "10.0.0.0/24", "--notify", "--db", self.db,
+             *extra])
+
+    def _results(self):
+        # 只保留"新设备"—— 消失的那台由基线提供
+        return [ScanResult(ip=self.NEW_IP, status="online",
+                           mac=self.NEW_MAC, hostname="nb-1")]
+
+    def _run(self, config, notifiers, *extra):
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli._notify_changes(self._results(), self.baseline_id,
+                                notifiers, self._args(*extra), config)
+
+    # ── 基本接线 ──
+
+    def test_without_policy_everything_is_sent(self):
+        n = _FakeNotifier()
+        self._run({}, [n])
+        self.assertEqual(len(n.sent), 1)
+        body = n.sent[0][1]
+        self.assertIn(self.GONE_IP, body)     # 设备消失
+        self.assertIn(self.NEW_IP, body)      # 新增设备
+
+    def test_empty_config_is_a_noop(self):
+        policy, store = cli._load_alert_policy(self._args(), {})
+        self.assertIsNone(policy)
+        self.assertIsNone(store)
+
+    def test_no_policy_flag_bypasses_everything(self):
+        cfg = {"mutes": [{"name": "全静音", "range": "10.0.0.0/24"}]}
+        n = _FakeNotifier()
+        self._run(cfg, [n], "--no-policy")
+        self.assertEqual(len(n.sent), 1)
+        self.assertIn(self.NEW_IP, n.sent[0][1])
+
+    def test_no_policy_flag_parses(self):
+        args = cli.build_parser().parse_args(["scan", "-r", "10.0.0.0/24"])
+        self.assertFalse(args.no_policy)
+
+    # ── 静音 ──
+
+    def test_mute_suppresses_only_that_device(self):
+        cfg = {"mutes": [{"name": "已知新增", "mac": self.NEW_MAC}]}
+        n = _FakeNotifier()
+        self._run(cfg, [n])
+        self.assertEqual(len(n.sent), 1)
+        body = n.sent[0][1]
+        self.assertIn(self.GONE_IP, body)
+        # 被抑制的那条要在正文里留痕（不静默）
+        self.assertIn(self.NEW_IP, body)
+
+    def test_all_suppressed_sends_nothing(self):
+        cfg = {"mutes": [{"name": "整段静音", "range": "10.0.0.0/24"}]}
+        n = _FakeNotifier()
+        self._run(cfg, [n])
+        self.assertEqual(n.sent, [])
+
+    # ── 维护窗口 ──
+
+    def test_maintenance_window_suppresses(self):
+        # 覆盖"现在"的整日窗口（00:00–23:59），与运行时刻无关
+        cfg = {"maintenance_windows": [
+            {"name": "全天维护", "start": "00:00", "end": "23:59"}]}
+        n = _FakeNotifier()
+        self._run(cfg, [n])
+        self.assertEqual(n.sent, [])
+
+    def test_window_scoped_to_other_subnet_does_not_suppress(self):
+        cfg = {"maintenance_windows": [
+            {"name": "别的网段", "start": "00:00", "end": "23:59",
+             "ranges": ["192.168.0.0/16"]}]}
+        n = _FakeNotifier()
+        self._run(cfg, [n])
+        self.assertEqual(len(n.sent), 1)
+
+    # ── 去重 ──
+
+    def test_dedup_records_state_after_successful_send(self):
+        cfg = {"dedup": {"window_minutes": 60, "path": self.state}}
+        n = _FakeNotifier()
+        self._run(cfg, [n])
+        self.assertEqual(len(n.sent), 1)
+        self.assertTrue(os.path.exists(self.state),
+                        "发送成功后应写下去重状态（定时扫描是独立进程）")
+
+    def test_dedup_second_run_is_suppressed(self):
+        cfg = {"dedup": {"window_minutes": 60, "path": self.state}}
+        first = _FakeNotifier()
+        self._run(cfg, [first])
+        self.assertEqual(len(first.sent), 1)
+
+        second = _FakeNotifier()
+        self._run(cfg, [second])
+        self.assertEqual(second.sent, [], "冷却窗口内不该重复告警")
+
+    def test_dedup_does_not_record_when_send_fails(self):
+        """发送失败不记账 —— 否则一次网络抖动会让这条变更永远沉默。"""
+        cfg = {"dedup": {"window_minutes": 60, "path": self.state}}
+        self._run(cfg, [_FakeNotifier(fail=True)])
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_dedup_records_when_at_least_one_channel_succeeds(self):
+        cfg = {"dedup": {"window_minutes": 60, "path": self.state}}
+        self._run(cfg, [_FakeNotifier("bad", fail=True), _FakeNotifier("ok")])
+        self.assertTrue(os.path.exists(self.state))
+
+
 if __name__ == "__main__":
     unittest.main()
