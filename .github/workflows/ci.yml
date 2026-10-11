@@ -261,7 +261,18 @@ jobs:
       - name: pip-audit
         # 只审**运行时**依赖：开发依赖（pyinstaller 等）不进发布产物，
         # 它的漏洞不影响用户，但会制造"必须升级才能出包"的假压力。
-        # 本项目依赖极少（PyQt5 三件套 + openpyxl + xlrd），跑得飞快；
-        # 它同时也是「零第三方依赖」这条身份的守卫 —— 哪天有人顺手加了个包，
-        # 门禁会问一句。
-        run: python -m pip_audit -r requirements.txt
+        # 本项目依赖极少（PyQt5 三件套 + openpyxl + xlrd），它同时也是
+        # 「零第三方依赖」这条身份的守卫 —— 哪天有人顺手加了个包，门禁会问一句。
+        #
+        # ⚠ **`--no-deps` 是刻意加的**：完整解析要联网拉 PyPI 元数据，而 pip-audit
+        #   默认 socket 超时只有 **15 秒** —— 实测本机超时过一次、**CI 上直接失败过
+        #   一次**（而完整解析的结果同样是零漏洞）。一个**会随机红**的门禁比没有
+        #   门禁更糟（正是本节自己那条"假红会让人习惯性忽略红"）。
+        #   `--no-deps` 直接审 requirements.txt 里那 5 个精确锁定的包，不做解析，
+        #   又快又稳 —— 这正好也用上了 requirements.txt「全部锁到 ==」的规矩
+        #   （`--no-deps` 要求所有条目精确锁定，而 win32 下带环境标记的两行里
+        #   只有 `PyQt5-Qt5==5.15.2` 生效，`>=5.15.11` 那行会被过滤掉）。
+        #   代价：不覆盖传递依赖。本项目只有 `et_xmlfile`（openpyxl 带出来的）一个，
+        #   且已实测零告警；要复核就在本地跑一次不带 `--no-deps` 的。
+        # ⚠ `--timeout` 从默认 15 秒提到 60：15 秒在慢网络下会直接把门禁搞红。
+        run: python -m pip_audit -r requirements.txt --no-deps --timeout 60 --progress-spinner off
