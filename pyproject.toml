@@ -6,12 +6,12 @@
 # 本文件的作用是：① 集中声明项目元数据（版本、描述、Python 版本下限）；
 # ② 给静态检查工具（ruff）提供配置，避免散落 .flake8 / setup.cfg。
 #
-# 版本号唯一来源约定：本文件的 version 必须与 cli.py 的 __version__ 一致，
+# 版本号唯一来源约定：本文件的 version 必须与 version.py 的 __version__ 一致，
 # 由 tests/test_scaffolding.py::VersionSyncTest 强制校验。
 
 [project]
 name = "ipscanner"
-version = "1.7.7"
+version = "1.8.0"
 description = "局域网终端扫描与资产识别工具（PyQt5 GUI + 无头 CLI）"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -3,18 +3,24 @@
 本项目所有值得注意的改动都记录在这里。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-**版本号约定**：`1.7.x` 是发布线 —— 功能与修复都走 `1.7.N` 递增，minor 位不当
-「新功能」用（见 `version.py` 的说明）。一次发布 = 一个 `chore(release): 1.7.N`
-提交 + 一个 `v1.7.N` tag + 一个 GitHub Release。
+**版本号约定**：minor 位对应**路线图里程碑** —— `1.8.0` 兑现的就是
+[`docs/ROADMAP_V1.8.md`](docs/ROADMAP_V1.8.md) 里那句「一个 minor 只承载 4 项」。
+里程碑之内的修补与增量走 `1.8.N`。一次发布 = 一个 `chore(release): <版本>` 提交
++ 一个 `v<版本>` tag + 一个 GitHub Release。
+
+> `1.8.0` 是这条线**第一次按里程碑升位**。此前 `1.7.x` 一路是发布线、minor 位
+> 不当「新功能」用（`1.7.0` → `1.7.7`）；升位的依据是 v1.8 路线图**四项全部落地**
+> （见 `ROADMAP_V1.8.md` §7），版本号从此与路线图里程碑对齐。
 
 ---
 
-## [Unreleased]
+## [1.8.0] - 2026-10-11
 
-v1.8 的四项已全部落地（定位查询 / 被动发现 / 历史查询后台化 / 发布与可见性包），
-见 [`docs/ROADMAP_V1.8.md`](docs/ROADMAP_V1.8.md)。与 1.2 强耦合的两项
-（随机化 MAC 识别 / 告警抑制）也已在 v1.8 内一并做掉 —— 前者让变更**判定**可信，
-后者让变更**通知**不被噪声吃掉。
+v1.8 路线图的四项全部落地（定位查询 / 被动发现 / 历史查询后台化 / 发布与可见性包），
+见 [`docs/ROADMAP_V1.8.md`](docs/ROADMAP_V1.8.md)。其中「历史查询后台化」与
+「发布与可见性包」已随 **`1.7.7`** 发布；本版交付的是**定位查询**与**被动发现**，
+以及与 1.2 强耦合的两项（随机化 MAC 识别 / 告警抑制）—— 前者让变更**判定**可信，
+后者让变更**通知**不被噪声吃掉。另含「零利用安全体检」（路线图 §3 #3）的四刀。
 
 ### 新增
 - **SMB 方言 · 签名探测 —— 零利用安全体检第四刀**（路线图 §3 #3，v1.9）。
@@ -410,7 +416,8 @@ v1.8 的四项已全部落地（定位查询 / 被动发现 / 历史查询后台
 
 ---
 
-[Unreleased]: https://github.com/kooofy/IPScanner/compare/v1.7.7...HEAD
+[Unreleased]: https://github.com/kooofy/IPScanner/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/kooofy/IPScanner/compare/v1.7.7...v1.8.0
 [1.7.7]: https://github.com/kooofy/IPScanner/compare/v1.7.6...v1.7.7
 [1.7.6]: https://github.com/kooofy/IPScanner/compare/v1.7.5...v1.7.6
 [1.7.5]: https://github.com/kooofy/IPScanner/compare/v1.7.4...v1.7.5
