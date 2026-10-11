@@ -79,6 +79,16 @@ class ScanResult:
     netbios_user: str = ""              # 当前登录用户（NetBIOS <03> 名）
     netbios_mac: str = ""               # MAC 地址（NBSTAT 统计块，ARP 缺失时也能补到）
     netbios_error: str = ""             # 失败原因（成功时为空）             # 失败原因（成功时为空）
+    # ── 零利用安全体检：TLS 证书事实（v1.9 #3 第一刀）────────────────────
+    #
+    # `scanner.x509.parse_certificate()` 的结果，键见该函数文档。**只存事实、
+    # 不存结论** —— "过期 / 即将过期 / 自签名 / 弱算法"这些判定统一在
+    # `risk_rules.score_risk()` 里做，这样阈值只有一处、也能纯函数式地单测。
+    #
+    # 空 dict = 没探到证书（端口没开 / 不是 TLS / 握手失败），与"探到了但字段为空"
+    # 是两回事。多端口 HTTPS 时只保留**第一个**探到的证书：风险评分是"一台设备
+    # 一条结论"，而每个端口一条会让同一台设备刷出多条同义理由。
+    tls_cert: Dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         if self.discovery_method:

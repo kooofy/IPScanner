@@ -262,10 +262,17 @@ def result_to_record(r) -> dict:
 
 
 def _snapshot_devices(results) -> list:
-    """构造 history_store.save_snapshot 所需的设备字典列表。"""
+    """构造 history_store.save_snapshot 所需的设备字典列表。
+
+    探到 TLS 证书的设备会多带一个 `security_findings` 键（见
+    `history_store.tls_cert_facts`）—— 与 GUI 走的是同一条落库路径，
+    免得"命令行存的快照没有安全事实"。
+    """
+    from history_store import tls_cert_facts
+
     out = []
     for r in results:
-        out.append({
+        dev = {
             "ip": r.ip,
             "status": r.status,
             "mac": r.mac or "",
@@ -277,7 +284,11 @@ def _snapshot_devices(results) -> list:
             "location": r.location or "",
             "user": r.user or "",
             "remark": r.remark or "",
-        })
+        }
+        facts = tls_cert_facts(getattr(r, "tls_cert", None))
+        if facts:
+            dev["security_findings"] = facts
+        out.append(dev)
     return out
 
 

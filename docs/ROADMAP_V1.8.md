@@ -323,7 +323,7 @@ Python 聚合（4 万行 605 ms；`/16` × 20 快照量级会到秒级）。
 
 | 原编号 | 事项 | 去向 | 理由 |
 |---|---|---|---|
-| #3 | 零利用安全体检（TLS 到期 / SMB / 弱协议 / LLMNR·NBNS） | **v1.9** | 高价值但非「台账」主题；需先把新字段接进风险评分 |
+| #3 | 零利用安全体检（TLS 到期 / SMB / 弱协议 / LLMNR·NBNS） | **v1.9**（第一刀 TLS 已落地） | 高价值但非「台账」主题；需先把新字段接进风险评分 |
 | #4 | 维护窗口 / 告警抑制 / 通知去重 | ✅ **已落地**（1.2 完成后即可做，见下） | 依赖「持续状态」这一**前置** —— 1.2 交付后即可动工 |
 | #6 | 只读 HTTP API + 结构化 webhook | **v1.9** | 领域层零 Qt、接线即可，但受众是「集成派」，晚一轮 |
 | #7 | 互操作导出包（Nmap XML / Zabbix LLD / NetBox CSV / Oxidized） | **v1.9** | 同上；其中 **Nmap XML 产出**可提前到补丁轨道（一天换一生态） |
@@ -390,6 +390,59 @@ Python 聚合（4 万行 605 ms；`/16` × 20 快照量级会到秒级）。
 >   `tests/test_cli.py::NotifyPolicyTest`（12 项，含「发送失败不记账」这条回归守卫）。
 >   另用 `.git/_smoke_alert_policy.py` 起**真实本地 HTTP 服务**当 webhook，
 >   跑通 `notify.json → build_notifiers → post_json → _notify_changes` 整条链路。
+
+> **#3 落地记录（2026-10-11，第一刀：TLS 到期）**：本项含四类信号，一次性做完是
+> 一两周的量，且中途无法验收。于是按**能否独立验收**切成四刀，先做最干净的一刀 ——
+> **TLS 证书到期**（半天量级）。切它的理由：
+>
+> 1. **不新增任何探测**。证书来自扫描**本来就要做**的那次 HTTPS 握手，只是顺手
+>    把 DER 也读出来。多发包为零 → 「零利用」这条红线天然成立。
+> 2. **顺带修掉一个真实老 bug**。`scanner/http.py` 的 HTTPS banner 一直在
+>    `verify_mode = CERT_NONE` 下读 `cert["subject"]` 取 CN —— 而该模式下
+>    `getpeercert()` 返回的是**空 dict**（不是 None、也不报错），所以那十行
+>    **从未执行过**，banner 恒为 `"…: unknown service"`。实测 `api.github.com`
+>    的真实 CN 是 `*.github.com`。这个 bug 是白捡的。
+> 3. **半天能做完且能验收**。做完立刻在风险列看到新理由，且不影响其余三刀。
+>
+> - **零依赖约束下的唯一路径**：`cryptography` 未安装（项目身份是零第三方依赖，
+>   不为这一项破例）；`SSLContext.set_verify(CERT_NONE, cb)` 这个老办法在
+>   Python 3.13 已被移除（实测 `AttributeError`）。于是只剩
+>   `getpeercert(binary_form=True)` 拿 DER 自己走查 —— 新增 `scanner/x509.py`，
+>   手写**最小** DER 走查，按 RFC 5280 §4.1 顺序定位字段，只取九项，
+>   **不验签、不验链、不做信任判断**。
+> - **UTCTime 的两位年按 RFC 5280 §4.1.2.5.1 判**（50–99 → 19xx，00–49 → 20xx），
+>   **不是** `strptime("%y")` 的 POSIX 规则（69–99 → 19xx）。两者在 **50–68**
+>   这段不一样，用 `%y` 会把 2068 读成 1968 —— 有专门的边界用例钉住。
+> - **自签名只值 5 分（本刀最关键的标定）**。局域网设备管理面几乎人手一张自签
+>   证书，给高分会让整列风险分塌成一个数。真正的信号是「功能上已经坏了」
+>   （过期，40 分）与「有已知攻击」（MD5/SHA-1 25 分、密钥过短 20 分）。
+> - **落库用竖表 `security_findings`，不给 `devices` 加列**。`CREATE TABLE
+>   IF NOT EXISTS` 对已有库直接生效，而加列必须写 `ALTER TABLE` 迁移，每加一个
+>   信号就得再来一次；后面三刀的信号（SMB 方言与签名、LLMNR/NBNS 响应器、
+>   弱协议聚合）都是异质枚举/布尔，竖表天然容纳，**schema 不用再动**。
+>   与 `switch_map` / `port_map` 同一惯例：允许某次快照一行都没有，带外键 +
+>   CASCADE，`prune()` 自动清。
+> - **事实走既有的快照路径**（`save_snapshot` / `get_snapshot`），不是另开一个
+>   `save_security_findings()` —— 后者迟早会有人忘记调，而「命令行存的快照没有
+>   安全事实」这种不一致在界面上看不出来。
+> - **存事实，不存结论**。表里是 `(kind, value)` 规范代码（`tls_not_after` 等），
+>   没有"已过期 / 自签名"这种判定；阈值只活在 `risk_rules` 一处，日后调整可以
+>   从事实重新推导。
+> - **验证方式**：手写走查与 Python 自带解析器在**三台真实主机**（
+>   `api.github.com` 1010 字节 EC、`www.baidu.com` 2543 字节 RSA）+ 一份本地
+>   openssl 现生成的自签名证书上逐字段一致；fuzz 用「证书形状」生成器
+>   （实测非空率 **65.1%**，而纯随机字节是 **0%** —— 形状不对就立刻返回）+ 真实
+>   证书变异（28.4%），三种 × 8000 条，零未捕获异常。
+> - 实现见 `scanner/x509.py` + `scanner/http.py::read_https` +
+>   `risk_rules.tls_reasons()`；测试见 `tests/test_x509.py`（46 项，含**本地回环
+>   TLS 服务端**，不出网）、`tests/test_risk_rules.py::TlsReasonTest`（18 项）、
+>   `tests/test_history_store.py` 两个新类、`tests/test_ui_logic.py` /
+>   `tests/test_cli.py` / `tests/test_engine_scan_pipeline.py` 各一组接线用例。
+>   另用 `.git/_probe_tls_tests.py` 做**反向验证**：给 11 处关键逻辑逐个注入
+>   缺陷，确认对应测试真的会红。
+> - **剩余三刀仍未动工**：SMB 方言 / 签名（只发 NEGOTIATE，**绝不**尝试认证）、
+>   LLMNR / NBNS 响应器（只查询或只听，**绝不**投毒）、弱协议聚合。三者的
+>   `security_findings` 落库位置已就位，不需要再改 schema。
 
 > **资产表（建议书 §4.3 / §5.1，原文标 P0）**：本重排**明确推到 v2**。
 > 理由：1.3 已解决眼下最痛的「GUI 冻结」；资产表是 1–2 周的架构改动，
@@ -472,4 +525,5 @@ v1.8「立住台账 · 修掉卡顿 · 降下摩擦」
 └─ 1.4 发布与可见性包（README+签名+CHANGELOG）  ✅ 已完成   P1   ← 采纳摩擦
 
 移出 9 项 → v1.9 / v2（§3）   补丁轨道 8 件 → 已结 8 件（§6）
+                               └─ #3 零利用安全体检：第一刀（TLS 到期）✅ 已落地
 ```

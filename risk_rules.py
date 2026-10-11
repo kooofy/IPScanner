@@ -11,7 +11,11 @@
 
 - `open_ports`：明文 / 无认证的服务端口（Telnet、FTP、TFTP、VNC、SNMP v2c…）；
 - `conflict_detector` 的冲突结果（分值直接取冲突的**严重级别**，不另立一套
-  判断 —— 严重级别是那一边的单一事实来源）。
+  判断 —— 严重级别是那一边的单一事实来源）；
+- `tls_cert`：TLS 证书事实（到期 / 自签名 / 弱算法，v1.9 #3「零利用安全体检」）。
+  ⚠ 它**不是新探测** —— 证书是从**已有的** HTTPS 握手里顺带取的（见
+  `scanner/http.read_https`），所以"评分不增加网络开销"这条依然成立。
+  ⚠ 也刻意**不引入任何利用行为**：只读证书、不试凭据、不发畸形报文。
 
 刻度是 0–100 的加法制，封顶 100。**每一分都必须能说出理由**（`reasons` 带分值），
 tooltip 会把分数拆开给用户看：说不出理由的风险分没人会信。
@@ -24,9 +28,14 @@ tooltip 会把分数拆开给用户看：说不出理由的风险分没人会信
     群晖 NAS (80/445/5000)                        -> 10   「低」
     网络摄像头 (23/80/554)                        -> 40   「中」
     老设备 (21/23) + MAC 冲突                     -> 90   「高」
+
+TLS 那几项的标定：自签名**只给 5 分** —— 局域网设备管理面几乎全是自签名证书，
+给高分会让整列又变成同一个数字（正是本文开头要避免的噪声）。真正的信号是
+**到期**（功能已经坏 / 马上会坏）与**弱算法**（已被实证可攻破）。
 """
 from conflict_detector import SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_WARNING
 from i18n import tr
+from scanner.x509 import days_until, is_weak_key, is_weak_signature
 
 # ── 等级 ───────────────────────────────────────────────────────────────
 
@@ -87,6 +96,30 @@ _PORT_RULES = (
 _REASON_CLEARTEXT_HTTP = "cleartext_http"
 _HTTP_ONLY_POINTS = 10
 
+# ── 零利用安全体检：TLS 证书（v1.9 #3 第一刀）─────────────────────────
+#
+# 判定所需的**事实**来自 `ScanResult.tls_cert`（见 `scanner/x509.py`）。
+# 扫描器只报事实，结论与阈值只写在这一处 —— 阈值两处写迟早会不一致。
+_REASON_TLS_EXPIRED = "tls_expired"
+_REASON_TLS_EXPIRING = "tls_expiring_soon"
+_REASON_TLS_SELF_SIGNED = "tls_self_signed"
+_REASON_TLS_WEAK_SIG = "tls_weak_signature"
+_REASON_TLS_WEAK_KEY = "tls_weak_key"
+
+#: 剩余天数 ≤ 它就算"即将过期"。30 天是运维能安排一次更换的常见窗口。
+TLS_EXPIRING_DAYS = 30
+
+#: 理由 → 分值。按严重度递减排列（`tls_reasons()` 也按这个顺序产出，
+#: tooltip 因此天然是"最要紧的排在最上面"）。
+_TLS_POINTS = (
+    (_REASON_TLS_EXPIRED, 40),        # 已过期：客户端直接拒绝，功能其实已经坏了
+    (_REASON_TLS_WEAK_SIG, 25),       # MD5/SHA-1 签名：碰撞攻击已被实证
+    (_REASON_TLS_WEAK_KEY, 20),       # 密钥过短：可被离线爆破
+    (_REASON_TLS_EXPIRING, 15),       # 即将过期：还没坏，但马上会
+    (_REASON_TLS_SELF_SIGNED, 5),     # 自签名：无法验证身份（局域网常态，故低分）
+)
+_TLS_POINT_OF = dict(_TLS_POINTS)
+
 #: 冲突严重级别 → 分值。**复用冲突检测的判定**，不另立一套。
 _SEVERITY_POINTS = {
     SEVERITY_HIGH: 40,
@@ -103,6 +136,11 @@ _REASON_TEXT = {
     "cleartext_tftp": "TFTP 无认证文件传输",
     "cleartext_snmp": "SNMP v2c 团体字明文",
     _REASON_CLEARTEXT_HTTP: "HTTP 明文管理面",
+    _REASON_TLS_EXPIRED: "TLS 证书已过期",
+    _REASON_TLS_EXPIRING: "TLS 证书即将过期",
+    _REASON_TLS_SELF_SIGNED: "TLS 证书自签名",
+    _REASON_TLS_WEAK_SIG: "TLS 证书签名算法过时",
+    _REASON_TLS_WEAK_KEY: "TLS 证书密钥过短",
     "duplicate_mac": "MAC 地址冲突",
     "duplicate_hostname": "主机名冲突",
     "unknown_device": "不在地址库中的设备",
@@ -137,15 +175,46 @@ def risk_level(score) -> str:
     return RISK_LEVEL_NONE
 
 
-def score_risk(result, conflicts=()) -> dict:
+def tls_reasons(cert, now=None) -> list:
+    """从 TLS 证书事实推出风险理由，返回 `[(理由代码, 分值), ...]`。
+
+    `cert` 是 `ScanResult.tls_cert`（见 `scanner/x509.parse_certificate`），
+    为空 dict 时返回 `[]`。`now` 可注入，测试用来固定"今天"。
+
+    独立成函数是为了能**纯函数式**单测：不用真去连一台 HTTPS 服务，
+    也能覆盖"过期 / 即将过期 / 自签名 / 弱签名 / 弱密钥"全部分支。
+    """
+    if not cert:
+        return []
+    out = []
+    remaining = days_until(cert.get("not_after", ""), now=now)
+    if remaining is not None:
+        if remaining < 0:
+            out.append((_REASON_TLS_EXPIRED, _TLS_POINT_OF[_REASON_TLS_EXPIRED]))
+        elif remaining <= TLS_EXPIRING_DAYS:
+            out.append((_REASON_TLS_EXPIRING, _TLS_POINT_OF[_REASON_TLS_EXPIRING]))
+    if is_weak_signature(cert.get("sig_alg", "")):
+        out.append((_REASON_TLS_WEAK_SIG, _TLS_POINT_OF[_REASON_TLS_WEAK_SIG]))
+    if is_weak_key(cert.get("key_alg", ""), cert.get("key_bits") or 0):
+        out.append((_REASON_TLS_WEAK_KEY, _TLS_POINT_OF[_REASON_TLS_WEAK_KEY]))
+    if cert.get("self_signed"):
+        out.append((_REASON_TLS_SELF_SIGNED, _TLS_POINT_OF[_REASON_TLS_SELF_SIGNED]))
+    # 按 `_TLS_POINTS` 的严重度顺序排（上面的追加顺序与它一致），
+    # 这样 tooltip 里最要紧的理由永远在最上面。
+    order = {code: i for i, (code, _p) in enumerate(_TLS_POINTS)}
+    return sorted(out, key=lambda item: order.get(item[0], len(order)))
+
+
+def score_risk(result, conflicts=(), now=None) -> dict:
     """给一台设备打分。
 
     `conflicts` 是**属于这台设备**的冲突对象（任何带 `.severity` /
     `.conflict_type` 的对象都行）。`result` 为 None 时返回零分。
+    `now` 可注入（测试固定"今天"，用于 TLS 证书剩余天数）。
 
     返回 `{"score": int, "level": str, "reasons": [(代码, 分值), ...]}`。
-    `reasons` 保序（先端口后冲突）且**带分值**，这样 tooltip 能把分数拆开给
-    用户看 —— 一个说不出理由的风险分没人会信。
+    `reasons` 保序（先端口、再 TLS、后冲突）且**带分值**，这样 tooltip 能把分数
+    拆开给用户看 —— 一个说不出理由的风险分没人会信。
     """
     score = 0
     reasons = []
@@ -159,6 +228,9 @@ def score_risk(result, conflicts=()) -> dict:
     if 80 in ports and 443 not in ports:
         score += _HTTP_ONLY_POINTS
         reasons.append((_REASON_CLEARTEXT_HTTP, _HTTP_ONLY_POINTS))
+    for code, points in tls_reasons(getattr(result, "tls_cert", None), now=now):
+        score += points
+        reasons.append((code, points))
     for conflict in (conflicts or ()):
         severity = getattr(conflict, "severity", "")
         points = _SEVERITY_POINTS.get(severity, _DEFAULT_CONFLICT_POINTS)

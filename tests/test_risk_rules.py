@@ -13,6 +13,7 @@
 "不什么都报"**。一台普通 Windows 主机（135/139/445/3389）必须得 0 分，
 否则这一列对局域网资产盘点毫无用处。
 """
+import datetime
 import os
 import sys
 import tempfile
@@ -127,6 +128,146 @@ class ScoringTest(unittest.TestCase):
                 self.assertEqual(got, want, "%s 的等级判错了" % name)
 
 
+class TlsReasonTest(unittest.TestCase):
+    """TLS 证书事实 → 风险理由（v1.9 #3 零利用安全体检）。
+
+    这一段是那一刀里唯一会产生**用户可见结论**的部分，所以标定用例比覆盖用例
+    更要紧：局域网设备管理面几乎人手一张自签名证书，若"自签名"给高分，整列
+    风险分就塌成一个数 —— 那正是 `risk_rules` 反复提醒要避免的噪声。
+
+    事实来源是 `ScanResult.tls_cert`（`scanner/x509.parse_certificate` 的产物），
+    **不是新开的探测**：证书来自扫描时本就要做的那次 HTTPS 握手，没有多发包。
+    """
+
+    NOW = datetime.datetime(2026, 10, 11, 12, 0, 0)
+
+    def _days(self, n):
+        return (self.NOW + datetime.timedelta(days=n)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    def _cert(self, **kw):
+        base = {"not_after": self._days(365), "sig_alg": "sha256_rsa",
+                "key_alg": "rsa", "key_bits": 2048}
+        base.update(kw)
+        return base
+
+    def test_no_certificate_means_no_reasons(self):
+        for bad in ({}, None, 0, ""):
+            with self.subTest(bad=bad):
+                self.assertEqual(risk_rules.tls_reasons(bad, now=self.NOW), [])
+
+    def test_healthy_certificate_scores_nothing(self):
+        """🔴 标定基线：一张正常证书不能贡献任何分数。"""
+        self.assertEqual(risk_rules.tls_reasons(self._cert(), now=self.NOW), [])
+
+    def test_expired(self):
+        got = dict(risk_rules.tls_reasons(self._cert(not_after=self._days(-1)),
+                                          now=self.NOW))
+        self.assertEqual(got, {"tls_expired": 40})
+
+    def test_expiring_soon_boundary(self):
+        """阈值边界：30 天内算"即将过期"，31 天不算 —— 差一天也要分清。"""
+        for days, want in ((0, {"tls_expiring_soon": 15}),
+                           (29, {"tls_expiring_soon": 15}),
+                           (30, {"tls_expiring_soon": 15}),
+                           (31, {})):
+            with self.subTest(days=days):
+                got = dict(risk_rules.tls_reasons(
+                    self._cert(not_after=self._days(days)), now=self.NOW))
+                self.assertEqual(got, want)
+
+    def test_expiring_and_expired_do_not_stack(self):
+        """过期就是过期，不再额外叠一条"即将过期"。"""
+        codes = [c for c, _ in risk_rules.tls_reasons(
+            self._cert(not_after=self._days(-5)), now=self.NOW)]
+        self.assertEqual(codes, ["tls_expired"])
+
+    def test_self_signed_is_only_five_points(self):
+        """🔴 自签名只值 5 分 —— 几乎每台局域网设备都是自签，给高了整列就废了。"""
+        got = dict(risk_rules.tls_reasons(self._cert(self_signed=True),
+                                          now=self.NOW))
+        self.assertEqual(got, {"tls_self_signed": 5})
+
+    def test_weak_signature(self):
+        for alg in ("md5_rsa", "sha1_rsa", "sha1_ecdsa"):
+            with self.subTest(alg=alg):
+                got = dict(risk_rules.tls_reasons(
+                    self._cert(sig_alg=alg), now=self.NOW))
+                self.assertEqual(got, {"tls_weak_signature": 25})
+
+    def test_weak_key(self):
+        for alg, bits in (("rsa", 1024), ("rsa", 512), ("ec", 192),
+                          ("dsa", 1024)):
+            with self.subTest(alg=alg, bits=bits):
+                got = dict(risk_rules.tls_reasons(
+                    self._cert(key_alg=alg, key_bits=bits), now=self.NOW))
+                self.assertEqual(got, {"tls_weak_key": 20})
+
+    def test_unknown_algorithms_stay_silent(self):
+        """不认识的算法不下结论（宁可漏报不可误报）。"""
+        cert = self._cert(sig_alg="2.9.9.9", key_alg="weird", key_bits=512)
+        self.assertEqual(risk_rules.tls_reasons(cert, now=self.NOW), [])
+
+    def test_missing_key_bits_stay_silent(self):
+        """位数读不到（0）时不能报"密钥过短" —— 否则每台取不到模数的都误报。"""
+        cert = self._cert(key_alg="rsa", key_bits=0)
+        self.assertEqual(risk_rules.tls_reasons(cert, now=self.NOW), [])
+
+    def test_unparseable_date_is_silent(self):
+        """日期解析不出来时不猜 —— 不能因为"读不到"就说"过期了"。"""
+        for bad in ("", "not a date", "2027/10/11", "2027-10-11"):
+            with self.subTest(bad=bad):
+                cert = self._cert(not_after=bad)
+                self.assertEqual(risk_rules.tls_reasons(cert, now=self.NOW), [])
+
+    def test_reasons_are_ordered_by_severity(self):
+        """最要紧的理由永远排在最上面 —— tooltip 只给头几行也够用。"""
+        cert = self._cert(not_after=self._days(-1), self_signed=True,
+                          sig_alg="sha1_rsa", key_alg="rsa", key_bits=1024)
+        codes = [c for c, _ in risk_rules.tls_reasons(cert, now=self.NOW)]
+        self.assertEqual(codes, ["tls_expired", "tls_weak_signature",
+                                 "tls_weak_key", "tls_self_signed"])
+
+    def test_points_match_the_declared_table(self):
+        """分值只有一处定义（`_TLS_POINTS`），别在别处又写一份。"""
+        self.assertEqual(dict(risk_rules._TLS_POINTS), {
+            "tls_expired": 40, "tls_expiring_soon": 15, "tls_self_signed": 5,
+            "tls_weak_signature": 25, "tls_weak_key": 20,
+        })
+        self.assertEqual(risk_rules.TLS_EXPIRING_DAYS, 30)
+
+    def test_score_risk_picks_up_the_certificate(self):
+        """接线：证书事实必须真的进总分。"""
+        r = _result([443])
+        self.assertEqual(risk_rules.score_risk(r)["score"], 0)
+        r.tls_cert = self._cert(not_after=self._days(-1))
+        risk = risk_rules.score_risk(r, now=self.NOW)
+        self.assertEqual(risk["score"], 40)
+        self.assertEqual([c for c, _ in risk["reasons"]], ["tls_expired"])
+
+    def test_score_risk_combines_ports_and_tls(self):
+        r = _result([23, 443])
+        r.tls_cert = self._cert(self_signed=True)
+        risk = risk_rules.score_risk(r, now=self.NOW)
+        self.assertEqual(risk["score"], 35)          # Telnet 30 + 自签名 5
+        self.assertEqual([c for c, _ in risk["reasons"]],
+                         ["cleartext_telnet", "tls_self_signed"])
+
+    def test_score_risk_tolerates_objects_without_the_attribute(self):
+        """历史库里读回来的对象没有这个属性 —— `getattr` 兜底不能炸。"""
+        class _Bare:
+            ip = "10.0.0.1"
+            status = "online"
+            open_ports = [443]
+
+        self.assertEqual(risk_rules.score_risk(_Bare(), now=self.NOW)["score"], 0)
+
+    def test_clean_host_with_a_good_certificate_still_scores_zero(self):
+        """🔴 标定基线（带证书版）：普通主机 + 一张好证书仍然 0 分。"""
+        r = _result([135, 139, 445, 3389, 443])
+        r.tls_cert = self._cert()
+        self.assertEqual(risk_rules.score_risk(r, now=self.NOW)["score"], 0)
+
+
 class LevelThresholdTest(unittest.TestCase):
 
     def test_boundaries(self):
@@ -174,6 +315,7 @@ class LabelTest(unittest.TestCase):
         codes = {code for code, _, _ in risk_rules._PORT_RULES}
         codes.add(risk_rules._REASON_CLEARTEXT_HTTP)
         codes.update({"duplicate_mac", "duplicate_hostname", "unknown_device"})
+        codes.update(code for code, _ in risk_rules._TLS_POINTS)
         for code in codes:
             with self.subTest(code=code):
                 self.assertTrue(

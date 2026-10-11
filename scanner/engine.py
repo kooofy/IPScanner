@@ -19,7 +19,8 @@ from .constants import (COMMON_PORTS, PROTOCOL_PORTS, SVC_HTTP, SVC_HTTPS,
                         SVC_POSTGRESQL, SVC_RDP, SVC_REDIS, SVC_SMTP,
                         SVC_SNMP, SVC_TELNET, SVC_VNC, SVC_MDNS, SVC_SMB)
 from .dns import get_netbios_name, mdns_discover, resolve_hostname
-from .http import _read_ftp_banner, _read_http, _read_https_banner, _read_ssh_banner, _read_upnp_device_name
+from .http import (_read_ftp_banner, _read_http, _read_ssh_banner,
+                   _read_upnp_device_name, read_https)
 from .models import ScanResult
 from .osfp import _match_tcp_stack, _os_detail_from_banners, _tcp_stack_probe, guess_os_from_ttl
 from .ping import arp_ping, get_local_subnets, get_mac_for_ip, ping_ip
@@ -417,7 +418,13 @@ def _enrich_device(ctx: ScanContext, ip: str) -> None:
                     else:
                         detail["banner"] = http_banner
                 elif proto == SVC_HTTPS:
-                    detail["banner"] = _read_https_banner(ip, port, 1.2)
+                    # 一次握手同时拿 banner 与证书事实（见 scanner/http.read_https）。
+                    # 证书只保留第一个探到的：风险评分是"一台设备一条结论"，
+                    # 每个 HTTPS 端口各留一份会让同一台设备刷出多条同义理由。
+                    _banner, _cert = read_https(ip, port, 1.2)
+                    detail["banner"] = _banner
+                    if _cert and not result.tls_cert:
+                        result.tls_cert = _cert
                 svc_details.append(detail)
                 # 如果没开完整端口扫描，也把协议端口加入开放端口列表
                 if not ctx.scan_ports_flag and port not in result.open_ports:

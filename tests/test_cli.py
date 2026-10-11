@@ -188,6 +188,60 @@ class PortResolutionTest(unittest.TestCase):
             cli._resolve_ports(self._args(ports=",,,"))
 
 
+class SnapshotDeviceTest(unittest.TestCase):
+    """`_snapshot_devices()` —— CLI 侧的落库字典构造（v1.9 #3）。
+
+    GUI 与 CLI 走的是**同一条**落库路径（`history_store.save_snapshot`），
+    所以证书事实也必须在这里带上；否则"命令行存的快照没有安全事实"，
+    而界面上又看不出差别 —— 这类不一致最难发现。
+    """
+
+    _CERT = {"cn": "router.local", "issuer_cn": "router.local",
+             "not_before": "2025-01-01T00:00:00",
+             "not_after": "2027-01-01T00:00:00",
+             "self_signed": True, "sig_alg": "sha256_rsa",
+             "key_alg": "rsa", "key_bits": 2048, "curve": ""}
+
+    def test_certificate_facts_are_included(self):
+        r = ScanResult(ip="10.0.0.9", status="online", open_ports=[443])
+        r.tls_cert = dict(self._CERT)
+        dev = cli._snapshot_devices([r])[0]
+        self.assertEqual(dict(dev["security_findings"]), {
+            "tls_cn": "router.local",
+            "tls_not_before": "2025-01-01T00:00:00",
+            "tls_not_after": "2027-01-01T00:00:00",
+            "tls_sig_alg": "sha256_rsa",
+            "tls_key": "rsa/2048",
+            "tls_self_signed": "1",
+        })
+
+    def test_no_certificate_means_no_key(self):
+        r = ScanResult(ip="10.0.0.10", status="online", open_ports=[80])
+        dev = cli._snapshot_devices([r])[0]
+        self.assertNotIn("security_findings", dev)
+
+    def test_matches_the_gui_path(self):
+        """与 `ui_logic.build_snapshot` 的产出必须一致 —— 两条路一份真相。"""
+        import ui_logic
+        r = ScanResult(ip="10.0.0.9", status="online", open_ports=[443])
+        r.tls_cert = dict(self._CERT)
+        cli_dev = cli._snapshot_devices([r])[0]
+        gui_dev = ui_logic.build_snapshot([r], ts=0.0)["devices"][0]
+        self.assertEqual(cli_dev["security_findings"], gui_dev["security_findings"])
+
+    def test_roundtrips_through_the_database(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        db = os.path.join(tmp, "hist.db")
+        self.addCleanup(lambda: __import__("db_util").close_connection(db))
+        r = ScanResult(ip="10.0.0.9", status="online", open_ports=[443])
+        r.tls_cert = dict(self._CERT)
+        sid = history_store.save_snapshot(cli._snapshot_devices([r]),
+                                          ts=1000.0, db_path=db)
+        got = history_store.get_security_findings(sid, db_path=db)
+        self.assertEqual(got["10.0.0.9"]["tls_cn"], "router.local")
+
+
 class SizeGuardTest(unittest.TestCase):
     """超大规模范围必须在联网之前被拒绝（P0-2 在 CLI 侧的表现）。"""
 

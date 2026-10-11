@@ -5,6 +5,7 @@ import ssl
 from typing import Tuple
 
 from .constants import _PRINTER_BRANDS, _PRINTER_MODEL_RE
+from .x509 import parse_certificate
 from i18n import tr
 
 
@@ -85,12 +86,22 @@ def _extract_http_brand(text: str) -> Tuple[str, str]:
     return brand, model
 
 
-def _read_https_banner(ip: str, port: int, timeout: float = 1.2) -> str:
-    """对 HTTPS 端口做 SSL 握手，返回 OpenSSL 隧道风格字符串。
+def read_https(ip: str, port: int, timeout: float = 1.2) -> Tuple[str, dict]:
+    """对 HTTPS 端口做**一次**握手，同时返回 `(banner, 证书事实)`。
 
-    成功时: "Tunnel is OpenSSL <TLS版本>: <证书CN>"
-    失败时: "Tunnel is OpenSSL <TLS版本>: unknown service" 或 "unknown service"
-    与 Advanced IP Scanner 的 HTTPS 子项展示风格保持一致。
+    一次握手拿两样东西是刻意的：banner 与证书事实都来自同一个 TLS 会话，
+    分两次握手会让每台设备多一个 TCP + TLS 往返（大网段上很贵）。
+
+    - banner 形态与 Advanced IP Scanner 的 HTTPS 子项一致：
+      `"Tunnel is OpenSSL <TLS版本>: <证书CN>"`，取不到 CN 时是
+      `"Tunnel is OpenSSL <TLS版本>: unknown service"`；握手失败是 `"unknown service"`。
+    - 证书事实见 `scanner.x509.parse_certificate()`；拿不到就是 `{}`。
+
+    ⚠ 证书只能走 `getpeercert(binary_form=True)` **自己解**。这里用的是
+    `verify_mode = CERT_NONE`（必须能连自签名 / 已过期的证书 —— 局域网设备
+    管理面几乎全是自签名），而该模式下 `getpeercert()` 返回的是**空 dict**。
+    踩过：原先直接读 `cert["subject"]` 取 CN，那几行**从未执行过**，
+    banner 恒为 "unknown service"。回归由 `tests/test_x509.py` 守着。
     """
     try:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -99,24 +110,24 @@ def _read_https_banner(ip: str, port: int, timeout: float = 1.2) -> str:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=ip) as ssock:
                 version = ssock.version() or "TLS"
-                cert = ssock.getpeercert()
-                cn = ""
-                if cert:
-                    subject = cert.get("subject")
-                    if subject:
-                        for entry in subject:
-                            for key, value in entry:
-                                if key == "commonName":
-                                    cn = value
-                                    break
-                            if cn:
-                                break
-                result = cn if cn else "unknown service"
-                return f"Tunnel is OpenSSL {version}: {result}"
+                der = ssock.getpeercert(binary_form=True)
     except Exception:
-        # 握手失败（超时/协议不兼容等）：保留 OpenSSL 隧道风格，
-        # 若无法确定版本则统一返回 unknown service，避免空串导致子项回退成 "HTTPS, port 443"。
-        return "unknown service"
+        # 握手失败（超时 / 协议不兼容 / 对端不是 TLS 等）：属正常结果，不算错误。
+        # banner 统一给 "unknown service"，避免空串让服务子项回退成 "HTTPS, port 443"。
+        return "unknown service", {}
+    facts = parse_certificate(der) if der else {}
+    return _tunnel_text(version, facts.get("cn", "")), facts
+
+
+def _tunnel_text(version: str, cn: str) -> str:
+    """`(TLS 版本, 证书 CN)` → AIP 风格的隧道串。"""
+    return "Tunnel is OpenSSL %s: %s" % (version or "TLS",
+                                         cn or "unknown service")
+
+
+def _read_https_banner(ip: str, port: int, timeout: float = 1.2) -> str:
+    """只要 banner 的薄包装（保留给只关心展示串的调用方）。"""
+    return read_https(ip, port, timeout)[0]
 
 
 def _parse_upnp_name(xml_text: str) -> str:

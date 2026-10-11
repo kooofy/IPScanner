@@ -98,6 +98,31 @@ def _init_db(conn):
         -- locate_device() 按 MAC 查最近端口，属交互热路径，必须走索引；
         -- 与 devices.mac 同理用 NOCASE（MAC 大小写不敏感，写入时未归一化）。
         CREATE INDEX IF NOT EXISTS idx_pm_mac ON port_map(mac COLLATE NOCASE);
+
+        -- ── 零利用安全体检的事实（v1.9 #3）──────────────────────────
+        -- 一行 = 一台设备的一条**事实**（不是结论）：kind 是规范代码
+        -- （tls_not_after / tls_self_signed / tls_sig_alg …），value 是规范值。
+        -- 「过期 / 即将过期 / 弱算法」这类**判定**统一在 risk_rules 里做 ——
+        -- 阈值只写一处，历史里存的也永远是事实（以后调阈值可以重算）。
+        --
+        -- 为什么用"一张竖表"而不是往 devices 加列：
+        --   * `CREATE TABLE IF NOT EXISTS` 对**已存在的库**直接生效；而给 devices
+        --     加列必须写 ALTER TABLE 迁移（`CREATE TABLE IF NOT EXISTS` 不会补列），
+        --     每加一个信号就得再来一次；
+        --   * 后续切片（LLMNR/NBNS 响应器、SMB 方言与签名）都是异质的布尔/枚举，
+        --     竖表天然容纳，不用再动 schema。
+        -- 与 switch_map / port_map 同一惯例：允许某次快照一行都没有，
+        -- 带 snapshot_id 外键 + CASCADE，prune() 删快照时自动跟着清。
+        CREATE TABLE IF NOT EXISTS security_findings (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            ip          TEXT DEFAULT '',
+            kind        TEXT DEFAULT '',
+            value       TEXT DEFAULT '',
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sf_snapshot ON security_findings(snapshot_id);
+        CREATE INDEX IF NOT EXISTS idx_sf_ip ON security_findings(ip);
         """
     )
     conn.commit()
@@ -116,6 +141,11 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
 
     devices 中每个字典可用字段：ip/status/mac/hostname/vendor/
     device_class/os_guess/open_ports/location/user/remark（缺字段按空串处理）。
+
+    另有一个**可选**字段 `security_findings`：`[(kind, value), ...]` 的
+    `(规范代码, 规范值)` 对（见 `tls_cert_facts()`）。走这里而不是另开一个
+    `save_*()`，是为了让 GUI 与 CLI 的**所有**落库路径自动带上它 ——
+    单独一个函数迟早会有人忘记调。
     """
     ts = time.time() if ts is None else ts
     with _conn(db_path) as conn:
@@ -124,6 +154,7 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
             (ts, len(devices), note),
         )
         sid = cur.lastrowid
+        sec_rows = []
         for d in devices:
             conn.execute(
                 "INSERT INTO devices "
@@ -137,6 +168,14 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
                     d.get("os_guess", ""), d.get("open_ports", ""), d.get("location", ""),
                     d.get("user", ""), d.get("remark", ""),
                 ),
+            )
+            ip = d.get("ip", "")
+            for kind, value in (d.get("security_findings") or ()):
+                sec_rows.append((sid, ip, kind, value))
+        if sec_rows:
+            conn.executemany(
+                "INSERT INTO security_findings (snapshot_id, ip, kind, value) "
+                "VALUES (?,?,?,?)", sec_rows,
             )
         conn.commit()
     prune(max_keep=max_keep, db_path=db_path)
@@ -153,7 +192,12 @@ def list_snapshots(db_path=None) -> list:
 
 
 def get_snapshot(snapshot_id, db_path=None) -> dict:
-    """返回完整快照 {"time": float, "devices": [...]}；不存在返回 None。"""
+    """返回完整快照 {"time": float, "devices": [...]}；不存在返回 None。
+
+    每台设备若在 `security_findings` 里有记录，会多出一个
+    `security_findings: {kind: value}` 键（没有记录时**不**加这个键，
+    免得消费方把"没探到"当成"探到但为空"）。
+    """
     with _conn(db_path) as conn:
         row = conn.execute(
             "SELECT id, time FROM snapshots WHERE id=?", (snapshot_id,)
@@ -166,7 +210,15 @@ def get_snapshot(snapshot_id, db_path=None) -> dict:
             "ORDER BY id ASC",
             (snapshot_id,),
         ).fetchall()
-    return {"time": row["time"], "devices": [dict(d) for d in devs]}
+    findings = get_security_findings(snapshot_id, db_path=db_path)
+    devices = []
+    for d in devs:
+        item = dict(d)
+        found = findings.get(item.get("ip", ""))
+        if found:
+            item["security_findings"] = found
+        devices.append(item)
+    return {"time": row["time"], "devices": devices}
 
 
 def latest_devices(db_path=None) -> list:
@@ -324,6 +376,59 @@ def save_port_map(snapshot_id, switches, db_path=None) -> int:
             )
         conn.commit()
     return len(map_rows)
+
+
+# ── 零利用安全体检的事实（v1.9 #3）────────────────────────────────────
+
+#: `security_findings.kind` 的规范代码。**语言无关**，展示时再翻译
+#: （仓库铁律）。展示用的名字表等到第一个消费方（详情面板 / 安全视图）落地时
+#: 再加，并同步登记进 `test_i18n_lazy.py::_label_tables()` —— 现在加了没人读。
+SEC_TLS_CN = "tls_cn"
+SEC_TLS_NOT_AFTER = "tls_not_after"
+SEC_TLS_NOT_BEFORE = "tls_not_before"
+SEC_TLS_SELF_SIGNED = "tls_self_signed"
+SEC_TLS_SIG_ALG = "tls_sig_alg"
+SEC_TLS_KEY = "tls_key"
+
+
+def tls_cert_facts(cert) -> list:
+    """把 `ScanResult.tls_cert`（一个 dict）摊成 `[(kind, value), ...]`。
+
+    只收**非空**的项 —— 空值落库会让"没探到"与"探到了但该项为空"分不开。
+    值全部是语言无关的规范串（日期是 `YYYY-MM-DDTHH:MM:SS`，布尔是 `"1"`）。
+    """
+    if not cert:
+        return []
+    out = []
+    for kind, key in ((SEC_TLS_CN, "cn"),
+                      (SEC_TLS_NOT_BEFORE, "not_before"),
+                      (SEC_TLS_NOT_AFTER, "not_after"),
+                      (SEC_TLS_SIG_ALG, "sig_alg")):
+        value = str(cert.get(key) or "").strip()
+        if value:
+            out.append((kind, value))
+    # 密钥拼成 "rsa/2048"；位数取不到时只写算法名，不要出现 "rsa/0"
+    key_alg = str(cert.get("key_alg") or "").strip()
+    key_bits = cert.get("key_bits") or 0
+    if key_alg:
+        out.append((SEC_TLS_KEY,
+                    "%s/%d" % (key_alg, key_bits) if key_bits else key_alg))
+    if cert.get("self_signed"):
+        out.append((SEC_TLS_SELF_SIGNED, "1"))
+    return out
+
+
+def get_security_findings(snapshot_id, db_path=None) -> dict:
+    """返回 `{ip: {kind: value}}`；该快照没有记录时返回空 dict。"""
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT ip, kind, value FROM security_findings "
+            "WHERE snapshot_id=? ORDER BY id ASC", (snapshot_id,)
+        ).fetchall()
+    out = {}
+    for row in rows:
+        out.setdefault(row["ip"], {})[row["kind"]] = row["value"]
+    return out
 
 
 def locate_device(mac="", ip="", hostname="", db_path=None) -> dict:

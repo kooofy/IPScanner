@@ -48,7 +48,7 @@ def _patch_io(**overrides):
         "_read_ssh_banner": lambda ip, port, t: "",
         "_read_ftp_banner": lambda ip, port, t: "",
         "_read_http": lambda ip, port, t: ("", "", ""),
-        "_read_https_banner": lambda ip, port, t: "",
+        "read_https": lambda ip, port, t: ("", {}),
         "_read_upnp_device_name": lambda ip, port, t: "",
         "_os_detail_from_banners": lambda details, extra: "",
         "_tcp_stack_probe": lambda ip, port, t: None,
@@ -161,6 +161,107 @@ class PortPhaseTest(_Base):
         self.assertEqual(calls[0], [80])          # 只扫了协议端口
         self.assertIn(80, r.open_ports)           # 未做完整扫描时补进开放端口
         self.assertIn("HTTP", r.services)
+
+
+class TlsCertWiringTest(_Base):
+    """HTTPS 分支：一次握手同时产出 banner 与证书事实（v1.9 #3）。
+
+    证书**不是新开的探测** —— 复用扫描本就要做的那次 TLS 握手，只是顺便把
+    DER 也读出来（见 `scanner/http.read_https`）。所以这里的断言只有两条：
+    banner 进了 `service_details`，事实进了 `ScanResult.tls_cert`。
+    """
+
+    _CERT = {"cn": "router.local", "issuer_cn": "router.local",
+             "not_before": "2025-01-01T00:00:00",
+             "not_after": "2027-01-01T00:00:00",
+             "self_signed": True, "sig_alg": "sha256_rsa",
+             "key_alg": "rsa", "key_bits": 2048, "curve": ""}
+
+    def _https_scan(self, **extra):
+        patches = _patch_io(
+            ping_ip=lambda ip, timeout_ms=1000: (True, 1.0, 64),
+            scan_ports=lambda ip, ports=None, timeout=0.5, mode="connect",
+                              rtt_callback=None: [443],
+        )
+        patches += extra.pop("patchers", [])
+        return self.scan(["10.0.0.5"], patches, mdns_discovery=False,
+                         protocols=["HTTPS"], **extra)
+
+    def test_banner_and_certificate_land_on_the_result(self):
+        patches = [mock.patch.object(
+            E, "read_https",
+            lambda ip, port, t: ("Tunnel is OpenSSL TLSv1.3: router.local",
+                                 dict(self._CERT)))]
+        results = self._https_scan(patchers=patches)
+        r = self.by_ip(results)["10.0.0.5"]
+        self.assertEqual(r.tls_cert, self._CERT)
+        details = [d for d in r.service_details if d.get("proto") == "HTTPS"]
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["banner"],
+                         "Tunnel is OpenSSL TLSv1.3: router.local")
+
+    def test_empty_certificate_leaves_the_field_empty(self):
+        """握手成功但读不到证书（老服务端 / 非 TLS）→ 保持空 dict，不瞎填。"""
+        patches = [mock.patch.object(
+            E, "read_https", lambda ip, port, t: ("unknown service", {}))]
+        results = self._https_scan(patchers=patches)
+        self.assertEqual(self.by_ip(results)["10.0.0.5"].tls_cert, {})
+
+    def test_a_fresh_result_starts_with_an_empty_certificate(self):
+        """默认值必须是 `{}`（空 dict = 没探到），不能是 None —— 消费方会 `.get()`。"""
+        results = self._https_scan()
+        self.assertEqual(self.by_ip(results)["10.0.0.5"].tls_cert, {})
+
+    def test_only_the_first_certificate_is_kept(self):
+        """多端口时只留第一个 —— 风险评分是"一台设备一条结论"。
+
+        `PROTOCOL_PORTS` 目前一个协议只映射一个端口，正常路径够不到这条守卫，
+        所以这里用一个**能给出重复键**的映射把它逼出来（dict 做不到，故自定义）。
+        """
+        seen = []
+
+        def fake_read(ip, port, t):
+            seen.append(port)
+            cert = dict(self._CERT, cn="port-%d.local" % port)
+            return "Tunnel is OpenSSL TLSv1.3: port-%d.local" % port, cert
+
+        mapping = _RepeatedMap([("HTTPS", 443), ("HTTPS", 8443)])
+        patches = [
+            mock.patch.object(E, "_build_proto_map",
+                              lambda protocols: (mapping, False)),
+            mock.patch.object(E, "read_https", fake_read),
+            mock.patch.object(
+                E, "scan_ports",
+                lambda ip, ports=None, timeout=0.5, mode="connect",
+                     rtt_callback=None: [443, 8443]),
+        ]
+        results = self._https_scan(patchers=patches)
+        r = self.by_ip(results)["10.0.0.5"]
+        self.assertEqual(seen, [443, 8443], "两个 HTTPS 端口都该被探")
+        self.assertEqual(r.tls_cert["cn"], "port-443.local",
+                         "只保留第一个探到的证书")
+        self.assertEqual(len([d for d in r.service_details
+                              if d.get("proto") == "HTTPS"]), 2,
+                         "banner 两条都要留，只有证书去重")
+
+
+class _RepeatedMap:
+    """能给出**重复键**的 proto→port 映射（dict 做不到，见上一条测试）。
+
+    只需要 `__bool__` / `values()` / `items()` 三个口子 —— 引擎就用这三个。
+    """
+
+    def __init__(self, pairs):
+        self._pairs = list(pairs)
+
+    def __bool__(self):
+        return bool(self._pairs)
+
+    def values(self):
+        return [port for _proto, port in self._pairs]
+
+    def items(self):
+        return list(self._pairs)
 
 
 class ArpPhaseTest(_Base):

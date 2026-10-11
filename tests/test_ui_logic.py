@@ -197,6 +197,57 @@ class TestBuildSnapshot(unittest.TestCase):
         self.assertTrue(before <= snap["time"] <= after)
         self.assertEqual(snap["devices"], [])
 
+    def test_tls_facts_are_carried_into_the_snapshot(self):
+        """v1.9 #3：探到的证书事实要跟着快照落库。
+
+        这条链路是 GUI 侧唯一的落库入口（`history_mixin._save_snapshot` →
+        `build_snapshot` → `history_store.save_snapshot`）；漏了这一环，证书
+        事实就永远进不了库，而风险列却照常显示 —— 最难查的那种"一半对"。
+        """
+        r = ScanResult(ip="10.0.0.9", status="online", open_ports=[443])
+        r.tls_cert = {"cn": "router.local", "issuer_cn": "router.local",
+                      "not_before": "2025-01-01T00:00:00",
+                      "not_after": "2027-01-01T00:00:00",
+                      "self_signed": True, "sig_alg": "sha256_rsa",
+                      "key_alg": "rsa", "key_bits": 2048, "curve": ""}
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertEqual(dict(snap["devices"][0]["security_findings"]), {
+            "tls_cn": "router.local",
+            "tls_not_before": "2025-01-01T00:00:00",
+            "tls_not_after": "2027-01-01T00:00:00",
+            "tls_sig_alg": "sha256_rsa",
+            "tls_key": "rsa/2048",
+            "tls_self_signed": "1",
+        })
+
+    def test_no_certificate_means_no_key(self):
+        """没探到证书时**不**给这个键 —— 消费方不该把"没探到"当成"探到但为空"。"""
+        r = ScanResult(ip="10.0.0.10", status="online", open_ports=[80])
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertNotIn("security_findings", snap["devices"][0])
+
+    def test_empty_certificate_means_no_key(self):
+        r = ScanResult(ip="10.0.0.11", status="online")
+        r.tls_cert = {}
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertNotIn("security_findings", snap["devices"][0])
+
+    def test_result_without_the_attribute_is_tolerated(self):
+        """老对象（或测试替身）没有 `tls_cert` 属性时不能炸。"""
+        class _Bare:
+            ip = "10.0.0.12"
+            status = "online"
+            mac = hostname = vendor = device_class = os_guess = ""
+            open_ports = []
+            location = user = remark = ""
+            wmi_identified = netbios_identified = False
+            wmi_manufacturer = wmi_model = wmi_serial = ""
+            wmi_os = wmi_user = wmi_domain = ""
+            netbios_name = netbios_workgroup = netbios_user = netbios_mac = ""
+
+        snap = ui_logic.build_snapshot([_Bare()], ts=1000.0)
+        self.assertNotIn("security_findings", snap["devices"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
