@@ -9,7 +9,9 @@
 
 评分只用**已有信号**，不新增任何网络探测：
 
-- `open_ports`：明文 / 无认证的服务端口（Telnet、FTP、TFTP、VNC、SNMP v2c…）；
+- `open_ports`：明文 / 无认证的服务端口（Telnet、FTP、TFTP、VNC、SNMP v2c…）。
+  这一族**聚合成一条结论**「弱协议暴露面」，明细放在 tooltip 的子行里 ——
+  理由见 `_REASON_WEAK_PROTOCOLS`；
 - `conflict_detector` 的冲突结果（分值直接取冲突的**严重级别**，不另立一套
   判断 —— 严重级别是那一边的单一事实来源）；
 - `tls_cert`：TLS 证书事实（到期 / 自签名 / 弱算法，v1.9 #3「零利用安全体检」）。
@@ -43,6 +45,11 @@ TLS 那几项的标定：自签名**只给 5 分** —— 局域网设备管理�
 不存在名字的既可能是欺骗响应器（攻击），也可能是安全扫描工具 / 蜜罐（防护）。
 分数只表示"值得看一眼"，不替用户断定对方恶意；30 分够它冒头，又不至于单独
 一条就把设备拉满。
+
+明文 / 无认证的那一族端口**聚合成一条理由**（`_REASON_WEAK_PROTOCOLS`）：
+一台老路由器 (23/80/161) 会同时命中三条规则，各占一行说的是同一件事，把
+tooltip 撑成一面墙。聚合成一条 + 一行明细，结论先出来、明细按需看。
+⚠ **总分不变**（各端口分值照旧相加），上面那张标定表因此依然成立。
 """
 from conflict_detector import SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_WARNING
 from i18n import tr
@@ -106,6 +113,18 @@ _PORT_RULES = (
 
 _REASON_CLEARTEXT_HTTP = "cleartext_http"
 _HTTP_ONLY_POINTS = 10
+
+#: 上面这一族（明文 / 无认证服务）在 tooltip 里**聚合成一条**理由的代码。
+#:
+#: 为什么聚合：一台老路由器 (23/80/161) 会同时命中三条规则，tooltip 里就出现
+#: 「Telnet 明文管理 / HTTP 明文管理面 / SNMP v2c 团体字明文」三行 —— 它们说的是
+#: **同一件事**（这台设备的管理面是明文或没有认证），却把 tooltip 撑成一面墙，
+#: 用户看完还是不知道"到底多危险"。聚合成一条 + 一行明细，结论先出来、明细按需看。
+#:
+#: ⚠ **总分不变**：各端口的分值照旧相加，只是不再各占一行。这是刻意的 ——
+#: 本文档顶部那张标定表（打印机 25 / 路由器 55 / 摄像头 40 …）是这一列的
+#: 可信度来源，聚合若顺手改了分数，等于把标定推翻。
+_REASON_WEAK_PROTOCOLS = "weak_protocols"
 
 # ── 零利用安全体检：TLS 证书（v1.9 #3 第一刀）─────────────────────────
 #
@@ -171,6 +190,7 @@ _REASON_TEXT = {
     _REASON_TLS_WEAK_SIG: "TLS 证书签名算法过时",
     _REASON_TLS_WEAK_KEY: "TLS 证书密钥过短",
     _REASON_NAME_RESPONDER: "应答了不存在的主机名（疑似欺骗响应器）",
+    _REASON_WEAK_PROTOCOLS: "弱协议暴露面",
     "duplicate_mac": "MAC 地址冲突",
     "duplicate_hostname": "主机名冲突",
     "unknown_device": "不在地址库中的设备",
@@ -203,6 +223,32 @@ def risk_level(score) -> str:
         if value >= threshold:
             return level
     return RISK_LEVEL_NONE
+
+
+def weak_protocol_reasons(ports) -> tuple:
+    """把「明文 / 无认证服务」这一族端口聚成**一条**理由。
+
+    返回 `(总分, [命中的理由代码, ...])`；一个都没命中时是 `(0, [])`。
+    代码按 `_PORT_RULES` 的严重度顺序排（HTTP 明文在最后，它分值最低），
+    于是 tooltip 的明细行天然是"最要紧的排在最前面"。
+
+    独立成函数与 `tls_reasons()` 同一个理由：**纯函数式单测**，不用去连任何端口。
+
+    ⚠ 明文 HTTP **只在没有 HTTPS 时**才计分：同机开了 443 说明有加密替代，
+    这时候再报"HTTP 明文"就是噪声（这条规则原来就在 `score_risk()` 里，
+    聚合时原样搬过来）。
+    """
+    ports = set(ports or ())
+    total = 0
+    hit = []
+    for code, port, points in _PORT_RULES:
+        if port in ports:
+            total += points
+            hit.append(code)
+    if 80 in ports and 443 not in ports:
+        total += _HTTP_ONLY_POINTS
+        hit.append(_REASON_CLEARTEXT_HTTP)
+    return total, hit
 
 
 def tls_reasons(cert, now=None) -> list:
@@ -256,25 +302,27 @@ def score_risk(result, conflicts=(), now=None) -> dict:
     `.conflict_type` 的对象都行）。`result` 为 None 时返回零分。
     `now` 可注入（测试固定"今天"，用于 TLS 证书剩余天数）。
 
-    返回 `{"score": int, "level": str, "reasons": [(代码, 分值), ...]}`。
-    `reasons` 保序（先端口、再 TLS、再名字响应器、后冲突）且**带分值**，
+    返回 `{"score": int, "level": str, "reasons": [(代码, 分值), ...],
+    "weak_protocols": [代码, ...]}`。
+    `reasons` 保序（先弱协议、再 TLS、再名字响应器、后冲突）且**带分值**，
     这样 tooltip 能把分数拆开给用户看 —— 一个说不出理由的风险分没人会信。
 
     排序按**类别**而不是全局按分值：类别内部已按严重度排好（见 `_TLS_POINTS`），
     跨类别再排一次会让"哪来的分"变得难以对照代码。
+
+    `weak_protocols` 是聚合理由的**明细**（命中的端口规则代码，语言无关），
+    tooltip 用它渲染子行；不在 `reasons` 里展开是刻意的（见
+    `_REASON_WEAK_PROTOCOLS`）。键**恒定存在**（没命中时是空列表），
+    消费方不用判断有没有。
     """
     score = 0
     reasons = []
     ports = set(getattr(result, "open_ports", None) or [])
-    for code, port, points in _PORT_RULES:
-        if port in ports:
-            score += points
-            reasons.append((code, points))
-    # 明文 HTTP 只在**没有** HTTPS 时才计分：同机开了 443 说明有加密替代，
-    # 这时候再报"HTTP 明文"就是噪声。
-    if 80 in ports and 443 not in ports:
-        score += _HTTP_ONLY_POINTS
-        reasons.append((_REASON_CLEARTEXT_HTTP, _HTTP_ONLY_POINTS))
+    # 明文 / 无认证服务聚成一条 —— 它们说的是同一件事（见 _REASON_WEAK_PROTOCOLS）。
+    weak_points, weak_hits = weak_protocol_reasons(ports)
+    if weak_points:
+        score += weak_points
+        reasons.append((_REASON_WEAK_PROTOCOLS, weak_points))
     for code, points in tls_reasons(getattr(result, "tls_cert", None), now=now):
         score += points
         reasons.append((code, points))
@@ -289,7 +337,8 @@ def score_risk(result, conflicts=(), now=None) -> dict:
         reasons.append((code, points))
     return {"score": min(score, RISK_MAX),
             "level": risk_level(score),
-            "reasons": reasons}
+            "reasons": reasons,
+            "weak_protocols": weak_hits}
 
 
 # ── 显示 ───────────────────────────────────────────────────────────────
@@ -307,10 +356,30 @@ def format_risk(risk) -> str:
 
 
 def format_risk_tooltip(risk) -> str:
-    """tooltip：把分数拆成"哪几项各加了多少分"。"""
+    """tooltip：把分数拆成"哪几项各加了多少分"。
+
+    弱协议那一条会多一行缩进的**明细**（命中的具体服务），见
+    `_REASON_WEAK_PROTOCOLS` —— 结论一行先出来，明细按需往下看。
+
+    ⚠ 各项之和**可能大于** `score`（`RISK_MAX` 封顶）。这时末尾补一行说明 ——
+    否则用户看到"100/100"底下几项加起来 120，会以为算错了。**不**去把某项
+    截断到 0：那会凭空丢掉一条真实发现（"MAC 地址冲突 +0" 或干脆不显示），
+    比多一行说明糟得多。
+
+    ⚠ 明细用 `", ".join()` 拼（与 `main_window_tree` 拼服务名同一手法），
+    不再单独做一个"分隔符"词条：语言包里的分隔符只会多一处可能漏翻的地方。
+    """
     if not risk or not risk.get("reasons"):
         return tr("未发现明显的服务暴露风险")
     lines = [tr("风险评分 {n}/100").format(n=risk["score"])]
     for code, points in risk["reasons"]:
         lines.append("· %s +%d" % (reason_label(code), points))
+        if code == _REASON_WEAK_PROTOCOLS:
+            detail = ", ".join(reason_label(c)
+                               for c in risk.get("weak_protocols") or ())
+            if detail:
+                lines.append("    " + detail)
+    raw = sum(points for _code, points in risk["reasons"])
+    if raw > risk["score"]:
+        lines.append(tr("已达评分上限（各项合计 {n}）").format(n=raw))
     return "\n".join(lines)

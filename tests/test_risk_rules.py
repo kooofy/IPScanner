@@ -88,8 +88,11 @@ class ScoringTest(unittest.TestCase):
         risk = risk_rules.score_risk(_result([23, 21]))
         self.assertEqual(sum(p for _, p in risk["reasons"]), risk["score"])
         self.assertEqual([code for code, _ in risk["reasons"]],
+                         ["weak_protocols"],
+                         "明文一族聚合成一条理由（v1.9 #3 第三刀）")
+        self.assertEqual(risk["weak_protocols"],
                          ["cleartext_telnet", "cleartext_ftp"],
-                         "理由必须保序，tooltip 才好读")
+                         "明细按严重度保序，tooltip 才好读")
 
     def test_conflict_points_follow_the_detector_severity(self):
         """冲突分值直接取严重级别 —— 不另立一套判断，避免两处漂移。"""
@@ -126,6 +129,163 @@ class ScoringTest(unittest.TestCase):
             with self.subTest(case=name):
                 got = risk_rules.score_risk(_result(ports))["level"]
                 self.assertEqual(got, want, "%s 的等级判错了" % name)
+
+
+class WeakProtocolAggregationTest(unittest.TestCase):
+    """明文 / 无认证服务聚合成**一条**结论（v1.9 #3 第三刀）。
+
+    为什么值得单独一段：一台老路由器 (23/80/161) 原来会刷出三行近义理由
+    （Telnet 明文管理 / SNMP v2c 团体字明文 / HTTP 明文管理面），说的是**同一件事**，
+    却把 tooltip 撑成一面墙。聚合后是一条结论 + 一行明细。
+
+    🔴 本段最要紧的标定：**总分一个字都没变**。下面这张表是文档顶部那张标定表
+    的翻版 —— 聚合若顺手改了分数，等于把整列风险分的可信度推翻。
+    """
+
+    def tearDown(self):
+        i18n.init("zh-CN")
+
+    #: (标签, 端口, 期望总分, 期望明细)
+    CALIBRATION = (
+        ("普通 Windows 主机", (135, 139, 445, 3389), 0, []),
+        ("打印机", (80, 161, 9100), 25,
+         ["cleartext_snmp", "cleartext_http"]),
+        ("路由器", (23, 80, 161), 55,
+         ["cleartext_telnet", "cleartext_snmp", "cleartext_http"]),
+        ("群晖 NAS", (80, 445, 5000), 10, ["cleartext_http"]),
+        ("网络摄像头", (23, 80, 554), 40,
+         ["cleartext_telnet", "cleartext_http"]),
+    )
+
+    def test_calibration_table_is_unchanged(self):
+        """🔴 聚合不许动分数 —— 逐个复核文档里的标定值。"""
+        for label, ports, want_score, want_detail in self.CALIBRATION:
+            with self.subTest(label=label):
+                risk = risk_rules.score_risk(_result(ports))
+                self.assertEqual(risk["score"], want_score)
+                self.assertEqual(risk["weak_protocols"], want_detail)
+
+    def test_one_reason_per_host_not_per_port(self):
+        """一台设备命中三个弱协议，`reasons` 里仍然只有**一条**。"""
+        risk = risk_rules.score_risk(_result([23, 80, 161]))
+        weak = [c for c, _ in risk["reasons"] if c == "weak_protocols"]
+        self.assertEqual(len(weak), 1)
+        self.assertEqual([c for c, _ in risk["reasons"]], ["weak_protocols"])
+
+    def test_the_aggregate_carries_the_whole_subtotal(self):
+        """那一条理由的分值 = 各端口之和（30+15+10），不是其中最大的那个。"""
+        risk = risk_rules.score_risk(_result([23, 80, 161]))
+        self.assertEqual(dict(risk["reasons"]), {"weak_protocols": 55})
+
+    def test_detail_is_ordered_by_severity(self):
+        """明细按 `_PORT_RULES` 的严重度降序（30/25/20/20/15，HTTP 10 最后）。"""
+        risk = risk_rules.score_risk(_result([80, 21, 161, 23, 5900, 69]))
+        self.assertEqual(risk["weak_protocols"], [
+            "cleartext_telnet", "unauthenticated_vnc", "cleartext_ftp",
+            "cleartext_tftp", "cleartext_snmp", "cleartext_http"])
+
+    def test_http_only_rule_survives_the_aggregation(self):
+        """同机开了 443 说明有加密替代 —— 这时候报「HTTP 明文」就是噪声。"""
+        self.assertEqual(risk_rules.score_risk(_result([80]))["weak_protocols"],
+                         ["cleartext_http"])
+        self.assertEqual(risk_rules.score_risk(_result([80, 443]))["weak_protocols"],
+                         [])
+        self.assertEqual(risk_rules.score_risk(_result([80, 443]))["score"], 0)
+
+    def test_unlisted_ports_do_not_count(self):
+        """445/3389/135/139 是普通 Windows 主机的常态，不在弱协议族里。"""
+        risk = risk_rules.score_risk(_result([135, 139, 445, 3389]))
+        self.assertEqual(risk["score"], 0)
+        self.assertEqual(risk["weak_protocols"], [])
+
+    def test_the_key_is_always_present(self):
+        """形状稳定：没命中时是空列表，消费方不用判断键在不在。"""
+        for ports in ((), [443], [23]):
+            with self.subTest(ports=ports):
+                risk = risk_rules.score_risk(_result(ports))
+                self.assertIn("weak_protocols", risk)
+                self.assertIsInstance(risk["weak_protocols"], list)
+
+    def test_result_without_open_ports_is_tolerated(self):
+        class _Bare:
+            ip = "10.0.0.1"
+            status = "online"
+
+        risk = risk_rules.score_risk(_Bare())
+        self.assertEqual(risk["score"], 0)
+        self.assertEqual(risk["weak_protocols"], [])
+
+    def test_helper_is_a_pure_function(self):
+        """`weak_protocol_reasons()` 可单独用（与 `tls_reasons()` 同一待遇）。"""
+        self.assertEqual(risk_rules.weak_protocol_reasons([23, 21]), (50, [
+            "cleartext_telnet", "cleartext_ftp"]))
+        self.assertEqual(risk_rules.weak_protocol_reasons([]), (0, []))
+        for bad in (None, 0, ""):
+            with self.subTest(bad=bad):
+                self.assertEqual(risk_rules.weak_protocol_reasons(bad), (0, []))
+
+    def test_helper_does_not_mutate_its_input(self):
+        ports = [23, 21]
+        risk_rules.weak_protocol_reasons(ports)
+        self.assertEqual(ports, [23, 21])
+
+    # ── tooltip ──
+
+    def test_tooltip_gives_one_conclusion_plus_a_detail_line(self):
+        """这正是本刀的目的：路由器从 3 行理由变成 1 行结论 + 1 行明细。"""
+        i18n.init("zh-CN")
+        risk = risk_rules.score_risk(_result([23, 80, 161]))
+        tip = risk_rules.format_risk_tooltip(risk)
+        lines = tip.split("\n")
+        # 第 0 行是"风险评分 N/100"，之后只有一条 "· " 理由 + 一行缩进明细
+        bullets = [ln for ln in lines if ln.startswith("· ")]
+        self.assertEqual(len(bullets), 1, tip)
+        self.assertIn(risk_rules.reason_label("weak_protocols"), bullets[0])
+        self.assertIn("+55", bullets[0])
+        detail = [ln for ln in lines if ln.startswith("    ")]
+        self.assertEqual(len(detail), 1, tip)
+        for code in risk["weak_protocols"]:
+            self.assertIn(risk_rules.reason_label(code), detail[0])
+
+    def test_tooltip_detail_uses_the_same_labels_as_before(self):
+        """明细里的每个服务名仍然走 `_REASON_TEXT` —— 词条没被聚合删掉。"""
+        i18n.init("zh-CN")
+        for code in ("cleartext_telnet", "unauthenticated_vnc",
+                     "cleartext_ftp", "cleartext_tftp", "cleartext_snmp",
+                     "cleartext_http"):
+            with self.subTest(code=code):
+                self.assertTrue(risk_rules._REASON_TEXT.get(code))
+
+    def test_tooltip_explains_the_cap(self):
+        """🔴 各项之和 > 上限时，tooltip 必须说明白 —— 否则"100/100"底下
+        加起来 120，用户会以为算错了。"""
+        i18n.init("zh-CN")
+        risk = risk_rules.score_risk(_result([21, 23, 69, 161, 5900, 80]))
+        self.assertEqual(risk["score"], risk_rules.RISK_MAX)
+        raw = sum(p for _, p in risk["reasons"])
+        self.assertGreater(raw, risk["score"], "这条用例要靠封顶才成立")
+        tip = risk_rules.format_risk_tooltip(risk)
+        self.assertIn(
+            risk_rules.tr("已达评分上限（各项合计 {n}）").format(n=raw), tip)
+
+    def test_tooltip_has_no_cap_line_when_not_capped(self):
+        i18n.init("zh-CN")
+        risk = risk_rules.score_risk(_result([23, 21]))
+        tip = risk_rules.format_risk_tooltip(risk)
+        self.assertNotIn(risk_rules.tr("已达评分上限（各项合计 {n}）").format(n=50),
+                         tip)
+
+    def test_tooltip_for_a_clean_host_is_the_plain_message(self):
+        i18n.init("zh-CN")
+        risk = risk_rules.score_risk(_result([135, 139, 445, 3389]))
+        self.assertEqual(risk_rules.format_risk_tooltip(risk),
+                         risk_rules.tr("未发现明显的服务暴露风险"))
+
+    def test_cell_text_is_unchanged(self):
+        """单元格文案只跟分数/等级有关，聚合不该影响它。"""
+        i18n.init("zh-CN")
+        risk = risk_rules.score_risk(_result([23, 80, 161]))
+        self.assertEqual(risk_rules.format_risk(risk), "中 55")
 
 
 class TlsReasonTest(unittest.TestCase):
@@ -250,7 +410,7 @@ class TlsReasonTest(unittest.TestCase):
         risk = risk_rules.score_risk(r, now=self.NOW)
         self.assertEqual(risk["score"], 35)          # Telnet 30 + 自签名 5
         self.assertEqual([c for c, _ in risk["reasons"]],
-                         ["cleartext_telnet", "tls_self_signed"])
+                         ["weak_protocols", "tls_self_signed"])
 
     def test_score_risk_tolerates_objects_without_the_attribute(self):
         """历史库里读回来的对象没有这个属性 —— `getattr` 兜底不能炸。"""
@@ -319,7 +479,7 @@ class ResponderReasonTest(unittest.TestCase):
         risk = risk_rules.score_risk(r)
         self.assertEqual(risk["score"], 60)          # Telnet 30 + 响应器 30
         self.assertEqual([c for c, _ in risk["reasons"]],
-                         ["cleartext_telnet", "name_responder"])
+                         ["weak_protocols", "name_responder"])
 
     def test_responder_reason_comes_after_tls(self):
         """顺序契约：端口 → TLS → 响应器 → 冲突（见 `score_risk` 文档）。"""
@@ -327,7 +487,7 @@ class ResponderReasonTest(unittest.TestCase):
         r.tls_cert = {"not_after": "2020-01-01T00:00:00"}
         r.name_responder = {"llmnr": "x"}
         codes = [c for c, _ in risk_rules.score_risk(r, now=self.NOW)["reasons"]]
-        self.assertEqual(codes, ["cleartext_telnet", "tls_expired",
+        self.assertEqual(codes, ["weak_protocols", "tls_expired",
                                  "name_responder"])
 
     def test_points_match_the_declared_constant(self):
@@ -399,6 +559,7 @@ class LabelTest(unittest.TestCase):
         codes.update({"duplicate_mac", "duplicate_hostname", "unknown_device"})
         codes.update(code for code, _ in risk_rules._TLS_POINTS)
         codes.add(risk_rules._REASON_NAME_RESPONDER)
+        codes.add(risk_rules._REASON_WEAK_PROTOCOLS)
         for code in codes:
             with self.subTest(code=code):
                 self.assertTrue(
@@ -431,6 +592,11 @@ class FormatTest(unittest.TestCase):
             "中 55")
 
     def test_tooltip_splits_the_score(self):
+        """tooltip 要能看出"这 50 分是哪来的"。
+
+        明文一族聚合后，具体服务名（Telnet / FTP）出现在**明细子行**里而不是
+        各占一条理由 —— 这条断言因此同时守着"聚合没把服务名弄丢"。
+        """
         i18n.init("zh-CN")
         tip = risk_rules.format_risk_tooltip(risk_rules.score_risk(_result([23, 21])))
         self.assertIn("50", tip)
