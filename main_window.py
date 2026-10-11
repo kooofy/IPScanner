@@ -302,7 +302,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         tb1.setContentsMargins(2, 2, 2, 2)
 
         _ICON_SZ = 16
-        _icon_color = "#FFFFFF" if self.dark_mode else "#555555"
+        _icon_color = token("tool_icon", self.dark_mode)
 
         _play_pm = QPixmap(os.path.join(resource_dir(), "assets", "play_icon.png")).scaled(
             22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -1069,8 +1069,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 标签与分隔线的颜色已全部下沉到 QSS（objectName 选择器），
         # 这里不再逐控件改色 —— 否则主题色会同时存在于 .qss 与本函数两处，
         # 新增一个内联样式就会在深色下"漏白"（见 docs/reviews/UI_REVIEW.md P2-2）。
-        # 工具栏小图标随主题重绘线条颜色
-        _icon_color = "#FFFFFF" if dark else "#555555"
+        # 工具栏小图标随主题重绘线条颜色（色值与建按钮时同源：token("tool_icon")）
+        _icon_color = token("tool_icon", dark)
         if hasattr(self, "local_subnet_btn"):
             _sz = self.local_subnet_btn.iconSize().width()
             self.local_subnet_btn.setIcon(_make_tool_icon("ip", _icon_color, _sz))
@@ -1905,6 +1905,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
 
     def _show_about(self):
         _data_info = tr("数据目录：") + data_dir() + "\n" + tr("存放方式：") + data_dir_label()
+        # 小字配色按主题取，且**不能写进 tr() 的键** —— 否则改一次配色就要同步改
+        # 两个语言包（同 ui_dialogs 图例那条，见 tests/test_ui_dialogs_colors.py
+        # 的 `test_legend_keeps_the_colour_out_of_the_translation_key`）。
+        _muted = token("gray", self.dark_mode)
         msg_about(self, tr("关于"), (
             tr("<h3>局域网终端扫描工具</h3>")
             # 版本号从可翻译串里拆出来：它不需要翻译，混进去会导致
@@ -1922,8 +1926,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             + tr("<li>设备指纹深度（端口/服务/mDNS/UPnP/SNMP 综合推断设备类型与型号）</li>"
                  "<li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>")
             + "</ul>"
-            + f"<p style='color:#94A3B8; font-size:11px;'>{_data_info}</p>"
-            + tr("<p style='color: #94A3B8;'>基于 PyQt5 开发</p>")
+            # `font-size` 只能内联：这是 QMessageBox 的富文本，QSS 选择器够不到它。
+            + f"<p style='color:{_muted}; font-size:11px;'>{_data_info}</p>"
+            + f"<p style='color:{_muted};'>{tr('基于 PyQt5 开发')}</p>"
         ))
 
     def closeEvent(self, event):

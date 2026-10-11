@@ -490,9 +490,10 @@ class TreeMixin:
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # 地球底色
+        # 地球底色。色值走令牌 —— 该位图一次构造后缓存（`_globe_icon_cache`），
+        # 不随主题重绘，所以令牌刻意浅深同值（见 theme_tokens 里 icon_globe 的说明）。
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(59, 130, 246)))
+        painter.setBrush(QBrush(QColor(token("icon_globe", self.dark_mode))))
         painter.drawEllipse(2, 2, 16, 16)
 
         # 经纬线

@@ -14,7 +14,6 @@
   "<li>支持 CIDR / IP 范围 / 跨网段扫描</li><li>ICMP Ping + ARP 主动探测（发现禁 Ping 主机）+ 主机名 + 端口探测</li>": "<li>CIDR / IP range / cross-subnet scanning</li><li>ICMP Ping + active ARP probing (finds hosts that block Ping) + host names + port scanning</li>",
   "<li>端口探测方式：TCP 全连接 / SYN 半开 / UDP（可切换）</li><li>共享文件夹探测（SMB 共享枚举）</li>": "<li>Port scanning modes: full TCP connect / half-open SYN / UDP (switchable)</li><li>Shared-folder discovery (SMB share enumeration)</li>",
   "<li>设备指纹深度（端口/服务/mDNS/UPnP/SNMP 综合推断设备类型与型号）</li><li>内置网络工具：Ping / Tracert / Telnet / SSH / RDP / 命令提示符 / 远程关机 / 远程重启</li>": "<li>Deep device fingerprinting (infers device type and model from ports / services / mDNS / UPnP / SNMP)</li><li>Built-in network tools: Ping / Tracert / Telnet / SSH / RDP / Command Prompt / remote shutdown / remote restart</li>",
-  "<p style='color: #94A3B8;'>基于 PyQt5 开发</p>": "<p style='color: #94A3B8;'>Built with PyQt5</p>",
   "<p>功能：</p>": "<p>Features:</p>",
   "<title>IPScanner 扫描结果</title></head><body>": "<title>IPScanner Scan Results</title></head><body>",
   ">>> [未捕获异常]\n": ">>> [Uncaught exception]\n",
@@ -850,5 +849,6 @@
 
   "已通过 SNMP 识别到 {n} 台网络设备，但它们没有上报 LLDP/CDP 邻居、转发表也不可用，因此无法还原实际连接": "SNMP identified {n} network device(s), but they reported no LLDP/CDP neighbors and their forwarding tables are unavailable, so the actual connections cannot be reconstructed",
 
-  "另有 {n} 台设备接入位置未知（已排在画布底部）": "{n} device(s) with unknown attachment (placed at the bottom of the canvas)"
+  "另有 {n} 台设备接入位置未知（已排在画布底部）": "{n} device(s) with unknown attachment (placed at the bottom of the canvas)",
+  "基于 PyQt5 开发": "Built with PyQt5"
 }

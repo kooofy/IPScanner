@@ -31,6 +31,10 @@ _TOKENS = {
     "muted": ("#64748B", "#969CA6"),
     "muted_label": ("#888888", "#9AA0A6"),
     "stats": ("#555555", "#C8C8C8"),
+    # 工具栏自绘线条图标（`ui_icons._make_tool_icon` / `_make_pause_icon`）的描边色。
+    # 浅色下用中灰 —— 纯黑在浅色按钮上过硬；深色下用近白。
+    # 建按钮时与切主题时**两处**都要取它，同源才不会"切一次主题串一次色"。
+    "tool_icon": ("#555555", "#FFFFFF"),
     # 分隔线
     "sep": ("#CCCCCC", "#3F3F46"),
     # 语义状态
@@ -43,6 +47,15 @@ _TOKENS = {
     "icon_online_screen": ("#DCFCE7", "#14532D"),
     "icon_offline_edge": ("#94A3B8", "#6B7280"),
     "icon_offline_screen": ("#F1F5F9", "#2D2D30"),
+    # 在线图标屏幕上那两道"高亮线"。压在浅色屏(#DCFCE7)与深色屏(#14532D)上都
+    # 看得见，因此浅深**刻意同值** —— 与下面 `topo_offline` / `gateway` / `cdp`
+    # 是同一类"两底色通用色"，由 `tests/test_color_literals.py::SameInBothThemesTest` 守着。
+    "icon_online_highlight": ("#86EFAC", "#86EFAC"),
+    # 服务行地球图标（HTTP/HTTPS 的兜底图标）底色。
+    # ⚠ 它是**一次构造后缓存**的位图（`main_window_tree._globe_icon_cache`），
+    # 不随主题重绘 —— 所以这里也刻意同值：若配成两个不同的值，图标颜色就会取决于
+    # "第一次渲染时恰好是哪个主题"，比固定一色更糟。
+    "icon_globe": ("#3B82F6", "#3B82F6"),
 
     # ── 对话框（ui_dialogs/）用到的语义色 ──────────────────────
     #
@@ -80,6 +93,46 @@ def token(name: str, dark: bool = False) -> str:
     if pair is None:
         return ""
     return pair[1] if dark else pair[0]
+
+
+#: 深色 `QPalette` 专色 —— 只服务于 `ui_icons._build_dark_palette()`。
+#:
+#: 为什么不并进上面的 `_TOKENS`：那张表里**每个名字都必须有"浅色 + 深色"两个值**
+#: （浅色主题下也要用）。而深色 QPalette 只用于深色主题 —— 浅色主题直接沿用
+#: `app.style().standardPalette()`，**根本不存在"浅色值"**。硬凑一个塞进 `_TOKENS`
+#: 只会让"两套主题"这个不变量变成谎话。
+#:
+#: 键名与 `QPalette.ColorRole` 一一对应（下划线小写），便于对照 Qt 文档。
+_DARK_PALETTE = {
+    "window": "#2B2B2B",
+    "window_text": "#E0E0E0",
+    "base": "#1E1E1E",
+    "alternate_base": "#2D2D30",
+    "tooltip_base": "#2D2D30",
+    "tooltip_text": "#E0E0E0",
+    "text": "#E0E0E0",
+    "button": "#3E3E42",
+    "button_text": "#E0E0E0",
+    "bright_text": "#FF5050",
+    "link": "#4DA6FF",
+    "link_visited": "#78B4FF",
+    "highlight": "#0E639C",
+    "highlighted_text": "#FFFFFF",
+}
+
+
+def dark_palette_color(role: str) -> str:
+    """取深色 QPalette 某个角色（`_DARK_PALETTE` 的键）的色值。
+
+    未知角色返回空串 —— 与 `token()` 一致。**拼错角色名不会报错**，只会让某个
+    原生对话框控件变成无效色，因此由 `tests/test_color_literals.py` 守着。
+    """
+    return _DARK_PALETTE.get(role, "")
+
+
+def all_dark_palette_colors() -> dict:
+    """返回 {角色: 色值} 的副本，供测试校验完整性。"""
+    return dict(_DARK_PALETTE)
 
 
 def all_tokens() -> dict:

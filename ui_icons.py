@@ -5,7 +5,7 @@ from PyQt5.QtGui import (
     QColor, QPainter, QBrush, QPen, QPixmap, QIcon, QPalette, QImage
 )
 
-from theme_tokens import token
+from theme_tokens import dark_palette_color, token
 
 #: {是否深色: (在线图标, 离线图标)} —— 按主题分别缓存
 _PC_ICONS = {}
@@ -13,22 +13,29 @@ _PC_ICONS = {}
 
 def _build_dark_palette() -> QPalette:
     """构造深色 QPalette，用于原生对话框 (QMessageBox / QFileDialog / QInputDialog) 等
-    未被自定义样式表覆盖的控件随主题上色。"""
+    未被自定义样式表覆盖的控件随主题上色。
+
+    色值一律取自 `theme_tokens.dark_palette_color()`。这张表**只有深色值**：浅色
+    主题直接沿用 `app.style().standardPalette()`，没有"浅色值"这回事。此前这里
+    散着 13 个 `QColor(43, 43, 43)` 这样的裸字面量，与 `theme_tokens` 的其余配色
+    是两套来源 —— 改主题色时容易只改一处。
+    """
     p = QPalette()
-    p.setColor(QPalette.Window, QColor(43, 43, 43))
-    p.setColor(QPalette.WindowText, QColor(224, 224, 224))
-    p.setColor(QPalette.Base, QColor(30, 30, 30))
-    p.setColor(QPalette.AlternateBase, QColor(45, 45, 48))
-    p.setColor(QPalette.ToolTipBase, QColor(45, 45, 48))
-    p.setColor(QPalette.ToolTipText, QColor(224, 224, 224))
-    p.setColor(QPalette.Text, QColor(224, 224, 224))
-    p.setColor(QPalette.Button, QColor(62, 62, 66))
-    p.setColor(QPalette.ButtonText, QColor(224, 224, 224))
-    p.setColor(QPalette.BrightText, QColor(255, 80, 80))
-    p.setColor(QPalette.Link, QColor(77, 166, 255))
-    p.setColor(QPalette.LinkVisited, QColor(120, 180, 255))
-    p.setColor(QPalette.Highlight, QColor(14, 99, 156))
-    p.setColor(QPalette.HighlightedText, Qt.white)
+    p.setColor(QPalette.Window, QColor(dark_palette_color("window")))
+    p.setColor(QPalette.WindowText, QColor(dark_palette_color("window_text")))
+    p.setColor(QPalette.Base, QColor(dark_palette_color("base")))
+    p.setColor(QPalette.AlternateBase, QColor(dark_palette_color("alternate_base")))
+    p.setColor(QPalette.ToolTipBase, QColor(dark_palette_color("tooltip_base")))
+    p.setColor(QPalette.ToolTipText, QColor(dark_palette_color("tooltip_text")))
+    p.setColor(QPalette.Text, QColor(dark_palette_color("text")))
+    p.setColor(QPalette.Button, QColor(dark_palette_color("button")))
+    p.setColor(QPalette.ButtonText, QColor(dark_palette_color("button_text")))
+    p.setColor(QPalette.BrightText, QColor(dark_palette_color("bright_text")))
+    p.setColor(QPalette.Link, QColor(dark_palette_color("link")))
+    p.setColor(QPalette.LinkVisited, QColor(dark_palette_color("link_visited")))
+    p.setColor(QPalette.Highlight, QColor(dark_palette_color("highlight")))
+    p.setColor(QPalette.HighlightedText,
+               QColor(dark_palette_color("highlighted_text")))
     return p
 
 
@@ -75,7 +82,7 @@ def _make_pc_pixmap(online: bool, dark: bool = False, dpr: float = 1.0) -> QPixm
     p.setBrush(QBrush(screen))
     p.drawRect(x0, y0, w, h)
     if online:
-        p.setPen(QPen(QColor(134, 239, 172), 1))
+        p.setPen(QPen(QColor(token("icon_online_highlight", dark)), 1))
         p.drawLine(x0 + 3, y0 + 4, x0 + w - 3, y0 + 4)
         p.drawLine(x0 + 3, y0 + 8, x0 + w - 6, y0 + 8)
 
@@ -125,8 +132,13 @@ def _gray_icon(base_icon):
     return QIcon(QPixmap.fromImage(img))
 
 
-def _make_tool_icon(kind, color="#555555", size=18):
-    """绘制工具栏小图标（IP/C/展开/收起），支持指定线条颜色以适配主题。"""
+def _make_tool_icon(kind, color, size=18):
+    """绘制工具栏小图标（IP/C/展开/收起）。
+
+    `color` **没有默认值**：线条色必须由调用方按当前主题取
+    （`token("tool_icon", dark)`）。给个灰色默认值只会让"忘了传色"表现为
+    "切主题后某个图标不变色" —— 肉眼很难发现，所以干脆不给默认值。
+    """
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
@@ -162,8 +174,11 @@ def _make_tool_icon(kind, color="#555555", size=18):
     return QIcon(pm)
 
 
-def _make_pause_icon(color="#555555", size=18):
-    """绘制暂停图标（两竖条），线条颜色随主题，与工具栏小工具一致。"""
+def _make_pause_icon(color, size=18):
+    """绘制暂停图标（两竖条），线条颜色随主题，与工具栏小工具一致。
+
+    同 `_make_tool_icon`：`color` 必传，理由见上。
+    """
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)

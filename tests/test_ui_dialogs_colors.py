@@ -9,16 +9,15 @@
     `setStyleSheet("color: #555555; …")` 的摘要文字 → 深色底上几乎不可见
     严重级别/利用率用的红橙                     → 深色底上约 2.5:1（AA 要 4.5:1）
 
-本文件守三件事：
+本文件守两件事：
 
-1. **结构** —— `ui_dialogs/` 包里不得再出现色值字面量（`#hex` 或不透明的
-   `QColor(r, g, b)`）。带 alpha 的 4 参数 `QColor` 允许：那是半透明装饰
-   （节点高光/描边），压在浅深两种画布上都只是"淡一点的边"，与主题无关，
-   而令牌表刻意只存不透明色。
-2. **有效性** —— 代码里引用的令牌名必须真的存在。拼错的名字会让
-   `token()` 静默返回空串，颜色变成无效值 —— 这类错**不会报错**，
-   只会表现为"某处颜色不对"。
-3. **随主题变** —— 关键几处（拓扑画布、严重级别）在两套主题下取值必须不同。
+1. **随主题变** —— 关键几处（拓扑画布、严重级别）在两套主题下取值必须不同。
+2. **配色不进词条** —— 图例的色值不能写进 `tr()` 的键。
+
+> 原先还守着「结构（不得出现色值字面量）」与「令牌名有效性」两项，现已迁到
+> `tests/test_color_literals.py`：那边覆盖面更大（三个核心 UI 文件 + 本包），
+> 且判定改用 AST 而非源码正则（正则会把注释 / docstring 里的色值也算违规，
+> 见 `docs/reviews/PRODUCT_ADVISORY_REVIEW.md` §3.1）。
 
 另外顺手守住本次一并修掉的"类体 `tr()` 冻结"：对话框表头原先写成类属性，
 导入时就被冻成中文，英文界面下永远显示中文表头。
@@ -26,7 +25,6 @@
 import inspect
 import io
 import os
-import re
 import sys
 import unittest
 
@@ -75,40 +73,11 @@ def _qss(name):
     return _src(os.path.join("assets", "styles", name))
 
 
-class NoColorLiteralTest(unittest.TestCase):
-    """`ui_dialogs/` 包不得再出现色值字面量。"""
-
-    def test_no_hex_literal(self):
-        found = sorted(set(re.findall(r"#[0-9A-Fa-f]{3,8}\b", _pkg_src())))
-        self.assertEqual(
-            found, [],
-            "ui_dialogs 包里仍有色值字面量 %s。自绘/单元格着色请用 "
-            "theme_tokens.token()，普通控件请把配色收进 QSS。" % found)
-
-    def test_no_opaque_qcolor_literal(self):
-        found = sorted(set(re.findall(
-            r"QColor\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)", _pkg_src())))
-        self.assertEqual(
-            found, [],
-            "ui_dialogs 包里仍有不透明 QColor 字面量 %s，请改用 _theme_color()"
-            % found)
-
-
-class TokenReferenceTest(unittest.TestCase):
-    """引用的令牌名必须存在（拼错会静默返回空串）。"""
-
-    def test_every_referenced_token_exists(self):
-        src = _pkg_src()
-        names = set(re.findall(r"_theme_color\(\s*\"([a-z_]+)\"", src))
-        names |= set(re.findall(r"\btoken\(\s*\"([a-z_]+)\"", src))
-        unknown = sorted(n for n in names if n not in all_tokens())
-        self.assertEqual(unknown, [], "引用了未定义的令牌：%s" % unknown)
-
-    def test_every_token_has_both_theme_values(self):
-        for name in all_tokens():
-            for dark in (False, True):
-                self.assertTrue(token(name, dark),
-                                "%s 在 dark=%s 下取不到色值" % (name, dark))
+# 说明：本文件原先自带 `NoColorLiteralTest`（对 `ui_dialogs/` 包跑**源码正则**）
+# 与 `TokenReferenceTest`。两件事已迁到 `tests/test_color_literals.py` —— 那边
+# 覆盖面更大（三个核心 UI 文件 + 本包），且判定改用 **AST**：源码正则会连注释与
+# docstring 里的色值一起命中（`docs/reviews/PRODUCT_ADVISORY_REVIEW.md` §3.1），
+# 把"注释里提到颜色"变成违规。同一件事只留一个口径，这里不再重复。
 
 
 class ThemeAwareTest(unittest.TestCase):
