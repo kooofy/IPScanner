@@ -147,7 +147,7 @@ grep -oE "QColor\(\s*[0-9]+\s*,\s*[0-9]+\s*,\s*[0-9]+\s*\)" ui_icons.py | wc -l 
 
 ## 5. 引用约定
 
-同 `README.md`（本目录）§6：引用本文档时写**带路径**形式 ——
+同 `README.md`（本目录）§7：引用本文档时写**带路径**形式 ——
 
 ```
 docs/reviews/PRODUCT_ADVISORY_REVIEW.md §2
