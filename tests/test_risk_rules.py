@@ -268,6 +268,88 @@ class TlsReasonTest(unittest.TestCase):
         self.assertEqual(risk_rules.score_risk(r, now=self.NOW)["score"], 0)
 
 
+class ResponderReasonTest(unittest.TestCase):
+    """名字响应器事实 → 风险理由（v1.9 #3 第二刀）。
+
+    与 TLS 那一段的关键差别：**这个探测会往网络里发包**（见
+    `scanner/llmnr_nbns.py` 的红线），所以由显式开关控制、默认关。
+    评分侧只负责把事实翻成结论。
+
+    标定思路：这个发现本身是**歧义的** —— 应答不存在名字的既可能是欺骗响应器
+    （攻击），也可能是安全扫描工具 / 蜜罐（防护）。所以 30 分表示"值得看一眼"，
+    而不是替用户断定对方恶意。
+    """
+
+    #: 固定"今天"，与 `TlsReasonTest` 一致（`score_risk(now=...)` 需要）。
+    NOW = datetime.datetime(2026, 10, 11, 12, 0, 0)
+
+    def test_no_responder_means_no_reasons(self):
+        for bad in ({}, None, 0, ""):
+            with self.subTest(bad=bad):
+                self.assertEqual(risk_rules.responder_reasons(bad), [])
+
+    def test_a_responder_scores_thirty(self):
+        got = dict(risk_rules.responder_reasons({"llmnr": "ipscanner-a1b2c"}))
+        self.assertEqual(got, {"name_responder": 30})
+
+    def test_both_protocols_are_one_conclusion(self):
+        """🔴 标定：两个协议都给肯定应答是**同一个发现**，只算一次分。
+
+        拆成两条会让风险栏里出现两条近义理由、分数还翻倍。协议明细留在
+        事实层（`history_store.responder_facts` 的 llmnr/nbns 两行）。
+        """
+        one = risk_rules.responder_reasons({"llmnr": "x"})
+        both = risk_rules.responder_reasons({"llmnr": "x", "nbns": "x"})
+        self.assertEqual(one, both)
+        self.assertEqual(len(both), 1)
+
+    def test_score_risk_picks_up_the_responder(self):
+        """接线：响应器事实必须真的进总分。"""
+        r = _result([])
+        self.assertEqual(risk_rules.score_risk(r)["score"], 0)
+        r.name_responder = {"llmnr": "ipscanner-a1b2c"}
+        risk = risk_rules.score_risk(r)
+        self.assertEqual(risk["score"], 30)
+        self.assertEqual([c for c, _ in risk["reasons"]], ["name_responder"])
+        self.assertEqual(risk["level"], risk_rules.RISK_LEVEL_MEDIUM)
+
+    def test_score_risk_combines_ports_tls_and_responder(self):
+        r = _result([23])
+        r.name_responder = {"nbns": "ipscanner-a1b2c"}
+        risk = risk_rules.score_risk(r)
+        self.assertEqual(risk["score"], 60)          # Telnet 30 + 响应器 30
+        self.assertEqual([c for c, _ in risk["reasons"]],
+                         ["cleartext_telnet", "name_responder"])
+
+    def test_responder_reason_comes_after_tls(self):
+        """顺序契约：端口 → TLS → 响应器 → 冲突（见 `score_risk` 文档）。"""
+        r = _result([23])
+        r.tls_cert = {"not_after": "2020-01-01T00:00:00"}
+        r.name_responder = {"llmnr": "x"}
+        codes = [c for c, _ in risk_rules.score_risk(r, now=self.NOW)["reasons"]]
+        self.assertEqual(codes, ["cleartext_telnet", "tls_expired",
+                                 "name_responder"])
+
+    def test_points_match_the_declared_constant(self):
+        """分值只有一处定义，别在别处又写一份。"""
+        self.assertEqual(risk_rules._NAME_RESPONDER_POINTS, 30)
+        self.assertEqual(risk_rules._REASON_NAME_RESPONDER, "name_responder")
+
+    def test_score_risk_tolerates_objects_without_the_attribute(self):
+        """历史库里读回来的对象没有这个属性 —— `getattr` 兜底不能炸。"""
+        class _Bare:
+            ip = "10.0.0.1"
+            status = "online"
+            open_ports = []
+
+        self.assertEqual(risk_rules.score_risk(_Bare())["score"], 0)
+
+    def test_a_clean_host_still_scores_zero(self):
+        """🔴 标定基线：普通主机（没勾这个名字响应器探测）仍然是 0 分。"""
+        r = _result([135, 139, 445, 3389, 443])
+        self.assertEqual(risk_rules.score_risk(r, now=self.NOW)["score"], 0)
+
+
 class LevelThresholdTest(unittest.TestCase):
 
     def test_boundaries(self):
@@ -316,6 +398,7 @@ class LabelTest(unittest.TestCase):
         codes.add(risk_rules._REASON_CLEARTEXT_HTTP)
         codes.update({"duplicate_mac", "duplicate_hostname", "unknown_device"})
         codes.update(code for code, _ in risk_rules._TLS_POINTS)
+        codes.add(risk_rules._REASON_NAME_RESPONDER)
         for code in codes:
             with self.subTest(code=code):
                 self.assertTrue(

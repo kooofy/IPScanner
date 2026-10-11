@@ -276,6 +276,10 @@ python cli.py scan -r 192.168.1.0/24 --save-snapshot --note "周一巡检"
 # 扫描时顺带读取各交换机转发表（记录"哪台设备在哪个口"），随快照落库
 python cli.py scan -r 192.168.1.0/24 --save-snapshot --switch-map
 
+# 安全体检：编一个不存在的主机名查一次 LLMNR/NBNS，看谁给肯定应答
+# （会向网络发送组播/广播包；加 --save-snapshot 才会写进快照）
+python cli.py scan -r 192.168.1.0/24 --name-responder --save-snapshot
+
 # 有变更时推送告警（走 notify.json 里的渠道与告警策略）
 python cli.py scan -r 192.168.1.0/24 --save-snapshot --notify
 python cli.py scan -r 192.168.1.0/24 --save-snapshot --notify --no-policy  # 忽略维护窗口/静音/去重

@@ -69,6 +69,10 @@ _PHASE_TEXT = {
     "mdns": "mDNS 组播发现",
     # 扫描末尾按需读取交换机转发表（见 topology_discovery.collect_switch_port_maps）
     "switch_map": "读取交换机转发表",
+    # 扫描末尾按需探测 LLMNR / NBNS 响应器（见 scanner/llmnr_nbns.py）。
+    # 措辞与 GUI 勾选框**刻意一致**（main_window.responder_check）—— 同一个开关，
+    # 摘要条上说"正在探测名字响应器"，用户能立刻对上自己勾的那个框。
+    "name_responder": "探测名字响应器",
 }
 
 

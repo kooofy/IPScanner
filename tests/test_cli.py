@@ -241,6 +241,110 @@ class SnapshotDeviceTest(unittest.TestCase):
         got = history_store.get_security_findings(sid, db_path=db)
         self.assertEqual(got["10.0.0.9"]["tls_cn"], "router.local")
 
+    # ── 名字响应器（v1.9 #3 第二刀）──
+
+    def test_responder_facts_are_included(self):
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.name_responder = {"llmnr": "ipscanner-a1b2c"}
+        dev = cli._snapshot_devices([r])[0]
+        self.assertEqual(dict(dev["security_findings"]),
+                         {"llmnr_responder": "ipscanner-a1b2c"})
+
+    def test_no_responder_means_no_key(self):
+        r = ScanResult(ip="10.0.0.10", status="online")
+        self.assertNotIn("security_findings", cli._snapshot_devices([r])[0])
+
+    def test_responder_matches_the_gui_path(self):
+        import ui_logic
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.tls_cert = dict(self._CERT)
+        r.name_responder = {"nbns": "ipscanner-a1b2c"}
+        cli_dev = cli._snapshot_devices([r])[0]
+        gui_dev = ui_logic.build_snapshot([r], ts=0.0)["devices"][0]
+        self.assertEqual(cli_dev["security_findings"], gui_dev["security_findings"])
+
+    def test_responder_roundtrips_through_the_database(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        db = os.path.join(tmp, "hist.db")
+        self.addCleanup(lambda: __import__("db_util").close_connection(db))
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.name_responder = {"llmnr": "ipscanner-a1b2c", "nbns": "ipscanner-a1b2c"}
+        sid = history_store.save_snapshot(cli._snapshot_devices([r]),
+                                          ts=1000.0, db_path=db)
+        got = history_store.get_security_findings(sid, db_path=db)
+        self.assertEqual(got["10.0.0.9"], {"llmnr_responder": "ipscanner-a1b2c",
+                                           "nbns_responder": "ipscanner-a1b2c"})
+
+
+class CollectRespondersTest(unittest.TestCase):
+    """CLI 侧的 `_collect_responders()` —— 探测结果分发（v1.9 #3 第二刀）。
+
+    这里只测**分发**：真发包的部分由 `tests/test_llmnr_nbns.py` 用回环假响应器
+    覆盖。CLI 测试绝不往真实组播/广播地址发包。
+    """
+
+    def _run(self, found, ips=("10.0.0.1", "10.0.0.2")):
+        """跑一遍 `_collect_responders`，返回 (results, stderr)。
+
+        ⚠ `cli.log()` 写的是 **stderr**（stdout 只承载结果数据，便于管道），
+        所以这里必须捕 stderr —— 捕 stdout 会得到一个空串。
+        """
+        from unittest import mock
+        results = [ScanResult(ip=ip, status="online") for ip in ips]
+        err = io.StringIO()
+        with mock.patch("scanner.llmnr_nbns.probe_responders",
+                        return_value=found):
+            with contextlib.redirect_stderr(err):
+                cli._collect_responders(None, results)
+        return results, err.getvalue()
+
+    def test_in_scope_responder_is_attached(self):
+        results, _out = self._run({"10.0.0.1": {"llmnr": "ipscanner-a"}})
+        self.assertEqual(results[0].name_responder, {"llmnr": "ipscanner-a"})
+        self.assertEqual(results[1].name_responder, {})
+
+    def test_findings_are_printed(self):
+        """CLI 用户看不到界面，结论只能靠日志 —— 这条是它的唯一出口。"""
+        _results, out = self._run({"10.0.0.1": {"llmnr": "ipscanner-a",
+                                                "nbns": "ipscanner-a"}})
+        self.assertIn("10.0.0.1", out)
+        self.assertIn("LLMNR", out)
+        self.assertIn("NBNS", out)
+
+    def test_clean_network_says_so(self):
+        """空结果也要说一句 —— 否则用户分不清"没发现"和"功能没生效"。"""
+        _results, out = self._run({})
+        self.assertTrue(out.strip(), "干净网络下什么都没输出")
+
+    def test_out_of_scope_responder_is_reported_but_not_invented(self):
+        results, out = self._run({"10.0.0.99": {"llmnr": "ipscanner-a"}})
+        self.assertEqual(len(results), 2, "不能凭空多出一台设备")
+        self.assertIn("10.0.0.99", out)
+        self.assertTrue(all(not r.name_responder for r in results))
+
+    def test_probe_failure_does_not_raise(self):
+        from unittest import mock
+        results = [ScanResult(ip="10.0.0.1", status="online")]
+        with mock.patch("scanner.llmnr_nbns.probe_responders",
+                        side_effect=RuntimeError("boom")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cli._collect_responders(None, results)   # 不抛即通过
+        self.assertIn("boom", err.getvalue())
+
+    def test_flag_is_parsed(self):
+        """`--name-responder` 必须真的存在 —— 打错字的话 argparse 会直接退出。"""
+        parser_args = cli.build_parser().parse_args(
+            ["scan", "-r", "10.0.0.0/30", "--name-responder"])
+        self.assertTrue(parser_args.name_responder)
+
+    def test_flag_defaults_to_off(self):
+        """默认必须是关的：它会往网络里发组播/广播包。"""
+        parser_args = cli.build_parser().parse_args(
+            ["scan", "-r", "10.0.0.0/30"])
+        self.assertFalse(parser_args.name_responder)
+
 
 class SizeGuardTest(unittest.TestCase):
     """超大规模范围必须在联网之前被拒绝（P0-2 在 CLI 侧的表现）。"""

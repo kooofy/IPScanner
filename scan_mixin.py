@@ -455,6 +455,7 @@ class ScanMixin:
             library=self.library,
             snmp_v3_user=self.snmp_v3_creds.to_user() if self.snmp_v3_creds.has_creds() else None,
             switch_map=self.switch_map_check.isChecked(),
+            name_responder=self.responder_check.isChecked(),
         )
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()

@@ -89,6 +89,19 @@ class ScanResult:
     # 是两回事。多端口 HTTPS 时只保留**第一个**探到的证书：风险评分是"一台设备
     # 一条结论"，而每个端口一条会让同一台设备刷出多条同义理由。
     tls_cert: Dict = field(default_factory=dict)
+    # ── 零利用安全体检：LLMNR / NBNS 响应器（v1.9 #3 第二刀）────────────
+    #
+    # 探测方式见 `scanner.llmnr_nbns`：编一个**不可能存在**的名字查一次，看谁给
+    # **肯定应答**。干净网络里没人会应答一个刚编出来的名字。
+    #
+    # 形状是 `{协议规范值: 应答里出现过的探测名}`，如
+    # `{"llmnr": "ipscanner-a1b2c"}`。协议名是规范值（`"llmnr"`/`"nbns"`），
+    # 展示时才翻译 —— 与 `_LOCATE_REASON_TEXT` 等其它规范值同一套规矩。
+    #
+    # 空 dict = 本次探测没有任何响应器（正常情况），**不是**"没探测"。
+    # 是否探测由扫描选项决定（GUI 勾选框 / CLI `--name-responder`，默认关），
+    # 因为探测会往网络里发组播 / 广播包。
+    name_responder: Dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         if self.discovery_method:

@@ -144,6 +144,69 @@ class TlsCertFactsTest(unittest.TestCase):
                 self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for ch in value))
 
 
+class ResponderFactsTest(unittest.TestCase):
+    """`responder_facts()` —— 把名字响应器事实摊成 `(kind, value)` 对。
+
+    与 `tls_cert_facts()` 同一份契约（只收非空项）。值存的是**探测名**：
+    它正是"这个应答确实在回我们那个问题"的证据。
+    """
+
+    def test_empty_gives_nothing(self):
+        for bad in ({}, None, 0, ""):
+            with self.subTest(bad=bad):
+                self.assertEqual(history_store.responder_facts(bad), [])
+
+    def test_known_protocols_map_to_stable_kinds(self):
+        self.assertEqual(
+            history_store.responder_facts({"llmnr": "ipscanner-a"}),
+            [(history_store.SEC_LLMNR_RESPONDER, "ipscanner-a")])
+        self.assertEqual(
+            history_store.responder_facts({"nbns": "ipscanner-b"}),
+            [(history_store.SEC_NBNS_RESPONDER, "ipscanner-b")])
+
+    def test_both_protocols_produce_two_rows(self):
+        """两个协议是**两个事实**（明细留在事实层），各自落一行。
+
+        注意这与风险评分不同：评分把两者合成**一条**结论（见
+        `risk_rules.responder_reasons`），事实层则要保留协议明细。
+        """
+        got = history_store.responder_facts({"llmnr": "x", "nbns": "x"})
+        self.assertEqual(dict(got), {
+            history_store.SEC_LLMNR_RESPONDER: "x",
+            history_store.SEC_NBNS_RESPONDER: "x",
+        })
+
+    def test_output_is_sorted_for_stable_diffs(self):
+        """排序固定 —— 否则同一份事实两次落库的行序可能不同。"""
+        got = history_store.responder_facts({"nbns": "b", "llmnr": "a"})
+        self.assertEqual([k for k, _v in got],
+                         [history_store.SEC_LLMNR_RESPONDER,
+                          history_store.SEC_NBNS_RESPONDER])
+
+    def test_blank_entries_are_skipped(self):
+        for bad in ({"": "x"}, {"llmnr": ""}, {"llmnr": "   "}, {"": ""},
+                    {"llmnr": None}, {None: "x"}):
+            with self.subTest(bad=bad):
+                self.assertEqual(history_store.responder_facts(bad), [])
+
+    def test_protocol_case_is_normalised(self):
+        self.assertEqual(
+            history_store.responder_facts({"LLMNR": "ipscanner-a"}),
+            [(history_store.SEC_LLMNR_RESPONDER, "ipscanner-a")])
+
+    def test_unknown_protocol_degrades_instead_of_dropping_the_finding(self):
+        """没登记的新协议走兜底派生名 —— 发现不能悄悄丢。"""
+        got = history_store.responder_facts({"mdns": "ipscanner-a"})
+        self.assertEqual(got, [("mdns_responder", "ipscanner-a")])
+
+    def test_values_are_language_neutral(self):
+        for kind, value in history_store.responder_facts(
+                {"llmnr": "ipscanner-a1b2c"}):
+            with self.subTest(kind=kind):
+                self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for ch in value))
+                self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for ch in kind))
+
+
 class SecurityFindingsStoreTest(unittest.TestCase):
     """`security_findings` 表：落库、读回、级联清理、老库平滑升级。"""
 
@@ -188,6 +251,18 @@ class SecurityFindingsStoreTest(unittest.TestCase):
 
     def test_unknown_snapshot_gives_empty_dict(self):
         self.assertEqual(history_store.get_security_findings(99999, db_path=self.db), {})
+
+    def test_responder_facts_round_trip(self):
+        """响应器事实走的是**同一张表**（kind/value 是通用的）——
+        这条同时证明两个 `SEC_*_RESPONDER` 常量与 `responder_facts()` 对得上。
+        """
+        facts = history_store.responder_facts({"llmnr": "ipscanner-a",
+                                               "nbns": "ipscanner-a"})
+        sid = history_store.save_snapshot(
+            [_dev("10.0.0.9", security_findings=facts)],
+            ts=1000.0, db_path=self.db)
+        self.assertEqual(history_store.get_security_findings(sid, db_path=self.db),
+                         {"10.0.0.9": dict(facts)})
 
     def test_two_snapshots_do_not_bleed_into_each_other(self):
         """每次快照各存一份 —— 历史对比靠的就是这个（上一份 vs 这一份）。"""

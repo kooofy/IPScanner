@@ -29,7 +29,7 @@ class ScanThread(QThread):
 
     def __init__(self, ip_ranges, timeout_ms=1000, max_threads=100, scan_ports=False,
                  protocols=None, tcp_scan_mode="connect", mdns_discovery=True, ports=None,
-                 library=None, snmp_v3_user=None, switch_map=False):
+                 library=None, snmp_v3_user=None, switch_map=False, name_responder=False):
         super().__init__()
         self.ip_ranges = ip_ranges
         self.timeout_ms = timeout_ms
@@ -49,6 +49,10 @@ class ScanThread(QThread):
         #: 由 `run()` 在**本线程内**填充，主线程保存快照时取走落库 ——
         #: 绝不能在主线程做，那是 5×交换机数 次 SNMP 往返，会把界面冻住。
         self.switch_maps = []
+        # 扫描末尾是否探测 LLMNR / NBNS 响应器（见 scanner/llmnr_nbns.py）。
+        # **默认关**：与「读取交换机转发表」不同，它会往网络里**发组播/广播包**，
+        # 必须用户显式开启。红线：只发一个查询包，不应答、不注册名字、不投毒。
+        self.name_responder = name_responder
         self.scanner = NetworkScanner()
 
     def _build_library_lookup(self):
@@ -106,6 +110,12 @@ class ScanThread(QThread):
         if self.switch_map and results:
             self.switch_maps = self._collect_switch_maps(results)
 
+        # 名字响应器探测必须赶在 `finished_signal` **之前**：结果直接挂在
+        # results 上，主线程收到信号后会立刻存快照（`_save_snapshot`），
+        # 那时再补就来不及了。
+        if self.name_responder and results:
+            self._collect_responders(results)
+
         self.finished_signal.emit(results)
 
     def _collect_switch_maps(self, results):
@@ -133,6 +143,46 @@ class ScanThread(QThread):
         self.log_signal.emit(
             tr("转发表读取完成: {n} 台交换机").format(n=len(maps)))
         return maps
+
+    def _collect_responders(self, results):
+        """在本线程内探测 LLMNR / NBNS 响应器，把结果挂到 results 上。
+
+        只探测、**不落库** —— 结果写进 `ScanResult.name_responder`，
+        快照保存时经 `ui_logic.build_snapshot()` 落进 `security_findings`
+        （与交换机转发表"采集与落库分开"是同一个理由）。
+
+        红线（见 `scanner/llmnr_nbns.py`）：只发一个查询包，**不应答别人的
+        查询、不注册名字、不伪造 MAC/IP、绝不投毒**。
+        """
+        self.phase_changed.emit("name_responder", 0, 1)
+        try:
+            from scanner.llmnr_nbns import apply_responders, probe_responders
+            found = probe_responders()
+        except Exception as e:      # noqa: BLE001
+            # 探测失败只影响"有没有欺骗响应器"这一条结论，不该让整次扫描白跑；
+            # 但它属于用户能感知的结果缺失，必须留痕。
+            _log.warning("名字响应器探测失败: %s", e, exc_info=True)
+            self.log_signal.emit(tr("名字响应器探测失败: {err}").format(err=e))
+            self.phase_changed.emit("name_responder", 1, 1)
+            return
+        self.phase_changed.emit("name_responder", 1, 1)
+
+        outside = apply_responders(results, found)
+        inside = len(found) - len(outside)
+        if not found:
+            self.log_signal.emit(tr("未发现名字响应器"))
+        else:
+            self.log_signal.emit(
+                tr("发现 {n} 个名字响应器").format(n=len(found)))
+        if outside:
+            # 不在本次扫描范围内的响应器**不伪造设备行**（快照记的是台账，
+            # 塞一台没扫到的设备会让设备数失真），只写日志让人知道有这回事。
+            _log.info("名字响应器不在本次扫描范围内（未计入快照）: %s",
+                      ", ".join(outside))
+            self.log_signal.emit(
+                tr("其中 {n} 个不在本次扫描范围内，只记日志、不计入快照").format(
+                    n=len(outside)))
+        _log.debug("名字响应器探测：范围内 %d 个，范围外 %d 个", inside, len(outside))
 
     def stop(self):
         self.scanner.stop()

@@ -476,6 +476,16 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             tr("周期读取本机 ARP 表并监听 mDNS，把新出现的设备并入列表"
                "（被动，不发包；默认关）"))
 
+        # 名字响应器探测：编一个不可能存在的主机名查一次 LLMNR / NBNS，
+        # 看谁给**肯定应答**（应答自己不拥有的名字 = 欺骗响应器或安全工具）。
+        # **默认关**：与上面两个选项不同，它**会往网络里发组播/广播包**，
+        # 与「被动发现」的零发包原则冲突，必须用户显式开启。
+        # 红线：只发一个查询包，不应答、不注册名字、绝不投毒（见 scanner/llmnr_nbns.py）。
+        self.responder_check = QAction(tr("探测名字响应器"), self, checkable=True)
+        self.responder_check.setToolTip(
+            tr("扫描末尾编一个不存在的主机名，查一次 LLMNR/NBNS，"
+               "记录谁给肯定应答（会发送组播/广播包；默认关）"))
+
         # 筛选已由常驻的 FilterChipBar 承担（见上方 tb2），
         # 「视图 > 筛选」菜单与 chip 共用 _set_filter() 这一个入口。
 
@@ -804,6 +814,11 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # 且都默认关，放一起用户一眼能看出这是一组需要自己开的东西。
         self.watch_check.setIcon(_mi(QStyle.SP_BrowserReload))
         settings_menu.addAction(self.watch_check)
+
+        # 名字响应器探测：同属"会碰网络的采集行为"这一组（它比上面三项更主动，
+        # 会发组播/广播，见 responder_check 的注释），所以也放这里。
+        self.responder_check.setIcon(_mi(QStyle.SP_MessageBoxQuestion))
+        settings_menu.addAction(self.responder_check)
 
         settings_menu.addSeparator()
 
@@ -1175,6 +1190,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             "port_scan": self.port_scan_check.isChecked(),
             "mdns": self.mdns_check.isChecked(),
             "switch_map": self.switch_map_check.isChecked(),
+            "name_responder": self.responder_check.isChecked(),
         }
 
     def _apply_scan_preset(self, name: str):
@@ -1199,6 +1215,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.port_scan_check.setChecked(bool(cfg.get("port_scan", False)))
         self.mdns_check.setChecked(bool(cfg.get("mdns", True)))
         self.switch_map_check.setChecked(bool(cfg.get("switch_map", False)))
+        self.responder_check.setChecked(bool(cfg.get("name_responder", False)))
         protos = [p for p in (cfg.get("protocols") or []) if p in PROTOCOL_PORTS]
         if protos:
             self.selected_protocols = protos
@@ -1441,6 +1458,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             s.value("scan/switch_map", False, type=bool))
         # 持续发现同样默认关（见控件创建处注释）
         self.watch_check.setChecked(s.value("scan/watch", False, type=bool))
+        self.responder_check.setChecked(
+            s.value("scan/name_responder", False, type=bool))
         self.tcp_scan_mode = s.value("scan/tcp_mode", "connect", type=str)
         if self.tcp_scan_mode not in ("connect", "syn", "udp"):
             self.tcp_scan_mode = "connect"
@@ -1552,6 +1571,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("scan/mdns", self.mdns_check.isChecked())
         s.setValue("scan/switch_map", self.switch_map_check.isChecked())
         s.setValue("scan/watch", self.watch_check.isChecked())
+        s.setValue("scan/name_responder", self.responder_check.isChecked())
         s.setValue("scan/tcp_mode", self.tcp_scan_mode)
         s.setValue("scan/level", self.scan_level)
         s.setValue("scan/protocols", self.selected_protocols)

@@ -264,11 +264,11 @@ def result_to_record(r) -> dict:
 def _snapshot_devices(results) -> list:
     """构造 history_store.save_snapshot 所需的设备字典列表。
 
-    探到 TLS 证书的设备会多带一个 `security_findings` 键（见
-    `history_store.tls_cert_facts`）—— 与 GUI 走的是同一条落库路径，
-    免得"命令行存的快照没有安全事实"。
+    探到 TLS 证书或名字响应器的设备会多带一个 `security_findings` 键（见
+    `history_store.tls_cert_facts` / `history_store.responder_facts`）——
+    与 GUI 走的是同一条落库路径，免得"命令行存的快照没有安全事实"。
     """
-    from history_store import tls_cert_facts
+    from history_store import responder_facts, tls_cert_facts
 
     out = []
     for r in results:
@@ -286,6 +286,7 @@ def _snapshot_devices(results) -> list:
             "remark": r.remark or "",
         }
         facts = tls_cert_facts(getattr(r, "tls_cert", None))
+        facts += responder_facts(getattr(r, "name_responder", None))
         if facts:
             dev["security_findings"] = facts
         out.append(dev)
@@ -503,6 +504,38 @@ def _collect_switch_maps(args, results):
         warn(f"读取交换机转发表失败: {e}")
         return None
 
+
+def _collect_responders(args, results):
+    """探测 LLMNR / NBNS 响应器（`--name-responder`），把结果挂到 results 上。
+
+    与 `_collect_switch_maps` 不同，这里**不要求** `--save-snapshot`：
+    转发表只有落库一个去处，而"有没有欺骗响应器"这件事本身就能用一行日志
+    回答（那正是命令行用户最想要的）。没给 `--save-snapshot` 时只是不落库。
+
+    红线（见 `scanner/llmnr_nbns.py`）：只发一个查询包，不应答别人的查询、
+    不注册名字、不伪造 MAC/IP、**绝不投毒**。
+    """
+    from scanner.llmnr_nbns import apply_responders, probe_responders
+
+    try:
+        found = probe_responders()
+    except Exception as e:  # noqa: BLE001
+        warn(f"名字响应器探测失败: {e}")
+        return
+    outside = apply_responders(results, found)
+    if not found:
+        log("未发现名字响应器（干净网络应有的结果）")
+        return
+    for ip in sorted(found):
+        protos = ", ".join(sorted(p.upper() for p in found[ip]))
+        log(f"名字响应器: {ip} 应答了不存在的主机名（{protos}）")
+    if outside:
+        # 不在扫描范围内的响应器**不伪造设备行**，只提示 —— 快照记的是台账，
+        # 塞一台没扫到的设备会让设备数失真。
+        log(f"其中 {len(outside)} 个不在本次扫描范围内，未计入快照: "
+            + ", ".join(outside))
+
+
 def cmd_scan(args) -> int:
     results, _scanner = _run_scan(args)
     if results is None:
@@ -549,6 +582,12 @@ def cmd_scan(args) -> int:
                  "端口映射必须挂在快照上，本次跳过转发表读取。")
         else:
             switch_maps = _collect_switch_maps(args, results)
+
+    # 名字响应器（可选）：同样在**保存快照之前**采集 —— 结果挂在 results 上，
+    # 快照保存时经 `_snapshot_devices` 一并落库（见该函数）。与转发表不同，
+    # 这里不要求 --save-snapshot：探测结果本身就能用日志回答。
+    if getattr(args, "name_responder", False):
+        _collect_responders(args, results)
 
     if args.save_snapshot:
         try:
@@ -1341,6 +1380,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--switch-map", action="store_true",
                     help="扫描末尾读取各交换机转发表，记录设备与端口的对应关系"
                          "（需配合 --save-snapshot；需要 SNMP，每台交换机 5 次 walk）")
+    sp.add_argument("--name-responder", action="store_true",
+                    help="扫描末尾编一个不存在的主机名，查一次 LLMNR/NBNS，"
+                         "记录谁给肯定应答（会向网络发送组播/广播包；"
+                         "配合 --save-snapshot 才会写进快照）")
     sp.add_argument("--notify", action="store_true",
                     help="检测到资产变更时推送告警（需先配置通知渠道）")
     sp.add_argument("--notify-config", metavar="文件",

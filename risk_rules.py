@@ -16,6 +16,12 @@
   ⚠ 它**不是新探测** —— 证书是从**已有的** HTTPS 握手里顺带取的（见
   `scanner/http.read_https`），所以"评分不增加网络开销"这条依然成立。
   ⚠ 也刻意**不引入任何利用行为**：只读证书、不试凭据、不发畸形报文。
+- `name_responder`：LLMNR / NBNS 响应器事实（"有主机应答了不存在的主机名"，
+  v1.9 #3 第二刀）。同样是**零利用**的 —— 只编一个不可能存在的名字查一次，
+  谁给肯定应答就报谁；不注册名字、不应答别人的查询、**绝不投毒**。
+  ⚠ 它**是**新探测（会往网络里发组播 / 广播包），所以由显式开关控制、
+  默认关（GUI 勾选框 / CLI `--name-responder`）—— "评分不增加网络开销"
+  这条对它**不**成立，这是它与 `tls_cert` 的关键区别。
 
 刻度是 0–100 的加法制，封顶 100。**每一分都必须能说出理由**（`reasons` 带分值），
 tooltip 会把分数拆开给用户看：说不出理由的风险分没人会信。
@@ -32,6 +38,11 @@ tooltip 会把分数拆开给用户看：说不出理由的风险分没人会信
 TLS 那几项的标定：自签名**只给 5 分** —— 局域网设备管理面几乎全是自签名证书，
 给高分会让整列又变成同一个数字（正是本文开头要避免的噪声）。真正的信号是
 **到期**（功能已经坏 / 马上会坏）与**弱算法**（已被实证可攻破）。
+
+名字响应器给 30 分（与 Telnet 明文同级）：这个发现本身是**歧义的** —— 应答
+不存在名字的既可能是欺骗响应器（攻击），也可能是安全扫描工具 / 蜜罐（防护）。
+分数只表示"值得看一眼"，不替用户断定对方恶意；30 分够它冒头，又不至于单独
+一条就把设备拉满。
 """
 from conflict_detector import SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_WARNING
 from i18n import tr
@@ -120,6 +131,24 @@ _TLS_POINTS = (
 )
 _TLS_POINT_OF = dict(_TLS_POINTS)
 
+# ── 零利用安全体检：LLMNR / NBNS 响应器（v1.9 #3 第二刀）───────────────
+#
+# 事实来自 `ScanResult.name_responder`（见 `scanner/llmnr_nbns.py`）。
+#
+# **只给一个理由代码**，不分 llmnr / nbns：同一台主机对两个协议都给肯定应答
+# 是**同一个发现**（"它在应答自己不拥有的名字"），拆成两条会让风险栏里出现
+# 两条近义理由，分数还翻倍。协议明细留在事实层（`security_findings` 里的
+# `llmnr_responder` / `nbns_responder`）—— 这正是"事实与结论分开"的用法。
+_REASON_NAME_RESPONDER = "name_responder"
+
+#: 30 分：与 Telnet 明文同级。
+#:
+#: 之所以不给更高分：这个发现**本身是歧义的** —— 应答不存在名字的既可能是
+#: 欺骗响应器（攻击），也可能是安全扫描工具 / 蜜罐（防护）。分数要反映
+#: "值得看一眼"，而不是替用户断定对方是恶意的。30 分能把它推进"中危"、
+#: 在风险栏里冒头，又不至于单独一条就把设备拉满。
+_NAME_RESPONDER_POINTS = 30
+
 #: 冲突严重级别 → 分值。**复用冲突检测的判定**，不另立一套。
 _SEVERITY_POINTS = {
     SEVERITY_HIGH: 40,
@@ -141,6 +170,7 @@ _REASON_TEXT = {
     _REASON_TLS_SELF_SIGNED: "TLS 证书自签名",
     _REASON_TLS_WEAK_SIG: "TLS 证书签名算法过时",
     _REASON_TLS_WEAK_KEY: "TLS 证书密钥过短",
+    _REASON_NAME_RESPONDER: "应答了不存在的主机名（疑似欺骗响应器）",
     "duplicate_mac": "MAC 地址冲突",
     "duplicate_hostname": "主机名冲突",
     "unknown_device": "不在地址库中的设备",
@@ -205,6 +235,20 @@ def tls_reasons(cert, now=None) -> list:
     return sorted(out, key=lambda item: order.get(item[0], len(order)))
 
 
+def responder_reasons(responder) -> list:
+    """从名字响应器事实推出风险理由，返回 `[(理由代码, 分值), ...]`。
+
+    `responder` 是 `ScanResult.name_responder`（`{协议: 探测名}`），空 dict
+    时返回 `[]`。与 `tls_reasons()` 一样独立成函数，方便纯函数式单测。
+
+    协议**不**进理由代码（见 `_REASON_NAME_RESPONDER` 处的说明）：无论应答
+    的是 LLMNR 还是 NBNS，结论都是同一条，只算一次分。
+    """
+    if not responder:
+        return []
+    return [(_REASON_NAME_RESPONDER, _NAME_RESPONDER_POINTS)]
+
+
 def score_risk(result, conflicts=(), now=None) -> dict:
     """给一台设备打分。
 
@@ -213,8 +257,11 @@ def score_risk(result, conflicts=(), now=None) -> dict:
     `now` 可注入（测试固定"今天"，用于 TLS 证书剩余天数）。
 
     返回 `{"score": int, "level": str, "reasons": [(代码, 分值), ...]}`。
-    `reasons` 保序（先端口、再 TLS、后冲突）且**带分值**，这样 tooltip 能把分数
-    拆开给用户看 —— 一个说不出理由的风险分没人会信。
+    `reasons` 保序（先端口、再 TLS、再名字响应器、后冲突）且**带分值**，
+    这样 tooltip 能把分数拆开给用户看 —— 一个说不出理由的风险分没人会信。
+
+    排序按**类别**而不是全局按分值：类别内部已按严重度排好（见 `_TLS_POINTS`），
+    跨类别再排一次会让"哪来的分"变得难以对照代码。
     """
     score = 0
     reasons = []
@@ -229,6 +276,9 @@ def score_risk(result, conflicts=(), now=None) -> dict:
         score += _HTTP_ONLY_POINTS
         reasons.append((_REASON_CLEARTEXT_HTTP, _HTTP_ONLY_POINTS))
     for code, points in tls_reasons(getattr(result, "tls_cert", None), now=now):
+        score += points
+        reasons.append((code, points))
+    for code, points in responder_reasons(getattr(result, "name_responder", None)):
         score += points
         reasons.append((code, points))
     for conflict in (conflicts or ()):

@@ -390,6 +390,16 @@ SEC_TLS_SELF_SIGNED = "tls_self_signed"
 SEC_TLS_SIG_ALG = "tls_sig_alg"
 SEC_TLS_KEY = "tls_key"
 
+#: LLMNR / NBNS 响应器（v1.9 #3 第二刀）。值存的是**探测名** —— 它正是"这个应答
+#: 确实是在回我们那个问题"的证据（见 `scanner.llmnr_nbns` 的诚实降级一节）。
+#: 探测名每次随机，所以它**不是**设备的稳定标识，只作现场证据留痕。
+SEC_LLMNR_RESPONDER = "llmnr_responder"
+SEC_NBNS_RESPONDER = "nbns_responder"
+
+#: 协议规范值 → kind。新增协议在这里加一项；漏登记的协议走下面的兜底派生名，
+#: 发现不会丢，只是 kind 少了这道"稳定契约"的保证。
+_RESPONDER_KINDS = {"llmnr": SEC_LLMNR_RESPONDER, "nbns": SEC_NBNS_RESPONDER}
+
 
 def tls_cert_facts(cert) -> list:
     """把 `ScanResult.tls_cert`（一个 dict）摊成 `[(kind, value), ...]`。
@@ -415,6 +425,25 @@ def tls_cert_facts(cert) -> list:
                     "%s/%d" % (key_alg, key_bits) if key_bits else key_alg))
     if cert.get("self_signed"):
         out.append((SEC_TLS_SELF_SIGNED, "1"))
+    return out
+
+
+def responder_facts(responder) -> list:
+    """把 `ScanResult.name_responder`（`{协议: 探测名}`）摊成 `[(kind, value), ...]`。
+
+    与 `tls_cert_facts()` 同一份契约：只收**非空**的项，值全是语言无关的规范串。
+    未知协议走兜底派生名（`mdns` → `mdns_responder`）—— 发现不能悄悄丢掉，
+    新增协议时也不用回来改这里。
+    """
+    if not responder:
+        return []
+    out = []
+    for proto, name in sorted(responder.items()):
+        proto = str(proto or "").strip().lower()
+        value = str(name or "").strip()
+        if proto and value:
+            kind = _RESPONDER_KINDS.get(proto, proto + "_responder")
+            out.append((kind, value))
     return out
 
 

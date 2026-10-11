@@ -16,7 +16,7 @@ import time
 
 from conflict_detector import SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_WARNING
 from change_detector import CHANGE_DEVICE_GONE
-from history_store import tls_cert_facts
+from history_store import responder_facts, tls_cert_facts
 from scanner.constants import device_class_label
 
 
@@ -164,9 +164,10 @@ def build_change_index(changes, results) -> dict:
 def build_snapshot(results, ts=None) -> dict:
     """把 ScanResult 列表转成历史快照 dict（与 history_store 存储结构一致）。
 
-    每台设备若探测到了 TLS 证书，会带一个 `security_findings` 键
-    （`[(kind, value), ...]`，见 `history_store.tls_cert_facts`）。
-    **没探到时不给这个键** —— 消费方不该把"没探到"当成"探到但为空"。
+    每台设备若探测到了 TLS 证书或名字响应器，会带一个 `security_findings` 键
+    （`[(kind, value), ...]`，见 `history_store.tls_cert_facts` /
+    `history_store.responder_facts`）。
+    **两样都没探到时不给这个键** —— 消费方不该把"没探到"当成"探到但为空"。
     """
     if ts is None:
         ts = time.time()
@@ -198,6 +199,7 @@ def build_snapshot(results, ts=None) -> dict:
             "netbios_mac": r.netbios_mac or "",
         }
         facts = tls_cert_facts(getattr(r, "tls_cert", None))
+        facts += responder_facts(getattr(r, "name_responder", None))
         if facts:
             dev["security_findings"] = facts
         devices.append(dev)
