@@ -117,7 +117,12 @@
 - **读路径切换不改变对外行为**：老库升级后 `locate_device()` /
   `device_timeline()` / `query_history()` 结果与升级前**逐字段相同**。
 
-**落地记录（2026-10-12，第 ①+② 刀完成，③ 未开工）**
+**落地记录（2026-10-12，第 ①+②+③ 刀完成）**
+
+第③刀（读路径）补的是「读」：新增 `list_assets()` / `get_asset()` / `asset_count()`
+直接读 `assets` 表（一行一台设备、按 identity_key 去重），并接 `cli assets` 子命令作为
+第一个消费方。现有三个读函数（`query_history` / `locate_device` / `device_timeline`）
+**保持只读 `devices`**，满足「逐字段相同」验收；资产表缺失的旧库（v4 前）优雅降级为空。
 
 实测之前写错的三处「现状」，逐条改掉：
 
@@ -501,13 +506,13 @@
 
 ```
 v1.9「让台账真的成为一个东西」
-├─ 1.1 资产表（assets + devices.identity_key，迁移 v4）         P0  ← 结构（主题）🔧 第 ①② 刀已合
+├─ 1.1 资产表（assets + devices.identity_key，迁移 v4）         P0  ← 结构（主题）🔧 第 ①②③ 刀已合
 ├─ 1.2 互操作导出包（Nmap XML 产出 / Zabbix LLD / NetBox CSV / Oxidized）  P0  ← 出口
 ├─ 1.3 拓扑可读性包（折行 + 文本导出）                          P1  ← 显示
 └─ 1.4 质量门禁（per-file 覆盖率 / pyright / pip-audit）        P1  ← 安全网 ✅ 已完成
 
-进度：1.4 ✅ / 1.1 第 ①② 刀 ✅（③ 未开工）
-      下一步：1.1-③ 读路径（把资产表暴露出去）→ 1.2 互操作导出包
+进度：1.4 ✅ / 1.1 第 ①②③ 刀 ✅
+      下一步：1.2 互操作导出包（依赖 1.1 的 assets 读路径，现已就绪）→ 1.3 拓扑可读性包
 
 前置：user_version 迁移链 ✅ 已在 1.8.0 之后落地（SCHEMA_VERSION = 4）
       质量门禁 ✅ 已就位（history_store.py ≥95% / db_util.py ≥90%，pyright 0 error）

@@ -1047,5 +1047,183 @@ class AssetTableTest(unittest.TestCase):
         self.assertEqual(len(timeline), 2)
 
 
+class AssetReadPathTest(unittest.TestCase):
+    """资产表读路径（1.1-③）：把 assets 暴露给读取方。
+
+    前 ①② 刀只写不读；这第③刀补"读"。验收要点：
+      * list_assets 一行一台设备（按 identity_key），不是按 IP；
+      * 过滤 / 分页口径对齐 query_history；
+      * 旧库没有 assets 表时**优雅降级**（不崩、返回空）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "scan_history.db")
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
+    def _save(self, devs, ts):
+        history_store.save_snapshot(devs, ts=ts, db_path=self.db)
+
+    def test_list_assets_one_row_per_identity(self):
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=1000.0)
+        self._save([_dev("1.1.1.2", mac="AA:BB:CC:DD:EE:02")], ts=2000.0)
+        rows = history_store.list_assets(db_path=self.db)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["identity_key"] for r in rows},
+                         {"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"})
+
+    def test_roaming_mac_collapses_to_one_row(self):
+        """换过 IP 但 MAC 没变 → 资产表 1 行；ip 取最近一次非空。"""
+        self._save([_dev("1.1.1.10", mac="AA:BB:CC:DD:EE:01",
+                         hostname="pc", open_ports="22")], ts=1000.0)
+        self._save([_dev("1.1.1.50", mac="AA:BB:CC:DD:EE:01",
+                         hostname="pc")], ts=2000.0)
+        rows = history_store.list_assets(db_path=self.db)
+        self.assertEqual(len(rows), 1)
+        a = rows[0]
+        self.assertEqual(a["identity_key"], "aa:bb:cc:dd:ee:01")
+        self.assertEqual(a["ip"], "1.1.1.50")
+        self.assertEqual(a["open_ports"], "22")          # 第一次非空被保留
+        self.assertEqual(a["seen_count"], 2)
+        self.assertEqual(a["first_seen"], 1000.0)
+        self.assertEqual(a["last_seen"], 2000.0)
+
+    def test_seen_count_accumulates(self):
+        for ts in (1000.0, 2000.0, 3000.0):
+            self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=ts)
+        rows = history_store.list_assets(db_path=self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["seen_count"], 3)
+
+    def test_empty_field_does_not_wipe_known_value(self):
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01",
+                        hostname="pc-1")], ts=1000.0)
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01",
+                        hostname="")], ts=2000.0)
+        self.assertEqual(history_store.list_assets(db_path=self.db)[0]["hostname"], "pc-1")
+
+    def test_device_class_filter_is_canonical(self):
+        """device_class 留 Python 侧、规范值子串匹配（跨语言）。"""
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01",
+                        device_class="打印机")], ts=1000.0)
+        self._save([_dev("1.1.1.2", mac="AA:BB:CC:DD:EE:02",
+                        device_class="PC")], ts=2000.0)
+        hit = history_store.list_assets(device_class="打印机", db_path=self.db)
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0]["identity_key"], "aa:bb:cc:dd:ee:01")
+
+    def test_ip_substr_and_network_filters(self):
+        self._save([_dev("10.0.0.1", mac="AA:BB:CC:DD:EE:01")], ts=1000.0)
+        self._save([_dev("192.168.1.5", mac="AA:BB:CC:DD:EE:02")], ts=2000.0)
+        self.assertEqual(len(history_store.list_assets(ip_substr="192.168",
+                                                       db_path=self.db)), 1)
+        self.assertEqual(len(history_store.list_assets(network="192.168.1.0/24",
+                                                       db_path=self.db)), 1)
+        self.assertEqual(len(history_store.list_assets(network="10.0.0.0/8",
+                                                       db_path=self.db)), 1)
+
+    def test_pagination(self):
+        for i in range(3):
+            self._save([_dev("1.1.1.%d" % (i + 1),
+                            mac="AA:BB:CC:DD:EE:0%d" % (i + 1))],
+                      ts=1000.0 + i)
+        full = history_store.list_assets(db_path=self.db)
+        self.assertEqual(len(full), 3)
+        p1 = history_store.list_assets(limit=2, offset=0, db_path=self.db)
+        p2 = history_store.list_assets(limit=2, offset=2, db_path=self.db)
+        self.assertEqual(len(p1), 2)
+        self.assertEqual(len(p2), 1)
+        self.assertEqual({r["identity_key"] for r in p1 + p2},
+                         {r["identity_key"] for r in full})
+
+    def test_sorted_by_last_seen_desc(self):
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=1000.0)
+        self._save([_dev("1.1.1.2", mac="AA:BB:CC:DD:EE:02")], ts=5000.0)
+        self.assertEqual(history_store.list_assets(db_path=self.db)[0]
+                         ["identity_key"], "aa:bb:cc:dd:ee:02")
+
+    def test_get_asset(self):
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01",
+                        hostname="pc")], ts=1000.0)
+        a = history_store.get_asset("aa:bb:cc:dd:ee:01", db_path=self.db)
+        self.assertIsNotNone(a)
+        self.assertEqual(a["hostname"], "pc")
+        self.assertIsNone(history_store.get_asset("nope", db_path=self.db))
+        self.assertIsNone(history_store.get_asset("", db_path=self.db))
+        self.assertIsNone(history_store.get_asset(None, db_path=self.db))
+
+    def test_asset_count(self):
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=1000.0)
+        self._save([_dev("1.1.1.2", mac="AA:BB:CC:DD:EE:02",
+                        device_class="打印机")], ts=2000.0)
+        self.assertEqual(history_store.asset_count(db_path=self.db), 2)
+        self.assertEqual(history_store.asset_count(device_class="打印机",
+                                                   db_path=self.db), 1)
+
+    def test_first_seen_range_filters(self):
+        """first_seen 范围下推 SQL（资产表有首见时间列，可直接比）。"""
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=1000.0)
+        self._save([_dev("1.1.1.2", mac="AA:BB:CC:DD:EE:02")], ts=5000.0)
+        after = history_store.list_assets(first_seen_after=2000.0, db_path=self.db)
+        self.assertEqual([r["identity_key"] for r in after],
+                         ["aa:bb:cc:dd:ee:02"])
+        before = history_store.list_assets(first_seen_before=2000.0, db_path=self.db)
+        self.assertEqual([r["identity_key"] for r in before],
+                         ["aa:bb:cc:dd:ee:01"])
+        both = history_store.list_assets(first_seen_after=500.0,
+                                         first_seen_before=6000.0, db_path=self.db)
+        self.assertEqual(len(both), 2)
+
+    def test_table_has_assets_helper(self):
+        import sqlite3
+        c = sqlite3.connect(":memory:")
+        self.assertFalse(history_store._table_has_assets(c))
+        c.execute("CREATE TABLE assets(x INTEGER)")
+        self.assertTrue(history_store._table_has_assets(c))
+
+    def test_graceful_degradation_without_assets_table(self):
+        """v4 之前的旧库没有 assets 表 → 读路径返回空，不抛错。
+
+        通过拦掉迁移（模拟"assets 因故缺失"）来触发降级分支：真实环境里
+        `_init_db` 会建表，但这里是防御性分支，必须验证它**不崩**。
+        """
+        import sqlite3
+        c = sqlite3.connect(self.db)
+        c.executescript(history_store._SQL_V1 + history_store._SQL_V2
+                        + history_store._SQL_V3)
+        c.execute("INSERT INTO snapshots (id, time, device_count) VALUES (1, 1000.0, 1)")
+        c.execute("INSERT INTO devices (snapshot_id, ip, status, mac, hostname, "
+                  "vendor, device_class, os_guess, open_ports, location, user, "
+                  "remark) VALUES (1, '1.1.1.1', 'online', 'AA:BB:CC:DD:EE:01', "
+                  "'pc', '', '', '', '', '', '', '')")
+        c.commit(); c.close()
+        with mock.patch.object(history_store, "_init_db", lambda conn, path: None):
+            self.assertEqual(history_store.list_assets(db_path=self.db), [])
+            self.assertEqual(history_store.asset_count(db_path=self.db), 0)
+            self.assertIsNone(history_store.get_asset("aa:bb:cc:dd:ee:01",
+                                                      db_path=self.db))
+
+    def test_read_path_does_not_alter_legacy_readers(self):
+        """第③刀只新增读 assets 的函数，不能动 query_history / locate_device /
+        device_timeline 的既有行为（1.1 验收红线：逐字段相同）。"""
+        self._save([_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01", hostname="pc-1")],
+                  ts=1000.0)
+        self._save([_dev("1.1.1.9", mac="AA:BB:CC:DD:EE:01", hostname="pc-1")],
+                  ts=2000.0)
+        # query_history 按 IP 聚合 → 换过 IP 的设备是 2 行
+        self.assertEqual(len(history_store.query_history(db_path=self.db)), 2)
+        # device_timeline 按 MAC 仍给出 2 个观测
+        self.assertEqual(len(history_store.device_timeline(
+            mac="AA:BB:CC:DD:EE:01", db_path=self.db)), 2)
+        # locate_device 仍返回结构完整的结果（不抛错）
+        loc = history_store.locate_device(mac="AA:BB:CC:DD:EE:01",
+                                          db_path=self.db)
+        self.assertIsInstance(loc, dict)
+        self.assertIn("mac", loc)
+
+
 if __name__ == "__main__":
     unittest.main()

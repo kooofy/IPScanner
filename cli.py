@@ -86,6 +86,14 @@ _SNAPSHOT_DEVICE_COLUMNS = (
     "os_guess", "open_ports", "location", "user", "remark",
 )
 
+# 资产表（1.1-③）：一行一台设备，按 identity_key 去重。identity_key 是资产维度
+# 的主键（MAC 优先），故放在首位；services / seen_count 是资产表独有的列。
+_ASSET_COLUMNS = (
+    "identity_key", "ip", "status", "mac", "hostname", "vendor",
+    "device_class", "os_guess", "open_ports", "services",
+    "location", "user", "remark", "first_seen", "last_seen", "seen_count",
+)
+
 
 # ────────────────────────────── 输出工具 ──────────────────────────────
 
@@ -985,6 +993,57 @@ def cmd_locate(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────────── 资产表 ──────────────────────────────
+
+def cmd_assets(args) -> int:
+    """列举资产表（一行一台设备，按 MAC 身份键去重合并后的当前状态）。
+
+    资产表是 1.1 新增的"资产维度"视图：与 `history --query` 按 IP 聚合 `devices`
+    不同，这里按 identity_key（MAC 优先）读 `assets`，换过 IP 的设备只算一台。
+
+    **JSON 输出保持语言无关**（字段即 `assets` 表里的规范值，device_class 是源串），
+    text 输出才翻译、并附 human-readable 首见/末见时间 —— 脚本消费 JSON，人看 text。
+    """
+    import history_store
+
+    db = _db_path(args)
+
+    if args.count:
+        n = history_store.asset_count(
+            device_class=args.device_class,
+            network=args.network,
+            ip_substr=args.ip,
+            db_path=db,
+        )
+        if args.format == "json":
+            emit(render_json({"count": n}), args.output)
+        else:
+            emit(str(n), args.output)
+        return EXIT_OK
+
+    rows = history_store.list_assets(
+        device_class=args.device_class,
+        network=args.network,
+        ip_substr=args.ip,
+        limit=args.limit,
+        offset=args.offset,
+        db_path=db,
+    )
+    if not rows:
+        emit("无资产记录" if args.format != "json" else render_json([]), args.output)
+        return EXIT_OK
+    for r in rows:
+        r["first_seen"] = _fmt_time(r.get("first_seen"))
+        r["last_seen"] = _fmt_time(r.get("last_seen"))
+    if args.format == "json":
+        emit(render_json(rows), args.output)
+    elif args.format == "csv":
+        emit(render_csv(rows, _ASSET_COLUMNS), args.output)
+    else:
+        emit(render_table(rows, _ASSET_COLUMNS), args.output)
+    return EXIT_OK
+
+
 # ────────────────────────── 被动 / 持续发现 ──────────────────────────
 
 #: 被动发现的来源 -> 人看的短标签。语义与 `ScanResult.to_dict()` 里的
@@ -1453,6 +1512,21 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("-f", "--format", choices=("text", "json"), default="text")
     lp.add_argument("-o", "--output", metavar="文件")
     lp.set_defaults(func=cmd_locate)
+
+    # ── assets ──
+    ap = sub.add_parser("assets", help="列举资产表（一行一台设备）", parents=[common],
+                        description="按 MAC 身份键去重后的资产清单（1.1 新增）。"
+                                    "与 history 按 IP 聚合不同，换过 IP 的设备只算一台。")
+    ap.add_argument("--device-class", metavar="类型", help="按设备类型过滤（子串匹配）")
+    ap.add_argument("--network", metavar="网段", help="按网段过滤，如 192.168.1.0/24")
+    ap.add_argument("--ip", metavar="关键字", help="按 IP 子串过滤")
+    ap.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="最多返回 N 条（按末见时间降序截取）")
+    ap.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
+    ap.add_argument("--count", action="store_true", help="只输出资产总数（应用上述过滤）")
+    ap.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
+    ap.add_argument("-o", "--output", metavar="文件")
+    ap.set_defaults(func=cmd_assets)
 
     # ── watch ──
     wp = sub.add_parser("watch", help="被动发现：不发包地看最近谁在网络上出现过",

@@ -1226,3 +1226,160 @@ def query_history(device_class=None, network=None, first_seen_after=None,
         end = None if limit is None else off + max(0, int(limit))
         results = results[off:end]
     return results
+
+
+# ── 1.1-③：资产表读路径 ───────────────────────────────────────────────────────
+# 下面这组函数是 1.1 第③刀：把"资产表（assets）"暴露给读取方。前 ①② 刀只负责把
+# 数据写进 assets（迁移 v4 + 回填 + 双写），但**没有任何读者** —— 这张表对前端 /
+# CLI / 用户都不可见。第③刀补齐"读"。
+#
+# 与 `query_history()` 的边界（这是 1.1 验收的红线，务必分清）：
+# - `query_history` 按 **IP** 跨快照聚合 `devices`（观测维度），它**不能动**，
+#   否则所有老调用方的逐字段行为会变。
+# - 下面这几个函数按 **identity_key（MAC 优先）** 读 `assets`（资产维度），一行
+#   一台设备，无需 Python 侧聚合。
+# 两者对"没换过 IP 的机器"应逐字段相同；对"换过 IP 但 MAC 没变"的机器，assets
+# 合并成一行、query_history 拆成多行 —— 这是 1.1 的设计意图，不是 bug。
+
+
+def _table_has_assets(conn) -> bool:
+    """assets 表是否存在（v4 迁移前的旧库没有这张表）。"""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='assets'"
+    ).fetchone() is not None
+
+
+def _read_assets(device_class=None, network=None, first_seen_after=None,
+                 first_seen_before=None, ip_substr=None, db_path=None) -> list:
+    """内部：读 assets 表并应用过滤，返回已按 last_seen 降序排好的列表。
+
+    过滤口径**刻意对齐** `query_history()`：
+    - ip_substr / network / first_seen 范围下推给 SQL（行级判定，与聚合无关，
+      能少取行）；
+    - device_class 留 Python 侧（规范值子串匹配，跨语言；assets 里的 device_class
+      已经是合并后的最新值，但为与 query_history 同口径、且避免 SQL 侧做 canonical
+      比较，仍留 Python）。
+
+    旧库没有 assets 表时**优雅降级**返回空列表（资产表是增强而非前置条件，与
+    `_init_db` "失败不拦程序打开库" 一致）。
+    """
+    net = _parse_network(network)
+    ipk = (ip_substr or "").strip().lower()
+
+    where, params = [], []
+    if ipk:
+        where.append("TRIM(ip) LIKE ? ESCAPE '\\'")
+        params.append("%" + _sql_like_escape(ipk) + "%")
+    prefix = _network_like_prefix(net)
+    if prefix:
+        where.append("TRIM(ip) LIKE ? ESCAPE '\\'")
+        params.append(prefix)
+    if first_seen_after is not None:
+        where.append("first_seen >= ?")
+        params.append(first_seen_after)
+    if first_seen_before is not None:
+        where.append("first_seen <= ?")
+        params.append(first_seen_before)
+
+    sql = ("SELECT identity_key, " + ", ".join(_ASSET_COLS) +
+           ", first_seen, last_seen, seen_count FROM assets")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    # last_seen DESC 之外再补 identity_key DESC：identity_key 是主键，保证排序
+    # 完全确定（翻页可复现），不再依赖 SQLite 的隐式顺序。
+    sql += " ORDER BY last_seen DESC, identity_key DESC"
+
+    with _conn(db_path) as conn:
+        if not _table_has_assets(conn):
+            return []
+        rows = []
+        for r in conn.execute(sql, params):
+            rec = {
+                "identity_key": r["identity_key"],
+                "first_seen": r["first_seen"],
+                "last_seen": r["last_seen"],
+                "seen_count": r["seen_count"],
+            }
+            for c in _ASSET_COLS:
+                rec[c] = r[c] or ""
+            rows.append(rec)
+
+    # ── Python 侧过滤（判定权始终留在这，对齐 query_history）─────────────────
+    dc = _canon(device_class).lower()
+    if dc:
+        rows = [rec for rec in rows
+                if dc in _canon(rec.get("device_class", "")).lower()]
+    if ipk:
+        rows = [rec for rec in rows
+                if ipk in (rec.get("ip", "") or "").lower()]
+    if net is not None:
+        rows = [rec for rec in rows
+                if _ip_in_network(rec.get("ip", ""), net)]
+    return rows
+
+
+def list_assets(device_class=None, network=None, first_seen_after=None,
+                first_seen_before=None, ip_substr=None, db_path=None,
+                limit=None, offset=0) -> list:
+    """列举资产（一行一台设备，按 identity_key 去重合并后的当前状态）。
+
+    返回字段：identity_key, mac, ip, status, hostname, vendor, device_class,
+    os_guess, open_ports, services, location, user, remark, first_seen,
+    last_seen, seen_count。按 last_seen 降序（最近活跃的排在前）。
+
+    Args:
+        device_class:   按规范设备类型子串过滤（留 Python 侧，跨语言）。
+        network:        按 IPv4 网段过滤（仅 /8 的整数倍能下推，其余交 Python）。
+        first_seen_after / first_seen_before: 按首见时间范围过滤（下推 SQL）。
+        ip_substr:      按 IP 关键字过滤（大小写不敏感）。
+        limit / offset: 在过滤与排序**之后**截取，用于翻页。
+
+    旧库无 assets 表时返回空列表（不抛错）。
+    """
+    rows = _read_assets(device_class, network, first_seen_after, first_seen_before,
+                        ip_substr, db_path)
+    off = max(0, int(offset or 0))
+    if off or limit is not None:
+        end = None if limit is None else off + max(0, int(limit))
+        rows = rows[off:end]
+    return rows
+
+
+def asset_count(device_class=None, network=None, first_seen_after=None,
+                first_seen_before=None, ip_substr=None, db_path=None) -> int:
+    """资产总数（应用与 `list_assets` 相同的过滤口径，但不分页）。
+
+    用于 CLI / GUI 显示"共 N 台资产"、以及分页器的总页数计算。
+    """
+    return len(_read_assets(device_class, network, first_seen_after,
+                            first_seen_before, ip_substr, db_path))
+
+
+def get_asset(identity_key, db_path=None) -> dict | None:
+    """按身份键取单台设备的资产记录；不存在或身份键为空返回 None。
+
+    identity_key 是 `assets` 的主键（MAC 优先，见 `identity_key()`）。
+    返回字段与 `list_assets` 单行一致。
+    """
+    key = (identity_key or "").strip()
+    if not key:
+        return None
+    with _conn(db_path) as conn:
+        if not _table_has_assets(conn):
+            return None
+        row = conn.execute(
+            "SELECT identity_key, " + ", ".join(_ASSET_COLS) +
+            ", first_seen, last_seen, seen_count FROM assets WHERE identity_key = ?",
+            (key,),
+        ).fetchone()
+    if row is None:
+        return None
+    rec = {
+        "identity_key": row["identity_key"],
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "seen_count": row["seen_count"],
+    }
+    for c in _ASSET_COLS:
+        rec[c] = row[c] or ""
+    return rec
