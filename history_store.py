@@ -34,9 +34,23 @@ PORT_SOURCE_IF_NAME = "if_name"
 PORT_SOURCE_BRIDGE_PORT = "bridge_port"
 
 
-def _init_db(conn):
-    conn.executescript(
-        """
+# ── schema 迁移链 ──────────────────────────────────────────────────────
+# 每项 = (版本号, SQL 脚本, 说明)，版本号连续且从 1 开始。`PRAGMA user_version`
+# 记录库已升到哪一版；`db_util.apply_migrations()` 负责"读版本 → 补跑 > 当前版本的
+# 迁移 → 写回"。
+#
+# 为什么要有它：加列必须写 `ALTER TABLE`，而 `CREATE TABLE IF NOT EXISTS`
+# **不会补列** —— 没有版本号时，改造 schema 只能靠 `try/except` 猜"用户手里的库
+# 是哪个年代的"。这是「资产表 + 观测表」改造的前置（见 docs/ROADMAP_V1.9.md）。
+#
+# ⚠ **迁移 1~3 用 `IF NOT EXISTS` 是刻意的**：它们是"引入 user_version 之前"
+#   的那套建表语句，对老库重放必须无害（老库的版本号是**推断**出来的，万一推断偏低
+#   也不能把库弄坏）。**第 4 版起不要再用 `IF NOT EXISTS`** —— 那时每个库都已有
+#   版本号、迁移只会执行一次，让它在结构不符时**报错**比静默跳过好。
+#
+# ⚠ **已发布的迁移只增不改**：老库不会重跑它们，改了就只会让"新库"和
+#   "老库升上来的库"结构不一致 —— 而且没有任何测试会发现。
+_SQL_V1 = """
         CREATE TABLE IF NOT EXISTS snapshots (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             time         REAL NOT NULL,
@@ -66,7 +80,9 @@ def _init_db(conn):
         -- mac 用 NOCASE 索引：MAC 大小写不敏感，但写入时未做归一化。
         CREATE INDEX IF NOT EXISTS idx_dev_mac ON devices(mac COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_dev_ip ON devices(ip);
+"""
 
+_SQL_V2 = """
         -- ── 交换机端口映射（「这台设备插在哪个口」的数据来源）──
         -- 与 devices 不同：端口映射不是每次扫描都有（要 SNMP + BRIDGE-MIB），
         -- 所以单独建表，且**允许某次快照一行都没有**（没扫交换机 / 交换机不支持）。
@@ -98,7 +114,9 @@ def _init_db(conn):
         -- locate_device() 按 MAC 查最近端口，属交互热路径，必须走索引；
         -- 与 devices.mac 同理用 NOCASE（MAC 大小写不敏感，写入时未归一化）。
         CREATE INDEX IF NOT EXISTS idx_pm_mac ON port_map(mac COLLATE NOCASE);
+"""
 
+_SQL_V3 = """
         -- ── 零利用安全体检的事实（v1.9 #3）──────────────────────────
         -- 一行 = 一台设备的一条**事实**（不是结论）：kind 是规范代码
         -- （tls_not_after / tls_self_signed / tls_sig_alg …），value 是规范值。
@@ -123,9 +141,29 @@ def _init_db(conn):
         );
         CREATE INDEX IF NOT EXISTS idx_sf_snapshot ON security_findings(snapshot_id);
         CREATE INDEX IF NOT EXISTS idx_sf_ip ON security_findings(ip);
-        """
-    )
-    conn.commit()
+"""
+
+MIGRATIONS = [
+    (1, _SQL_V1, "snapshots / devices + 三个索引"),
+    (2, _SQL_V2, "switch_map / port_map + 三个索引"),
+    (3, _SQL_V3, "security_findings + 两个索引"),
+]
+
+#: 本程序支持的 schema 版本（= 迁移链最后一版）。
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+#: 识别"引入 user_version 之前建的库"：每张表属于引入它的那一版。
+_LEGACY_TABLES = (
+    ("snapshots", 1),
+    ("devices", 1),
+    ("switch_map", 2),
+    ("port_map", 2),
+    ("security_findings", 3),
+)
+
+
+def _init_db(conn):
+    db_util.apply_migrations(conn, MIGRATIONS, legacy_tables=_LEGACY_TABLES)
 
 
 @contextlib.contextmanager

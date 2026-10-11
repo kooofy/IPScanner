@@ -414,5 +414,187 @@ class SecurityFindingsStoreTest(unittest.TestCase):
         db_util.close_connection(old)
 
 
+class SchemaMigrationTest(unittest.TestCase):
+    """`history_store` 的 schema 迁移链（`PRAGMA user_version`）。
+
+    这层是「资产表 + 观测表」改造的**前置**：没有版本号，加列只能靠 `try/except`
+    猜"用户手里的库是哪个年代的"。测试要证明四件事：
+
+    1. 新库直接建到最新版；
+    2. **老库（无版本号）被"盖章"而不是被重放** —— 它的版本号按已有表推断；
+    3. 老库缺的表会被补齐，已有数据一行不丢；
+    4. 版本比程序新的库不降级、不报错。
+    """
+
+    _TABLES = ("snapshots", "devices", "switch_map", "port_map",
+               "security_findings")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "scan_history.db")
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
+    def _raw(self, path, script=None, version=None):
+        """直接建一个"老库"（绕开 history_store，模拟历史版本建出来的库）。"""
+        import sqlite3
+        c = sqlite3.connect(path)
+        if script:
+            c.executescript(script)
+        if version is not None:
+            c.execute("PRAGMA user_version = %d" % version)
+        c.commit()
+        c.close()
+
+    def _inspect(self, path):
+        """返回 (表名集合, user_version)。"""
+        import sqlite3
+        c = sqlite3.connect(path)
+        self.addCleanup(c.close)
+        tables = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall()}
+        return tables, int(c.execute("PRAGMA user_version").fetchone()[0])
+
+    # ── 迁移链本身的不变量 ────────────────────────────────────────────
+
+    def test_migrations_start_at_one_and_are_contiguous(self):
+        """版本号必须连续从 1 开始 —— 中间断号意味着有一条迁移永远不会被执行。"""
+        versions = [v for v, _sql, _desc in history_store.MIGRATIONS]
+        self.assertEqual(versions, list(range(1, len(versions) + 1)))
+
+    def test_schema_version_matches_the_last_migration(self):
+        self.assertEqual(history_store.SCHEMA_VERSION,
+                         history_store.MIGRATIONS[-1][0])
+
+    def test_every_migration_can_be_inferred_from_a_table(self):
+        """每一版都至少有一张"属于它"的表。
+
+        否则老库推断出的版本会**偏低**，于是已经建过的表被重复建 —— 现在恰好无害
+        （全是 `IF NOT EXISTS`），但第 4 版起就会出问题。这条守的是那个前提。
+        """
+        introduced = {v for _t, v in history_store._LEGACY_TABLES}
+        self.assertEqual(
+            introduced,
+            {v for v, _sql, _desc in history_store.MIGRATIONS},
+            "每一版迁移都要在 _LEGACY_TABLES 里有对应的表，否则推断不出这个版本")
+
+    def test_every_migration_description_is_present(self):
+        """说明会进日志 —— 迁移跑起来时日志是唯一能看出"升了什么"的地方。"""
+        for version, _sql, desc in history_store.MIGRATIONS:
+            self.assertTrue(desc.strip(), "迁移 v%d 缺说明" % version)
+
+    # ── 新库 ──────────────────────────────────────────────────────────
+
+    def test_new_database_lands_on_the_latest_version(self):
+        history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        _tables, version = self._inspect(self.db)
+        self.assertEqual(version, history_store.SCHEMA_VERSION)
+
+    def test_new_database_has_every_table(self):
+        history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        tables, _v = self._inspect(self.db)
+        self.assertEqual(tables, set(self._TABLES))
+
+    def test_empty_file_is_treated_as_a_new_database(self):
+        open(self.db, "wb").close()
+        history_store.list_snapshots(self.db)
+        tables, version = self._inspect(self.db)
+        self.assertEqual(version, history_store.SCHEMA_VERSION)
+        self.assertEqual(tables, set(self._TABLES))
+
+    # ── 老库：盖章，不重放 ────────────────────────────────────────────
+
+    def test_legacy_database_without_a_version_is_adopted(self):
+        """v1.8.0 建出来的库：五张表都在，但版本号是 0。
+
+        必须**按已有表推断**出它其实是 v3，直接盖章 —— 不能当成新库从 v1 重放。
+        """
+        history_store.save_snapshot([_dev("1.1.1.1", mac="AA:BB")],
+                                    ts=1000.0, db_path=self.db)
+        tables_before, _v = self._inspect(self.db)
+        import db_util
+        db_util.close_connection(self.db)
+        # 抹掉版本号，还原成"引入 user_version 之前"的库
+        self._raw(self.db, version=0)
+        _t, v0 = self._inspect(self.db)
+        self.assertEqual(v0, 0)
+
+        snaps = history_store.list_snapshots(self.db)
+        tables, version = self._inspect(self.db)
+        self.assertEqual(version, history_store.SCHEMA_VERSION)
+        self.assertEqual(tables, tables_before)
+        # 数据一行没丢
+        self.assertEqual(len(snaps), 1)
+
+    def test_legacy_database_is_adopted_at_its_inferred_version(self):
+        """只有 v1 两张表的老库（v1.7.6 之前）→ 推断为 v1，补跑 v2 / v3。"""
+        old = os.path.join(self.tmp, "old_v1.db")
+        self._raw(old, script=history_store._SQL_V1)
+        tables, _v = self._inspect(old)
+        self.assertEqual(tables, {"snapshots", "devices"})
+
+        history_store.list_snapshots(old)
+        tables, version = self._inspect(old)
+        self.assertEqual(version, history_store.SCHEMA_VERSION)
+        self.assertEqual(tables, set(self._TABLES))
+        import db_util
+        db_util.close_connection(old)
+
+    def test_partial_legacy_database_gets_the_missing_tables(self):
+        """v2 形态的老库 → 只补跑 v3，且 `security_findings` 立即可用。"""
+        old = os.path.join(self.tmp, "old_v2.db")
+        self._raw(old, script=history_store._SQL_V1 + history_store._SQL_V2)
+        history_store.list_snapshots(old)
+        tables, version = self._inspect(old)
+        self.assertEqual(version, history_store.SCHEMA_VERSION)
+        self.assertEqual(tables, set(self._TABLES))
+        # 补出来的表能真的写进去
+        sid = history_store.save_snapshot(
+            [_dev("10.0.0.9", security_findings=[("tls_cn", "r.local")])],
+            ts=1.0, db_path=old)
+        self.assertEqual(
+            history_store.get_security_findings(sid, db_path=old),
+            {"10.0.0.9": {"tls_cn": "r.local"}})
+        import db_util
+        db_util.close_connection(old)
+
+    def test_legacy_adoption_preserves_existing_rows(self):
+        """盖章不能把老数据弄丢 —— 这是整个迁移链唯一不可接受的结果。"""
+        old = os.path.join(self.tmp, "old_rows.db")
+        self._raw(old, script=history_store._SQL_V1 + """
+            INSERT INTO snapshots (time, device_count) VALUES (1.0, 1);
+            INSERT INTO devices (snapshot_id, ip, status) VALUES (1,'192.168.1.5','online');
+        """)
+        got = history_store.get_snapshot(1, db_path=old)
+        self.assertEqual(got["devices"][0]["ip"], "192.168.1.5")
+        import db_util
+        db_util.close_connection(old)
+
+    # ── 幂等 / 未来库 ─────────────────────────────────────────────────
+
+    def test_reopening_does_not_change_the_version(self):
+        history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        _t, first = self._inspect(self.db)
+        for _ in range(3):
+            import db_util
+            db_util.close_connection(self.db)
+            history_store.list_snapshots(self.db)
+            _t, version = self._inspect(self.db)
+            self.assertEqual(version, first)
+
+    def test_newer_database_is_not_downgraded(self):
+        """用新版建的库被旧版程序打开 → 不降级、不报错，只记一条 warning。"""
+        future = os.path.join(self.tmp, "future.db")
+        self._raw(future, script=history_store._SQL_V1, version=99)
+        history_store.list_snapshots(future)
+        _t, version = self._inspect(future)
+        self.assertEqual(version, 99)
+        import db_util
+        db_util.close_connection(future)
+
+
 if __name__ == "__main__":
     unittest.main()

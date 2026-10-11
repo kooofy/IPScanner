@@ -45,6 +45,81 @@ def connection(db_path, init_fn=None, pragmas=()):
         yield conn
 
 
+def _user_version(conn) -> int:
+    """读 `PRAGMA user_version`（未设置过时为 0）。"""
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _table_exists(conn, name) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def infer_legacy_version(conn, legacy_tables) -> int:
+    """给"引入 `user_version` 之前建的库"推断它相当于哪一版。
+
+    做法是看**哪些表已经存在** —— 每张表属于引入它的那一版，取其中最大的版本号。
+    比写死一个常量稳：老库的形态不止一种（同一个 `scan_history.db`，v1.7.6 之前只有
+    `snapshots`/`devices`，加了定位查询才有 `switch_map`/`port_map`，四刀之后才有
+    `security_findings`）—— 写死常量会让"只建到一半的老库"被误判成最新版，
+    于是缺的那几张表永远不会被补上。
+
+    没有任何已知表 → 返回 0（新库，走完整迁移链）。
+    """
+    version = 0
+    for table, introduced in legacy_tables:
+        if introduced > version and _table_exists(conn, table):
+            version = introduced
+    return version
+
+
+def apply_migrations(conn, migrations, legacy_tables=()):
+    """按 `PRAGMA user_version` 顺序应用迁移链，返回最终版本号。
+
+    - `migrations`：`[(版本号, SQL 脚本, 说明), ...]`，版本号**连续且从 1 开始**。
+    - `legacy_tables`：`[(表名, 引入它的版本号), ...]`，用于识别"引入 `user_version`
+      之前建的库"（表都在、版本号却是 0）。
+
+    为什么需要 `legacy_tables`：`user_version` 是**后加的**。加它之前发布的那些库
+    结构完全正确，只是版本号是 0。若把 0 一律当成"全新库"去重放迁移 1..N，
+    现在的迁移恰好全是 `IF NOT EXISTS` 所以无害，但**将来任何一条 `ALTER TABLE`
+    的迁移都会被重复执行** —— 轻则报错，重则改错数据。所以先按已有表**推断**出它
+    的真实版本、直接盖章，不重放。
+
+    库的版本比程序支持的还高（用新版建的库被旧版程序打开）时**不降级、不报错**，
+    只记一条 warning 后原样返回 —— 报错会让"回退到旧版 exe"变成一个打不开的库，
+    比版本不一致严重得多。
+    """
+    current = _user_version(conn)
+    if current == 0:
+        inferred = infer_legacy_version(conn, legacy_tables)
+        if inferred:
+            current = inferred
+            _log.info("历史库无 schema 版本号，按已有表推断为 v%d", current)
+    if current > migrations[-1][0]:
+        _log.warning(
+            "库的 schema 版本 v%d 高于本程序支持的 v%d，跳过迁移",
+            current, migrations[-1][0],
+        )
+        return current
+    for version, script, desc in migrations:
+        if version <= current:
+            continue
+        _log.info("应用 schema 迁移 v%d：%s", version, desc)
+        conn.executescript(script)
+        # `PRAGMA` 不支持参数绑定，只能拼字符串。version 来自调用方的模块常量，
+        # 不是外部输入。
+        conn.execute("PRAGMA user_version = %d" % version)
+        current = version
+    # 统一落盘：新库走完循环已是 SCHEMA_VERSION；老库推断出的版本在这一步才写进去。
+    if _user_version(conn) != current:
+        conn.execute("PRAGMA user_version = %d" % current)
+    conn.commit()
+    return current
+
+
 def close_connection(db_path):
     """关闭并移除某路径的连接（供测试 teardown / 库重建调用）。"""
     with _dict_lock:
