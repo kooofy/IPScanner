@@ -296,6 +296,60 @@ class TestBuildSnapshot(unittest.TestCase):
         snap = ui_logic.build_snapshot([_Bare()], ts=1000.0)
         self.assertNotIn("security_findings", snap["devices"][0])
 
+    def test_smb_facts_are_carried_into_the_snapshot(self):
+        """v1.9 #3 第四刀：SMB 方言 / 签名事实走**同一条**落库路径。
+
+        与 TLS / 响应器一样，漏了 `build_snapshot` 这一环，风险列照常显示、
+        库里却是空的。
+        """
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.smb = {"dialect": "3.1.1", "signing": "required", "smb1": "1"}
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertEqual(dict(snap["devices"][0]["security_findings"]),
+                         {"smb_dialect": "3.1.1",
+                          "smb_signing": "required",
+                          "smb1": "1"})
+
+    def test_tls_responder_and_smb_facts_are_merged_into_one_key(self):
+        """三者都探到时**合并**进同一个 `security_findings` —— 不是各写一份。"""
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.tls_cert = {"cn": "router.local"}
+        r.name_responder = {"nbns": "ipscanner-a1b2c"}
+        r.smb = {"dialect": "2.1", "signing": "off"}
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertEqual(dict(snap["devices"][0]["security_findings"]),
+                         {"tls_cn": "router.local",
+                          "nbns_responder": "ipscanner-a1b2c",
+                          "smb_dialect": "2.1",
+                          "smb_signing": "off"})
+
+    def test_no_smb_means_no_key(self):
+        r = ScanResult(ip="10.0.0.10", status="online")
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertNotIn("security_findings", snap["devices"][0])
+
+    def test_empty_smb_means_no_key(self):
+        r = ScanResult(ip="10.0.0.11", status="online")
+        r.smb = {}
+        snap = ui_logic.build_snapshot([r], ts=1000.0)
+        self.assertNotIn("security_findings", snap["devices"][0])
+
+    def test_result_without_the_smb_attribute_is_tolerated(self):
+        """老对象没有 `smb` 属性时不能炸。"""
+        class _Bare:
+            ip = "10.0.0.14"
+            status = "online"
+            mac = hostname = vendor = device_class = os_guess = ""
+            open_ports = []
+            location = user = remark = ""
+            wmi_identified = netbios_identified = False
+            wmi_manufacturer = wmi_model = wmi_serial = ""
+            wmi_os = wmi_user = wmi_domain = ""
+            netbios_name = netbios_workgroup = netbios_user = netbios_mac = ""
+
+        snap = ui_logic.build_snapshot([_Bare()], ts=1000.0)
+        self.assertNotIn("security_findings", snap["devices"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

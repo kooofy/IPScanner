@@ -207,6 +207,81 @@ class ResponderFactsTest(unittest.TestCase):
                 self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for ch in kind))
 
 
+class SmbFactsTest(unittest.TestCase):
+    """`smb_facts()` —— 把 SMB 方言 / 签名事实摊成 `(kind, value)` 对。
+
+    与 `tls_cert_facts()` / `responder_facts()` 同一份契约（只收非空项、
+    值全是语言无关的规范串）。
+    """
+
+    def test_empty_gives_nothing(self):
+        for bad in ({}, None, 0, ""):
+            with self.subTest(bad=bad):
+                self.assertEqual(history_store.smb_facts(bad), [])
+
+    def test_known_facts_map_to_stable_kinds(self):
+        self.assertEqual(
+            history_store.smb_facts({"dialect": "3.1.1"}),
+            [(history_store.SEC_SMB_DIALECT, "3.1.1")])
+        self.assertEqual(
+            history_store.smb_facts({"signing": "required"}),
+            [(history_store.SEC_SMB_SIGNING, "required")])
+        self.assertEqual(
+            history_store.smb_facts({"smb1": "1"}),
+            [(history_store.SEC_SMB1, "1")])
+
+    def test_full_fact_set_produces_three_rows(self):
+        got = history_store.smb_facts({"dialect": "3.1.1",
+                                       "signing": "required", "smb1": "1"})
+        self.assertEqual(dict(got), {
+            history_store.SEC_SMB_DIALECT: "3.1.1",
+            history_store.SEC_SMB_SIGNING: "required",
+            history_store.SEC_SMB1: "1",
+        })
+
+    def test_output_is_sorted_for_stable_diffs(self):
+        """排序固定 —— 否则同一份事实两次落库的行序可能不同。"""
+        got = history_store.smb_facts({"signing": "off", "dialect": "2.1",
+                                       "smb1": "1"})
+        self.assertEqual([k for k, _v in got],
+                         [history_store.SEC_SMB_DIALECT,
+                          history_store.SEC_SMB_SIGNING,
+                          history_store.SEC_SMB1])
+
+    def test_blank_entries_are_skipped(self):
+        for bad in ({"dialect": ""}, {"dialect": "   "}, {"dialect": None},
+                    {"": "3.1.1"}, {None: "3.1.1"}):
+            with self.subTest(bad=bad):
+                self.assertEqual(history_store.smb_facts(bad), [])
+
+    def test_fact_name_case_is_normalised(self):
+        self.assertEqual(
+            history_store.smb_facts({"Dialect": "3.1.1"}),
+            [(history_store.SEC_SMB_DIALECT, "3.1.1")])
+
+    def test_unknown_fact_degrades_instead_of_dropping_the_finding(self):
+        """没登记的新事实走兜底派生名 —— 与响应器那边同一个理由：发现不能悄悄丢。"""
+        got = history_store.smb_facts({"encryption": "aes-128-ccm"})
+        self.assertEqual(got, [("smb_encryption", "aes-128-ccm")])
+
+    def test_values_are_language_neutral(self):
+        for kind, value in history_store.smb_facts(
+                {"dialect": "3.1.1", "signing": "required", "smb1": "1"}):
+            with self.subTest(kind=kind):
+                self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for ch in value))
+                self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for ch in kind))
+
+    def test_smb1_kind_is_not_derived_from_the_dialect(self):
+        """`smb1` 是一条**独立**事实：3.1.1 服务器完全可以同时支持 SMB1。
+
+        所以 `dialect == "3.1.1"` 与 `smb1 == "1"` 会同时出现 —— 只看方言
+        会漏掉这种情况。
+        """
+        got = dict(history_store.smb_facts({"dialect": "3.1.1", "smb1": "1"}))
+        self.assertEqual(got[history_store.SEC_SMB_DIALECT], "3.1.1")
+        self.assertEqual(got[history_store.SEC_SMB1], "1")
+
+
 class SecurityFindingsStoreTest(unittest.TestCase):
     """`security_findings` 表：落库、读回、级联清理、老库平滑升级。"""
 
@@ -258,6 +333,18 @@ class SecurityFindingsStoreTest(unittest.TestCase):
         """
         facts = history_store.responder_facts({"llmnr": "ipscanner-a",
                                                "nbns": "ipscanner-a"})
+        sid = history_store.save_snapshot(
+            [_dev("10.0.0.9", security_findings=facts)],
+            ts=1000.0, db_path=self.db)
+        self.assertEqual(history_store.get_security_findings(sid, db_path=self.db),
+                         {"10.0.0.9": dict(facts)})
+
+    def test_smb_facts_round_trip(self):
+        """SMB 事实也走**同一张表** —— 这条同时证明三个 `SEC_SMB*` 常量
+        与 `smb_facts()` 对得上。
+        """
+        facts = history_store.smb_facts({"dialect": "3.1.1",
+                                         "signing": "required", "smb1": "1"})
         sid = history_store.save_snapshot(
             [_dev("10.0.0.9", security_findings=facts)],
             ts=1000.0, db_path=self.db)

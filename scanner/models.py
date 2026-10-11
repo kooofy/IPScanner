@@ -102,6 +102,22 @@ class ScanResult:
     # 是否探测由扫描选项决定（GUI 勾选框 / CLI `--name-responder`，默认关），
     # 因为探测会往网络里发组播 / 广播包。
     name_responder: Dict = field(default_factory=dict)
+    # ── 零利用安全体检：SMB 方言 / 签名（v1.9 #3 第四刀）──────────────────
+    #
+    # `scanner.smb.probe_smb()` 的结果，形状 `{事实名: 规范值}`：
+    #
+    # - `dialect`：协商谈成的方言规范串（`"1"` / `"2.1"` / `"3.1.1"` …）；
+    # - `signing`：`"required"` / `"enabled"` / `"off"`；
+    # - `smb1`：`"1"` 表示**这台主机还支持 SMB1**。
+    #
+    # ⚠ `smb1` 与 `dialect == "1"` **不是一回事**：后者是"SMB2 谈不成、只能退到
+    # SMB1"，前者是"另开一条连接问出来它也会说 SMB1"—— 一台 SMB 3.1.1 服务器
+    # 完全可以同时支持 SMB1（这时 `dialect` 是 `"3.1.1"`，`smb1` 仍是 `"1"`）。
+    # 只看 `dialect` 会漏掉这种情况。
+    #
+    # 空 dict = 没探到（445 没开 / 不是 SMB / 被拦 / 协商失败），**不是**"都正常"。
+    # 只探 TCP/445（SMB over Direct TCP），不走 139。
+    smb: Dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         if self.discovery_method:

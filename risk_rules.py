@@ -24,6 +24,10 @@
   ⚠ 它**是**新探测（会往网络里发组播 / 广播包），所以由显式开关控制、
   默认关（GUI 勾选框 / CLI `--name-responder`）—— "评分不增加网络开销"
   这条对它**不**成立，这是它与 `tls_cert` 的关键区别。
+- `smb`：SMB 方言与签名事实（"还支持 SMB1" / "签名没强制"，v1.9 #3 第四刀）。
+  同样是**零利用**的 —— 只发一次 `NEGOTIATE` 读回协商结果，**绝不**发
+  `SESSION_SETUP`、不试任何凭据。与 `tls_cert` 同类：不新扫端口，只是对
+  已经确认开放的 445 做一次握手，所以"评分不增加网络开销"依然成立。
 
 刻度是 0–100 的加法制，封顶 100。**每一分都必须能说出理由**（`reasons` 带分值），
 tooltip 会把分数拆开给用户看：说不出理由的风险分没人会信。
@@ -50,9 +54,15 @@ TLS 那几项的标定：自签名**只给 5 分** —— 局域网设备管理�
 一台老路由器 (23/80/161) 会同时命中三条规则，各占一行说的是同一件事，把
 tooltip 撑成一面墙。聚合成一条 + 一行明细，结论先出来、明细按需看。
 ⚠ **总分不变**（各端口分值照旧相加），上面那张标定表因此依然成立。
+
+SMB 那两条（SMB1 可用 45 / 签名未强制 25）**不影响上面那张标定表**：它的每一行
+都只给端口组合，`smb` 是空 dict，两条判定都不命中。而标定表里"普通 Windows 主机
+(135/139/445/3389) -> 0"这一行在**真实机器上**也依然成立 —— 实测本机与局域网那台
+Windows 10 的 SMB 签名都是 `required`、SMB1 也已卸载，所以 445 开着也仍是 0 分。
 """
 from conflict_detector import SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_WARNING
 from i18n import tr
+from scanner.smb import SIGNING_REQUIRED_TEXT
 from scanner.x509 import days_until, is_weak_key, is_weak_signature
 
 # ── 等级 ───────────────────────────────────────────────────────────────
@@ -168,6 +178,42 @@ _REASON_NAME_RESPONDER = "name_responder"
 #: 在风险栏里冒头，又不至于单独一条就把设备拉满。
 _NAME_RESPONDER_POINTS = 30
 
+# ── 零利用安全体检：SMB 方言 / 签名（v1.9 #3 第四刀）────────────────────
+#
+# 事实来自 `ScanResult.smb`（见 `scanner/smb.py`）。与 `tls_cert` 一样，它
+# **不是**新扫一个端口，而是对**已经确认开放的 445** 做一次协商握手 ——
+# 所以"评分不增加网络开销"这条依然成立。
+#
+# 红线：只发 NEGOTIATE，**绝不**发 `SESSION_SETUP`、不试任何凭据。
+_REASON_SMB1 = "smb1_available"
+_REASON_SMB_SIGNING = "smb_signing_not_required"
+
+#: 理由 → 分值。
+#:
+#: - **SMB1 可用 45 分**，全表最高的一项。理由：SMB1 有**已被武器化**的远程
+#:   代码执行漏洞（EternalBlue / WannaCry），而且**不需要任何凭据** —— 这是
+#:   零利用体检里唯一一条能直接通向"整台机器被打穿"的发现。微软从 Windows 10
+#:   1709 起默认不再安装 SMB1，所以一台仍开着 SMB1 的设备几乎必然是没维护过的
+#:   老设备。45 分够它单独把设备顶进"中危"前列，又不至于一条就把设备拉满
+#:   （拉满会掩盖它同时存在的其它问题）。
+#: - **签名未强制 25 分**，与 VNC / TLS 弱签名同级。理由：签名未强制时，攻击者
+#:   能把受害者的 NTLM 认证**中继**到这台服务器上、用别人的身份登录 —— 这是
+#:   勒索软件在局域网里横向扩散的常见手法。它要求攻击者**已经在网内**，所以比
+#:   SMB1 那条低一档；但它同样有明确且可操作的对策（强制签名）。
+#:
+#: ⚠ 两条**分开算**，不聚合：它们的对策完全不同（停用 SMB1 vs 强制签名），
+#: 而且彼此独立 —— 现代 NAS 上"SMB1 已关但签名没强制"很常见，老设备上
+#: "SMB1 开着但签名强制"也存在。这与 `_REASON_WEAK_PROTOCOLS` 那次聚合
+#: （多条规则说的是同一件事）是两回事。
+#:
+#: ⚠ **不按方言"新旧"打分**：`dialect` 只作为事实展示。给 2.1 / 3.0 定一个阈值
+#: 是凭空的 —— 它们并没有"已被实证可攻破"，而 SMB1 与签名这两条各有明确且
+#: 唯一的后果。宁可少一条结论，也不要造一条说不出理由的分。
+_SMB_POINTS = {
+    _REASON_SMB1: 45,
+    _REASON_SMB_SIGNING: 25,
+}
+
 #: 冲突严重级别 → 分值。**复用冲突检测的判定**，不另立一套。
 _SEVERITY_POINTS = {
     SEVERITY_HIGH: 40,
@@ -191,6 +237,8 @@ _REASON_TEXT = {
     _REASON_TLS_WEAK_KEY: "TLS 证书密钥过短",
     _REASON_NAME_RESPONDER: "应答了不存在的主机名（疑似欺骗响应器）",
     _REASON_WEAK_PROTOCOLS: "弱协议暴露面",
+    _REASON_SMB1: "SMB1 仍可用（存在已武器化的远程漏洞）",
+    _REASON_SMB_SIGNING: "SMB 签名未强制（NTLM 可被中继）",
     "duplicate_mac": "MAC 地址冲突",
     "duplicate_hostname": "主机名冲突",
     "unknown_device": "不在地址库中的设备",
@@ -295,6 +343,33 @@ def responder_reasons(responder) -> list:
     return [(_REASON_NAME_RESPONDER, _NAME_RESPONDER_POINTS)]
 
 
+def smb_reasons(smb) -> list:
+    """从 SMB 事实推出风险理由，返回 `[(理由代码, 分值), ...]`。
+
+    `smb` 是 `ScanResult.smb`（见 `scanner.smb.probe_smb`），空 dict 时返回
+    `[]`。与 `tls_reasons()` 一样独立成函数，方便纯函数式单测 —— 不用真去连
+    一台 SMB 服务器也能覆盖全部分支。
+
+    两条判定各自的依据（细节都在 `scanner/smb.py` 的诚实降级一节）：
+
+    - `smb1` 非空 → 这台主机**还支持 SMB1**；
+    - `signing` 非空且不是 `"required"` → 签名**没强制**。`"enabled"` 与
+      `"off"` **都算**：服务器"启用但不强制"时客户端照样能谈成不签名，
+      中继照样成立（所以"未强制"才是那个发现，"未启用"只是它的子集）。
+
+    `signing` 缺失（空值）时**不**下结论：那是"问不出来"，不是"没强制"。
+    """
+    if not smb:
+        return []
+    out = []
+    if str(smb.get("smb1") or "").strip():
+        out.append((_REASON_SMB1, _SMB_POINTS[_REASON_SMB1]))
+    signing = str(smb.get("signing") or "").strip().lower()
+    if signing and signing != SIGNING_REQUIRED_TEXT:
+        out.append((_REASON_SMB_SIGNING, _SMB_POINTS[_REASON_SMB_SIGNING]))
+    return out
+
+
 def score_risk(result, conflicts=(), now=None) -> dict:
     """给一台设备打分。
 
@@ -304,7 +379,7 @@ def score_risk(result, conflicts=(), now=None) -> dict:
 
     返回 `{"score": int, "level": str, "reasons": [(代码, 分值), ...],
     "weak_protocols": [代码, ...]}`。
-    `reasons` 保序（先弱协议、再 TLS、再名字响应器、后冲突）且**带分值**，
+    `reasons` 保序（先弱协议、再 TLS、再名字响应器、再 SMB、后冲突）且**带分值**，
     这样 tooltip 能把分数拆开给用户看 —— 一个说不出理由的风险分没人会信。
 
     排序按**类别**而不是全局按分值：类别内部已按严重度排好（见 `_TLS_POINTS`），
@@ -327,6 +402,9 @@ def score_risk(result, conflicts=(), now=None) -> dict:
         score += points
         reasons.append((code, points))
     for code, points in responder_reasons(getattr(result, "name_responder", None)):
+        score += points
+        reasons.append((code, points))
+    for code, points in smb_reasons(getattr(result, "smb", None)):
         score += points
         reasons.append((code, points))
     for conflict in (conflicts or ()):

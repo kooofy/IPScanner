@@ -510,6 +510,149 @@ class ResponderReasonTest(unittest.TestCase):
         self.assertEqual(risk_rules.score_risk(r, now=self.NOW)["score"], 0)
 
 
+class SmbReasonTest(unittest.TestCase):
+    """SMB 方言 / 签名事实 → 风险理由（v1.9 #3 第四刀）。
+
+    两条判定的标定（详见 `risk_rules._SMB_POINTS` 的注释）：
+
+    - **SMB1 可用 45 分**，全表最高。SMB1 有已被武器化的远程代码执行漏洞
+      （EternalBlue / WannaCry），且**不需要任何凭据** —— 这是零利用体检里
+      唯一能直接通向"整台机器被打穿"的发现。
+    - **签名未强制 25 分**，与 VNC / TLS 弱签名同级。签名没强制时 NTLM 认证
+      可被**中继**，是勒索软件横向扩散的常见手法；但它要求攻击者已在网内。
+
+    两条**分开算**，不聚合 —— 对策完全不同（停用 SMB1 vs 强制签名），
+    而且彼此独立（现代 NAS 常见"SMB1 已关但签名没强制"）。
+    """
+
+    #: 固定"今天"，与 `TlsReasonTest` 一致（`score_risk(now=...)` 需要）。
+    NOW = datetime.datetime(2026, 10, 11, 12, 0, 0)
+
+    def test_no_smb_facts_means_no_reasons(self):
+        for bad in ({}, None, 0, ""):
+            with self.subTest(bad=bad):
+                self.assertEqual(risk_rules.smb_reasons(bad), [])
+
+    def test_a_modern_host_with_required_signing_scores_nothing(self):
+        """🔴 标定基线：实测的 Windows 10（3.1.1 + 签名强制）**不该有分**。
+
+        这条同时守住上面那张标定表里的"普通 Windows 主机 -> 0" ——
+        445 开着但签名是强制的，依然不该报。
+        """
+        self.assertEqual(risk_rules.smb_reasons(
+            {"dialect": "3.1.1", "signing": "required"}), [])
+
+    def test_smb1_available_scores_forty_five(self):
+        got = dict(risk_rules.smb_reasons({"dialect": "3.1.1", "smb1": "1"}))
+        self.assertEqual(got, {"smb1_available": 45})
+
+    def test_smb1_only_server_also_scores(self):
+        """只认 SMB1 的设备（`dialect == "1"`）同样命中。"""
+        got = dict(risk_rules.smb_reasons({"dialect": "1", "smb1": "1"}))
+        self.assertEqual(got, {"smb1_available": 45})
+
+    def test_signing_enabled_but_not_required_is_the_finding(self):
+        """🔴 标定核心：**"启用但未强制"就是那个发现**。
+
+        服务器启用了签名但不强制时，客户端照样可以谈成不签名 —— 中继照样成立。
+        所以判定只按"是否强制"，`enabled` 与 `off` 都算。
+        """
+        for mode in ("enabled", "off"):
+            with self.subTest(mode=mode):
+                got = dict(risk_rules.smb_reasons({"signing": mode}))
+                self.assertEqual(got, {"smb_signing_not_required": 25})
+
+    def test_signing_case_and_whitespace_are_normalised(self):
+        got = risk_rules.smb_reasons({"signing": "  REQUIRED  "})
+        self.assertEqual(got, [])
+
+    def test_missing_signing_fact_gives_no_conclusion(self):
+        """⚠ `signing` 缺失是"问不出来"，**不是**"没强制" —— 不能猜。"""
+        self.assertEqual(risk_rules.smb_reasons({"dialect": "2.1"}), [])
+        self.assertEqual(risk_rules.smb_reasons({"dialect": "2.1",
+                                                 "signing": ""}), [])
+
+    def test_the_two_findings_are_separate_not_aggregated(self):
+        """两条各有独立对策，所以是两条理由、分值相加（45 + 25）。"""
+        got = dict(risk_rules.smb_reasons({"dialect": "3.1.1", "signing": "off",
+                                           "smb1": "1"}))
+        self.assertEqual(got, {"smb1_available": 45,
+                               "smb_signing_not_required": 25})
+
+    def test_dialect_alone_is_never_scored(self):
+        """⚠ 不按方言"新旧"打分：给 2.1 / 3.0 定阈值是凭空的。"""
+        for dialect in ("1", "2.0.2", "2.1", "3.0", "3.0.2", "3.1.1", "0x02ff"):
+            with self.subTest(dialect=dialect):
+                self.assertEqual(risk_rules.smb_reasons({"dialect": dialect}), [])
+
+    def test_score_risk_picks_up_smb(self):
+        """接线：SMB 事实必须真的进总分。"""
+        r = _result([])
+        self.assertEqual(risk_rules.score_risk(r)["score"], 0)
+        r.smb = {"dialect": "1", "smb1": "1"}
+        risk = risk_rules.score_risk(r)
+        self.assertEqual(risk["score"], 45)
+        self.assertEqual([c for c, _ in risk["reasons"]], ["smb1_available"])
+        self.assertEqual(risk["level"], risk_rules.RISK_LEVEL_MEDIUM)
+
+    def test_score_risk_combines_ports_tls_responder_and_smb(self):
+        r = _result([23])                                  # Telnet 30
+        r.tls_cert = {"not_after": "2020-01-01T00:00:00"}  # 过期 40
+        r.name_responder = {"llmnr": "x"}                  # 30
+        r.smb = {"dialect": "3.1.1", "signing": "enabled", "smb1": "1"}  # 70
+        risk = risk_rules.score_risk(r, now=self.NOW)
+        self.assertEqual(risk["score"], 100)               # 170 封顶到 100
+        self.assertEqual([c for c, _ in risk["reasons"]],
+                         ["weak_protocols", "tls_expired", "name_responder",
+                          "smb1_available", "smb_signing_not_required"])
+
+    def test_smb_reason_comes_after_responder_and_before_conflicts(self):
+        """顺序契约：端口 → TLS → 响应器 → SMB → 冲突（见 `score_risk` 文档）。"""
+        r = _result([23])
+        r.name_responder = {"llmnr": "x"}
+        r.smb = {"dialect": "1", "smb1": "1"}
+        risk = risk_rules.score_risk(
+            r, conflicts=[_FakeConflict("duplicate_mac", "high")],
+            now=self.NOW)
+        codes = [c for c, _ in risk["reasons"]]
+        self.assertEqual(codes, ["weak_protocols", "name_responder",
+                                 "smb1_available", "duplicate_mac"])
+
+    def test_points_match_the_declared_constant(self):
+        """分值只有一处定义，别在别处又写一份。"""
+        self.assertEqual(risk_rules._SMB_POINTS, {
+            risk_rules._REASON_SMB1: 45,
+            risk_rules._REASON_SMB_SIGNING: 25,
+        })
+        self.assertEqual(risk_rules._REASON_SMB1, "smb1_available")
+        self.assertEqual(risk_rules._REASON_SMB_SIGNING,
+                         "smb_signing_not_required")
+
+    def test_smb1_outranks_every_other_single_reason(self):
+        """标定断言：SMB1 是单条最高分 —— 它确实是这里最危险的一条。"""
+        others = [p for _c, p in risk_rules._TLS_POINTS]
+        others += [p for _c, _port, p in risk_rules._PORT_RULES]
+        others += [risk_rules._HTTP_ONLY_POINTS,
+                   risk_rules._NAME_RESPONDER_POINTS]
+        self.assertGreater(risk_rules._SMB_POINTS[risk_rules._REASON_SMB1],
+                           max(others))
+
+    def test_score_risk_tolerates_objects_without_the_attribute(self):
+        """历史库里读回来的对象没有这个属性 —— `getattr` 兜底不能炸。"""
+        class _Bare:
+            ip = "10.0.0.1"
+            status = "online"
+            open_ports = []
+
+        self.assertEqual(risk_rules.score_risk(_Bare())["score"], 0)
+
+    def test_a_clean_host_still_scores_zero(self):
+        """🔴 标定基线：普通主机（445 开着但签名强制）仍然是 0 分。"""
+        r = _result([135, 139, 445, 3389, 443])
+        r.smb = {"dialect": "3.1.1", "signing": "required"}
+        self.assertEqual(risk_rules.score_risk(r, now=self.NOW)["score"], 0)
+
+
 class LevelThresholdTest(unittest.TestCase):
 
     def test_boundaries(self):
@@ -560,6 +703,7 @@ class LabelTest(unittest.TestCase):
         codes.update(code for code, _ in risk_rules._TLS_POINTS)
         codes.add(risk_rules._REASON_NAME_RESPONDER)
         codes.add(risk_rules._REASON_WEAK_PROTOCOLS)
+        codes.update(risk_rules._SMB_POINTS)
         for code in codes:
             with self.subTest(code=code):
                 self.assertTrue(

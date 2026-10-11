@@ -276,6 +276,54 @@ class SnapshotDeviceTest(unittest.TestCase):
         self.assertEqual(got["10.0.0.9"], {"llmnr_responder": "ipscanner-a1b2c",
                                            "nbns_responder": "ipscanner-a1b2c"})
 
+    # ── SMB 方言 / 签名（v1.9 #3 第四刀）──
+
+    def test_smb_facts_are_included(self):
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.smb = {"dialect": "3.1.1", "signing": "required", "smb1": "1"}
+        dev = cli._snapshot_devices([r])[0]
+        self.assertEqual(dict(dev["security_findings"]),
+                         {"smb_dialect": "3.1.1",
+                          "smb_signing": "required",
+                          "smb1": "1"})
+
+    def test_no_smb_means_no_key(self):
+        r = ScanResult(ip="10.0.0.10", status="online")
+        self.assertNotIn("security_findings", cli._snapshot_devices([r])[0])
+
+    def test_smb_matches_the_gui_path(self):
+        import ui_logic
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.tls_cert = dict(self._CERT)
+        r.name_responder = {"nbns": "ipscanner-a1b2c"}
+        r.smb = {"dialect": "2.1", "signing": "off"}
+        cli_dev = cli._snapshot_devices([r])[0]
+        gui_dev = ui_logic.build_snapshot([r], ts=0.0)["devices"][0]
+        self.assertEqual(cli_dev["security_findings"], gui_dev["security_findings"])
+
+    def test_smb_roundtrips_through_the_database(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        db = os.path.join(tmp, "hist.db")
+        self.addCleanup(lambda: __import__("db_util").close_connection(db))
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.smb = {"dialect": "3.1.1", "signing": "enabled", "smb1": "1"}
+        sid = history_store.save_snapshot(cli._snapshot_devices([r]),
+                                          ts=1000.0, db_path=db)
+        got = history_store.get_security_findings(sid, db_path=db)
+        self.assertEqual(got["10.0.0.9"], {"smb_dialect": "3.1.1",
+                                           "smb_signing": "enabled",
+                                           "smb1": "1"})
+
+    def test_smb_does_not_leak_into_the_result_columns(self):
+        """⚠ `tests/test_cli.py` 有一条不变量：`result_to_record()` 的键集合
+        必须**恰好**等于 `_RESULT_COLUMNS`。SMB 事实是落库用的，不该跑进
+        表格列 —— 这条守住那个边界。
+        """
+        r = ScanResult(ip="10.0.0.9", status="online")
+        r.smb = {"dialect": "3.1.1", "signing": "off", "smb1": "1"}
+        self.assertEqual(set(cli._RESULT_COLUMNS), set(cli.result_to_record(r)))
+
 
 class CollectRespondersTest(unittest.TestCase):
     """CLI 侧的 `_collect_responders()` —— 探测结果分发（v1.9 #3 第二刀）。

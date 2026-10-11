@@ -264,11 +264,11 @@ def result_to_record(r) -> dict:
 def _snapshot_devices(results) -> list:
     """构造 history_store.save_snapshot 所需的设备字典列表。
 
-    探到 TLS 证书或名字响应器的设备会多带一个 `security_findings` 键（见
-    `history_store.tls_cert_facts` / `history_store.responder_facts`）——
+    探到 TLS 证书、名字响应器或 SMB 事实的设备会多带一个 `security_findings`
+    键（见 `history_store.tls_cert_facts` / `responder_facts` / `smb_facts`）——
     与 GUI 走的是同一条落库路径，免得"命令行存的快照没有安全事实"。
     """
-    from history_store import responder_facts, tls_cert_facts
+    from history_store import responder_facts, smb_facts, tls_cert_facts
 
     out = []
     for r in results:
@@ -287,6 +287,7 @@ def _snapshot_devices(results) -> list:
         }
         facts = tls_cert_facts(getattr(r, "tls_cert", None))
         facts += responder_facts(getattr(r, "name_responder", None))
+        facts += smb_facts(getattr(r, "smb", None))
         if facts:
             dev["security_findings"] = facts
         out.append(dev)

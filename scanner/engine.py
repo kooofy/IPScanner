@@ -28,6 +28,7 @@ from .ports import (raw_capability, reset_raw_capability_cache, scan_port,
                     scan_ports, scan_shares)
 from .range import (parse_ip_range, count_ip_range, is_ipv6_range, RangeTooLarge,
                     MAX_IPS_PER_RANGE, MAX_IPS_TOTAL)
+from .smb import probe_smb
 from .snmp import snmp_get_system
 from .snmp_v3 import snmp_v3_get_system, ERR_NO_RESPONSE
 from app_logging import get_logger
@@ -485,6 +486,12 @@ def _enrich_device(ctx: ScanContext, ip: str) -> None:
                 "banner": f"{len(shares)} 个共享: " + ", ".join(shares),
                 "shares": shares,
             })
+        # 零利用安全体检（v1.9 #3 第四刀）：只发 SMB2/SMB1 NEGOTIATE，读回方言与
+        # 签名要求（`SecurityMode`）。**不**发 SESSION_SETUP、不试任何凭据 ——
+        # 见 `scanner/smb.py` 开头的红线。放在这个分支里是因为 445 刚确认开着，
+        # 不用再探一次端口；也刻意**不**依赖 `scan_shares()` 是否成功（它走的
+        # 是另一套调用，拿不到共享不代表问不出方言）。
+        result.smb = probe_smb(ip, timeout=1.5)
 
     # 设备指纹深度：综合厂商/端口/服务(mDNS/UPnP/SNMP)/OS 推断设备类别与型号
     result.device_class, result.device_model = infer_device(result)

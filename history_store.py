@@ -400,6 +400,17 @@ SEC_NBNS_RESPONDER = "nbns_responder"
 #: 发现不会丢，只是 kind 少了这道"稳定契约"的保证。
 _RESPONDER_KINDS = {"llmnr": SEC_LLMNR_RESPONDER, "nbns": SEC_NBNS_RESPONDER}
 
+#: SMB 方言 / 签名（v1.9 #3 第四刀）。值全是语言无关的规范串：方言是
+#: `"3.1.1"`，签名是 `"required"` / `"enabled"` / `"off"`，SMB1 可用是 `"1"`。
+SEC_SMB_DIALECT = "smb_dialect"
+SEC_SMB_SIGNING = "smb_signing"
+SEC_SMB1 = "smb1"
+
+#: `ScanResult.smb` 的事实名 → kind。与 `_RESPONDER_KINDS` 同一套规矩：
+#: 漏登记的事实走兜底派生名（`encryption` → `smb_encryption`）—— 发现不能悄悄丢掉。
+_SMB_KINDS = {"dialect": SEC_SMB_DIALECT, "signing": SEC_SMB_SIGNING,
+              "smb1": SEC_SMB1}
+
 
 def tls_cert_facts(cert) -> list:
     """把 `ScanResult.tls_cert`（一个 dict）摊成 `[(kind, value), ...]`。
@@ -444,6 +455,24 @@ def responder_facts(responder) -> list:
         if proto and value:
             kind = _RESPONDER_KINDS.get(proto, proto + "_responder")
             out.append((kind, value))
+    return out
+
+
+def smb_facts(smb) -> list:
+    """把 `ScanResult.smb`（`{事实名: 规范值}`）摊成 `[(kind, value), ...]`。
+
+    与 `tls_cert_facts()` / `responder_facts()` 同一份契约：只收**非空**的项，
+    值全是语言无关的规范串。未知事实名走兜底派生名（`encryption` →
+    `smb_encryption`）—— 与 `responder_facts()` 同一个理由：发现不能悄悄丢掉。
+    """
+    if not smb:
+        return []
+    out = []
+    for key, value in sorted(smb.items()):
+        key = str(key or "").strip().lower()
+        value = str(value or "").strip()
+        if key and value:
+            out.append((_SMB_KINDS.get(key, "smb_" + key), value))
     return out
 
 

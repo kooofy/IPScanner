@@ -77,6 +77,8 @@
   "RDATA 越界": "RDATA out of bounds",
   "RDP": "RDP",
   "RDP 为 Windows 专有功能。Linux/macOS 请使用 Remmina 或 FreeRDP 客户端。": "RDP is Windows-only. On Linux/macOS please use Remmina or FreeRDP client.",
+  "SMB 签名未强制（NTLM 可被中继）": "SMB signing not required (NTLM can be relayed)",
+  "SMB1 仍可用（存在已武器化的远程漏洞）": "SMB1 still available (has weaponised remote exploits)",
   "SMB共享": "SMB Share",
   "SNMP": "SNMP",
   "SNMP 名称": "SNMP name",
