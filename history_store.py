@@ -14,6 +14,7 @@ import contextlib
 import ipaddress
 import os
 import time
+from typing import Optional
 from app_paths import data_dir
 
 import db_util
@@ -191,7 +192,14 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
             "INSERT INTO snapshots (time, device_count, note) VALUES (?,?,?)",
             (ts, len(devices), note),
         )
+        # lastrowid 在 typeshed 里是 `int | None` —— None 只可能意味着这次 INSERT
+        # 根本没执行。此时继续下去会把所有 devices 挂在 `snapshot_id=None` 下：
+        # 设备**写得进去**，却因为连不到任何快照而永远查不到 —— 那是**静默坏数据**，
+        # 比当场报错难查得多。所以这里不返回 0 之类的假 id，也不用 cast 抹掉，
+        # 直接响出来（本函数对外承诺 `-> int`，做不到就该让调用方看见）。
         sid = cur.lastrowid
+        if sid is None:
+            raise RuntimeError("快照 INSERT 未返回 rowid，拒绝继续写入 devices")
         sec_rows = []
         for d in devices:
             conn.execute(
@@ -229,7 +237,7 @@ def list_snapshots(db_path=None) -> list:
     return [dict(r) for r in rows]
 
 
-def get_snapshot(snapshot_id, db_path=None) -> dict:
+def get_snapshot(snapshot_id, db_path=None) -> Optional[dict]:
     """返回完整快照 {"time": float, "devices": [...]}；不存在返回 None。
 
     每台设备若在 `security_findings` 里有记录，会多出一个

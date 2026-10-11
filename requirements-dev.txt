@@ -18,3 +18,26 @@ pyinstaller-hooks-contrib==2026.6
 # 大面积的风格 diff。配置见 pyproject.toml 的 [tool.ruff.lint]。
 # 用法：python -m ruff check .
 ruff==0.16.8
+
+# ── 类型检查 ────────────────────────────────────────────────────────
+# ⚠ **版本必须锁死**：pyright 每次升级都可能新增规则或收紧推断，把以前干净的
+# 文件报红。本项目的门禁要求 0 error，所以升级 pyright 要当成**一次有意的变更**
+# 来做（改版本号 → 看报了什么 → 逐个处理），不能让它自动跟 latest。
+# 检查范围见 pyproject.toml 的 [tool.pyright]（是**包含清单**，不是排除清单）。
+# 用法：python -m pyright
+pyright==1.1.414
+
+# ── 覆盖率 ──────────────────────────────────────────────────────────
+# 用 coverage 而不是 pytest-cov：本项目跑的是**标准库 unittest**（run_tests.py），
+# 压根不经过 pytest。
+# 用法：coverage run run_tests.py && python check_coverage.py
+# ⚠ 下界是 **per-file** 的（`history_store.py` / `db_util.py`），不是全局百分比 ——
+#    全局数字会被与本次改动无关的 0% 文件稀释，制造假红。理由见
+#    docs/ROADMAP_V1.9.md §1.4。
+coverage==7.16.2
+
+# ── 依赖漏洞审计 ────────────────────────────────────────────────────
+# 本项目依赖极少（PyQt5 三件套 + openpyxl + xlrd），跑得飞快；它**同时是
+# "零第三方依赖"这条身份的守卫** —— 哪天有人顺手加了个包，门禁会问一句。
+# 用法：python -m pip_audit -r requirements.txt
+pip-audit==2.10.1

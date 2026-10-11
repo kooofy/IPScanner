@@ -42,6 +42,11 @@ alert_dedup.json
 # i18n 审计脚本生成的待翻译清单（工作产物，不入库）
 i18n/_todo_*.json
 
+# coverage 的测量产物（CI 里由「覆盖率门禁」job 生成，本地跑也会留下）
+.coverage
+.coverage.*
+htmlcov/
+
 # PyInstaller 构建产物
 build/
 dist/

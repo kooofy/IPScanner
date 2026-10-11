@@ -164,3 +164,104 @@ jobs:
         run: |
           .\dist\IPScanner_cli.exe --version
           .\dist\IPScanner_cli.exe scan -r 127.0.0.1/32 --no-ports --no-mdns --format json
+
+  # ── 质量门禁（v1.9 1.4）──────────────────────────────────────────
+  # 三个门禁各自独立成一个 job：红了要能一眼看出是**哪一个**红的，
+  # 否则"允许红"会慢慢变成"习惯性忽略红"。
+  # 取舍与实测基线见 docs/ROADMAP_V1.9.md §1.4。
+
+  quality-coverage:
+    name: 覆盖率门禁（per-file 下界）
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 单元测试（带覆盖率）
+        run: python -m coverage run run_tests.py
+
+      - name: 覆盖率总览（只出报告，**不**设门槛）
+        # 全局数字不进门槛：它会被与本次改动无关的 0% 文件稀释
+        # （main.py / oui_updater.py / parse_ieee_oui.py 现在都是 0%），
+        # 改动过程中必然往下掉 → 假红 → 人去调低门槛。
+        run: python -m coverage report
+
+      - name: per-file 下界（真正的门禁）
+        # 下界 = 2026-10-11 **实测值**，不是拍的：
+        #   history_store.py  95%（365 statements / 缺 20）
+        #   db_util.py        90%（83 statements / 缺 8）
+        # 规则：这两个数**不许变低**。要放宽必须在提交信息里写明理由 ——
+        # 否则"下界"就变成了"每次掉下去就调一下"的橡皮筋。
+        # coverage 只有一个全局 fail_under，做不到 per-file —— 所以逐文件各跑一次。
+        # ⚠ 匹配不到文件时 coverage 以**退出码 1** 失败（不是静默通过），
+        #    因此改文件名 / 打错字会当场红，不会悄悄失去门禁。
+        # v1.9 1.1（资产表）新增"要碰的文件"时，在这里**加一行**并登记当时的实测值。
+        run: |
+          python -m coverage report --include="history_store.py" --fail-under=95
+          python -m coverage report --include="db_util.py" --fail-under=90
+
+  quality-types:
+    name: 类型门禁（pyright）
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: pyright（范围见 pyproject.toml 的 [tool.pyright]）
+        # 检查范围是**包含清单**，不是排除清单：只钉本次改动要碰的文件，现状 0 error。
+        # 全领域层开到 0 error 要清 70 条，其中 22 条还是 cred_store.py 里
+        # 「布尔标志守卫条件导入」造成的**假阳性** —— 那样做是给 1.1 拖时间，
+        # 不是给它兜底。好处是：不需要维护一份会随 pyright 版本漂移的"已知错误基线"。
+        # ⚠ 版本锁在 requirements-dev.txt（pyright==1.1.414）：新版会新增规则，
+        #    让以前干净的文件莫名变红。升级要当成一次有意的变更来做。
+        run: python -m pyright
+
+  quality-audit:
+    name: 依赖审计（pip-audit）
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: pip-audit
+        # 只审**运行时**依赖：开发依赖（pyinstaller 等）不进发布产物，
+        # 它的漏洞不影响用户，但会制造"必须升级才能出包"的假压力。
+        # 本项目依赖极少（PyQt5 三件套 + openpyxl + xlrd），跑得飞快；
+        # 它同时也是「零第三方依赖」这条身份的守卫 —— 哪天有人顺手加了个包，
+        # 门禁会问一句。
+        run: python -m pip_audit -r requirements.txt

@@ -17,6 +17,37 @@
 ## [Unreleased]
 
 ### 新增
+- **质量门禁 —— v1.9 路线图 1.4**（资产表那次大改的**安全网**，详见
+  [`docs/ROADMAP_V1.9.md`](docs/ROADMAP_V1.9.md) §1.4）。三个工具各占一个 CI job
+  （`quality-coverage` / `quality-types` / `quality-audit`）：红了拦合并，
+  且一眼看得出是**哪一个**红的 —— 一个"允许红"的门禁等于没有门禁。
+  - **覆盖率**：用 `coverage` 而不是 `pytest-cov`（本项目跑标准库 `unittest`，
+    不过 pytest）。下界是 **per-file** 的：`history_store.py` **95%**、
+    `db_util.py` **90%**（都是实测值），逐文件跑
+    `coverage report --include=<文件> --fail-under=<n>`。
+    ⚠ **不设全局棘轮**：产品代码全局是 **71%**，会被与本次改动无关的 0% 文件
+    （`main.py` / `oui_updater.py` / `parse_ieee_oui.py` 现在都是 0%）稀释，
+    改动过程中必然掉 → 假红 → 人去调低门槛。
+    ⚠ 另：含测试文件的 TOTAL 是 **83%**，那是虚高 —— 必须 `--omit="tests/*"`。
+  - **pyright**：版本锁 `1.1.414`（新版会新增规则，让干净的文件莫名变红）。
+    检查范围是**包含清单**（`[tool.pyright].include`）而不是排除清单 ——
+    只钉本次改动要碰的文件。全领域层开到 0 error 要清 **70 条**，其中 22 条还是
+    `scanner/cred_store.py` 里"布尔标志守卫条件导入"造成的**假阳性**
+    （pyright 无法跨布尔标志窄化）；那样做是给资产表拖时间，不是给它兜底。
+    包含清单的好处是**不需要维护一份会随 pyright 版本漂移的"已知错误基线"**。
+  - **`pip-audit`**：只审 `requirements.txt`（开发依赖不进发布产物）。首跑零告警。
+  - **反向验证 6/6**：下界抬高 → 红、`--include` 打错字 → 红、注入一条 pyright
+    类型错误 → 红、塞一个已知有漏洞的旧依赖 → 红，外加两条「必须绿」的对照。
+    另实测 coverage 三种退出码：无数据 `1`、未达标 `2`、达标 `0` ——
+    **匹配不到文件不会静默通过**。
+- **修 `history_store.py` 的两处注解与文档不一致**（pyright 抓出来的，都在资产表
+  要动的文件里）：
+  - `save_snapshot()` 声明 `-> int`，但 `cur.lastrowid` 可能是 `None`。
+    现在拿不到 rowid 就**报错**，而不是返回 0 之类的假 id —— 它挡的是
+    **静默坏数据**：继续写下去设备会挂在 `snapshot_id=None` 下，
+    **写得进去却永远查不到**，比当场报错难查得多。这条守卫自己有测试。
+  - `get_snapshot()` 注解 `-> dict`，而它自己的 docstring 写着「不存在返回 None」。
+    改为 `Optional[dict]`。
 - **`user_version` schema 迁移链**（路线图 §3 #12 的 `user_version` 半，v1.9 资产表的前置）。
   `history_store.py` 原先只有一句 `CREATE TABLE IF NOT EXISTS` —— 加列必须写 `ALTER TABLE`，
   而 `IF NOT EXISTS` **不会补列**，于是「用户手里这个库是哪个年代的」只能靠 `try/except` 猜。

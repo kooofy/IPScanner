@@ -51,6 +51,9 @@ dev = [
     "pyinstaller==6.21.0",
     "pyinstaller-hooks-contrib==2026.6",
     "ruff==0.16.8",
+    "pyright==1.1.414",
+    "coverage==7.16.2",
+    "pip-audit==2.10.1",
 ]
 
 [project.urls]
@@ -75,3 +78,47 @@ select = [
 ]
 # 不设 per-file-ignores：当前全仓库在该规则集下零告警，任何新增告警都应
 # 就地修掉，而不是放宽规则。
+
+# ── coverage ────────────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["."]
+# ⚠ **必须剔除 tests/**：测试文件本身几乎 100%，算进分母会把产品代码的覆盖率
+# 数字拉高。实测：含测试的 TOTAL 是 **83%**，剔除后才是真实的 **71%**。
+omit = ["tests/*", "run_tests.py", "check_coverage.py"]
+
+[tool.coverage.report]
+show_missing = true
+# ⚠ 这里**不设** fail_under：全局数字只出报告、不进门槛。真正挡门的是下面
+# [tool.ipscanner.coverage_floors] 的 **per-file** 下界 —— 全局百分比会被与
+# 本次改动无关的 0% 文件（`main.py` / `oui_updater.py` / `parse_ieee_oui.py`
+# 现在都是 0%）稀释，改动过程中必然掉、制造假红，而假红会让人习惯性忽略红。
+# 理由见 docs/ROADMAP_V1.9.md §1.4。
+
+# ── pyright ─────────────────────────────────────────────────────────
+# ⚠ **这是"包含清单"，不是"排除清单"** —— 刻意如此。
+#
+# 全领域层一次性开到 0 error 要清 **70 条**，其中 22 条还是
+# `scanner/cred_store.py:30–60` 一处**假阳性簇**（`try: import ctypes …
+# _HAS_DPAPI=True / except → False`，再 `if _HAS_DPAPI:` 里才用 ctypes ——
+# pyright 无法跨布尔标志窄化）。那样做会把"接入一次门禁"变成"一次全领域层整改"，
+# 而大部分工作量**不在本次要改的文件里**。
+#
+# 于是只列"本次改动要碰的文件"：加进来时就是 0 error，之后每碰一个文件就多钉一个。
+# 好处是不需要维护一份会随 pyright 版本漂移的"已知错误基线"。
+[tool.pyright]
+include = ["history_store.py", "db_util.py"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+
+# ⚠ per-file 覆盖率**下界不在这里** —— coverage 的配置只支持一个全局
+# `fail_under`，没有 per-file 阈值。下界写在 CI 里（`.github/workflows/ci.yml`
+# 的「覆盖率门禁」job），形式是逐文件跑一次
+# `coverage report --include=<文件> --fail-under=<n>`。
+# 之所以不另写个脚本来读阈值：那要么引入 `tomli`（`tomllib` 要 3.11+，而 CI
+# 矩阵含 3.10），要么多一份要维护的代码 —— 而 YAML 里的两行命令同样是机器强制的。
+#
+# 下界取值 = 2026-10-11 **实测值**（不是拍的）：
+#   history_store.py  95%（365 statements / 缺 20）
+#   db_util.py        90%（83 statements / 缺 8）
+# 规则：**不许变低**。改动中若某个文件的覆盖率掉到下界之下，CI 会红；
+# 要放宽必须在提交信息里写明理由 —— 否则"下界"就成了"每次掉下去就调一下"的橡皮筋。

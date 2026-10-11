@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
+import contextlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -79,6 +82,110 @@ class TestHistoryStore(unittest.TestCase):
         self.assertEqual(len(history_store.load_all(self.db)), 2)
         # 再次迁移应为 0（已存在快照，幂等）
         self.assertEqual(history_store.migrate_from_json(json_path, self.db), 0)
+
+
+class SnapshotRowidGuardTest(unittest.TestCase):
+    """`save_snapshot()` 的「拿不到 rowid 就拒绝继续」守卫。
+
+    这条守卫是 pyright 逼出来的：``cur.lastrowid`` 在 typeshed 里是
+    ``int | None``，而本函数对外承诺 ``-> int``。但真正值得为它写守卫的不是
+    类型，是**失败模式** —— 若 INSERT 没生效还继续往下走，所有 devices 都会挂在
+    ``snapshot_id=None`` 下：设备**写得进去**，却因为连不到任何快照而永远查不到。
+    那是比当场报错难查得多的**静默坏数据**，所以不返回 0 之类的假 id。
+
+    反过来，这条守卫也不能是「写了就没人管」的代码 —— 所以它自己有测试。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "guard.db")
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+        shutil.rmtree(self.tmp, True)
+
+    # ── 注入方式：从 `_conn` 这层包一层 ──────────────────────────────
+    # 不能直接 patch `sqlite3.Connection.execute` —— 它是**不可变的 C 类型**
+    # （实测 `TypeError: cannot set 'execute' attribute of immutable type`）。
+    # 于是改在 history_store 的连接工厂这层包一个代理：只把 snapshots 那条
+    # INSERT 的游标换成 "lastrowid 为 None" 的版本，其余全部照旧。
+    #
+    # ⚠ **原函数必须在 patch 之前取**：helper 里若再调 `history_store._conn()`，
+    # 拿到的已经是 patch 后的自己 → 无限递归 → 抛 `RecursionError`，
+    # 而 `RecursionError` 是 `RuntimeError` 的**子类**，`assertRaises(RuntimeError)`
+    # 会**误判通过**。下面用 `assertRaisesRegex` 钉住 message，并另有一断言
+    # 反向确认注入真的生效了 —— 两道都要有：第一道防"没抛"，第二道防"抛错了还在红"。
+
+    def _run_save_without_rowid(self):
+        """在"拿不到 rowid"的条件下跑一次 save_snapshot，返回执行过的 SQL 列表。"""
+        seen = []
+        original = history_store._conn          # ⚠ 必须在 patch **之前**取
+
+        class _CursorWithoutRowid:
+            lastrowid = None
+
+            def __init__(self, cur):
+                self._cur = cur
+
+            def __getattr__(self, name):
+                return getattr(self._cur, name)
+
+        class _Conn:
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *a, **k):
+                norm = " ".join(sql.split()).upper()
+                seen.append(norm)
+                cur = self._real.execute(sql, *a, **k)
+                if norm.startswith("INSERT INTO SNAPSHOTS"):
+                    return _CursorWithoutRowid(cur)
+                return cur
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        @contextlib.contextmanager
+        def patched(db_path=None):
+            with original(db_path) as conn:
+                yield _Conn(conn)
+
+        # 单层 with，不嵌套 —— 嵌套 patch 会打乱 start/stop，把 mock 泄漏给后续测试。
+        with mock.patch.object(history_store, "_conn", patched):
+            with self.assertRaisesRegex(RuntimeError, "rowid"):
+                history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        return seen
+
+    def test_missing_rowid_is_refused(self):
+        """rowid 拿不到时必须抛错，而不是拿个假 id 继续写。"""
+        self._run_save_without_rowid()          # 断言在 helper 里
+
+    def test_no_orphan_devices_are_left_behind(self):
+        """守卫在写 devices **之前**就退出，所以库里不会留下孤儿设备。
+
+        这条是上面那条的行为后果，单独写是为了让它有独立的失败信息 ——
+        「抛了错」和「没写脏数据」是两件事，不该共用一个断言。
+        """
+        seen = self._run_save_without_rowid()
+
+        # 关键：INSERT INTO devices **一次都没执行过** —— 守卫挡在它前面。
+        self.assertFalse(
+            [s for s in seen if s.startswith("INSERT INTO DEVICES")],
+            "守卫失效：已经往 devices 里写了数据",
+        )
+        # 反向确认 mock 真的生效了 —— 否则这条测试什么都没测到（空断言）。
+        self.assertTrue(
+            [s for s in seen if s.startswith("INSERT INTO SNAPSHOTS")],
+            "注入没生效 —— 这条测试什么都没测到",
+        )
+
+    def test_normal_path_still_returns_a_real_id(self):
+        """反向对照：不 mock 时一切照旧 —— 证明上面两条不是因为环境坏了才红的。"""
+        sid = history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        self.assertIsInstance(sid, int)
+        self.assertEqual(history_store.get_snapshot(sid, self.db)["devices"][0]["ip"],
+                         "1.1.1.1")
 
 
 class TlsCertFactsTest(unittest.TestCase):
