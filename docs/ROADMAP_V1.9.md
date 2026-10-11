@@ -140,12 +140,16 @@
 - 四种格式的**数据都已齐**：
   - Nmap XML 需要 ip / hostname / mac / open_ports → `devices` 都有；
   - NetBox CSV 需要 hostname / ip / mac / vendor / device_class / location / …
-    → **`devices` 的列就是 NetBox 的字段集**（这不是巧合，是 Excel 匹配字段当初
-    就照资产台账设计的）；
+    → `devices` 的列**覆盖了它的非外键字段**（不是巧合：Excel 匹配字段当初就照
+    资产台账设计的）。⚠ 但 NetBox 的 `site` / `device_type` / `device_role` 是**外键**，
+    导入前得先解析成名字 —— 这正是建议书把这条写作「NetBox **外键解析** CSV」的意思，
+    也是本项里唯一需要动脑的地方；
   - Zabbix LLD 需要 ip / hostname + 发现项；
-  - Oxidized `router.db` 只需 `name:model:group` → 拓扑发现里已有交换机型号。
-- 导出框架**已有**：`exporter.py` 已在做 CSV / JSON / XLSX，
-  本项是**加格式**，不是建框架。
+  - Oxidized `router.db` 只需 `name:model:group` → 拓扑节点已有 `model`
+    （`topology_discovery.py:117`，由 `sys_descr` / `platform` 填充）。
+- 导出框架**已有**：`excel_handler.py` 里 `export_csv()` / `export_json()` /
+  `export_html()` / `export_results()`（XLSX）四个产出函数，GUI 侧由
+  `export_mixin.py` 接线 —— 本项是**加格式**，不是建框架。
 - ⚠ Nmap XML **读入**是另一件事：风险不在 XML 解析，而在**语义**
   （Nmap 的 host 状态机与我们的 `status` 不是一回事）。**产出先做，读入单列**
   （见 §3）。
@@ -236,8 +240,10 @@
   **0 处**引用。
 - 质量工程的其他缺口（i18n 死键、色值禁令、BER fuzz、宽高比验收）
   v1.8 已**全部**补上（见 `ROADMAP_V1.8.md` §6），**只剩这三项**。
-- `ci.yml` 已是多任务矩阵（**zh-CN 与 en-US 两个语言环境都跑**），
-  加门禁有现成的位置。
+- `ci.yml` 已是 **3 个 job**（Windows × 4 个 Python 版本 / 跨平台 OS / PyInstaller 打包验证），
+  加门禁有现成的位置。⚠ **它没有语言矩阵** —— 但 CI runner 是**英文系统**，
+  所以 CI 上跑的是 en-US 那一侧、本机跑的是 zh-CN，两边合起来才覆盖到语言相关代码
+  （这也是「测试绝不写死界面文案」那条铁律的由来）。
 
 **做法**：
 
