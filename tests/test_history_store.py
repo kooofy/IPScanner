@@ -534,7 +534,7 @@ class SchemaMigrationTest(unittest.TestCase):
     """
 
     _TABLES = ("snapshots", "devices", "switch_map", "port_map",
-               "security_findings")
+               "security_findings", "assets")
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -693,7 +693,13 @@ class SchemaMigrationTest(unittest.TestCase):
             self.assertEqual(version, first)
 
     def test_newer_database_is_not_downgraded(self):
-        """用新版建的库被旧版程序打开 → 不降级、不报错，只记一条 warning。"""
+        """用新版建的库被旧版程序打开 → 不降级、不报错，只记一条 warning。
+
+        ⚠ 这条现在是**真会红**的：资产表落地后，曾经的写法
+        「`after >= ASSETS_MIGRATION_VERSION` 就去查 assets」会在这种库上抛
+        `no such table: assets` —— 因为 v99 的库里**没有** assets 表。
+        那正好是"回退到旧版 exe 就打不开库"，比版本不一致严重得多。
+        """
         future = os.path.join(self.tmp, "future.db")
         self._raw(future, script=history_store._SQL_V1, version=99)
         history_store.list_snapshots(future)
@@ -701,6 +707,344 @@ class SchemaMigrationTest(unittest.TestCase):
         self.assertEqual(version, 99)
         import db_util
         db_util.close_connection(future)
+
+
+class IdentityKeyTest(unittest.TestCase):
+    """`identity_key()` —— 资产表的主键从哪来。
+
+    它决定了"两台记录算不算同一台设备"，是整个资产表最基础的一个判断。
+    """
+
+    def test_mac_wins_over_ip(self):
+        self.assertEqual(history_store.identity_key("AA:BB:CC:DD:EE:FF", "1.2.3.4"),
+                         "aa:bb:cc:dd:ee:ff")
+
+    def test_mac_is_normalized(self):
+        """大小写与分隔符都要归一 —— 否则同一台设备会被拆成两台。"""
+        self.assertEqual(history_store.identity_key("AA-BB-CC-DD-EE-FF"),
+                         history_store.identity_key("aa:bb:cc:dd:ee:ff"))
+        self.assertEqual(history_store.identity_key("aabb.ccdd.eeff"),
+                         history_store.identity_key("aa:bb:cc:dd:ee:ff"))
+
+    def test_ip_is_the_fallback(self):
+        """没有 MAC 才退回 IP —— 与 `device_timeline()` 的匹配规则一致。"""
+        self.assertEqual(history_store.identity_key("", "1.2.3.4"), "ip:1.2.3.4")
+
+    def test_ip_fallback_is_marked(self):
+        """回退键必须带前缀，否则 IP 会和 MAC 撞进同一个命名空间。"""
+        self.assertTrue(history_store.identity_key("", "1.2.3.4").startswith("ip:"))
+
+    def test_nothing_to_identify(self):
+        """既没 MAC 也没 IP → 没有身份，不该进资产表（会污染去重）。"""
+        self.assertEqual(history_store.identity_key("", ""), "")
+        self.assertEqual(history_store.identity_key(None, None), "")
+
+
+class AssetTableTest(unittest.TestCase):
+    """资产表（迁移 v4）—— v1.9 主题项 1.1 的验收。
+
+    ⚠ **assets 与 query_history() 口径不同**，这不是 bug 而是本项要交付的改进：
+      * `query_history()` 按 **IP** 聚合 —— 一台设备换过 IP 就是 N 行；
+      * `assets` 按 **身份键**（MAC 优先）聚合 —— 换 IP 还是 1 行。
+    所以"与 query_history 逐台一致"只在「有 MAC 且 IP 没变过」的设备上成立，
+    测试就按这个口径写 —— **不假装两者永远相等**，否则这条验收会掩盖真正的差异。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "scan_history.db")
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
+    # ── 造库：一个货真价实的 v1.8.0 形态老库 ──────────────────────────
+
+    def _legacy_v3(self, snaps, version=0):
+        """手工搭一个老库：`snaps` = [(ts, [(ip, mac, ...), ...]), ...]。
+
+        刻意**绕开** history_store 建库：这样造出来的才是"上一个版本真会写出来
+        的那个形态"（五张表、没有 assets、devices 没有 identity_key）。
+        `version=0` 是默认 —— v1.8.0 之前根本没有 user_version。
+        """
+        sql = [history_store._SQL_V1, history_store._SQL_V2, history_store._SQL_V3]
+        sid = 0
+        for ts, devs in snaps:
+            sid += 1
+            sql.append(
+                "INSERT INTO snapshots (id, time, device_count) VALUES (%d, %r, %d);"
+                % (sid, ts, len(devs)))
+            for d in devs:
+                sql.append(
+                    "INSERT INTO devices (snapshot_id, ip, status, mac, hostname, "
+                    "vendor, device_class, os_guess, open_ports, location, user, "
+                    "remark) VALUES (%d, '%s', 'online', '%s', '%s', '', '', '', "
+                    "'', '', '', '');"
+                    % (sid, d.get("ip", ""), d.get("mac", ""),
+                       d.get("hostname", "")))
+        self._raw(self.db, script="".join(sql), version=version)
+        return sid
+
+    def _raw(self, path, script=None, version=None):
+        import sqlite3
+        c = sqlite3.connect(path)
+        if script:
+            c.executescript(script)
+        if version is not None:
+            c.execute("PRAGMA user_version = %d" % version)
+        c.commit()
+        c.close()
+
+    def _assets(self, path=None):
+        import sqlite3
+        c = sqlite3.connect(path or self.db)
+        self.addCleanup(c.close)
+        c.row_factory = sqlite3.Row
+        return {r["identity_key"]: dict(r)
+                for r in c.execute("SELECT * FROM assets").fetchall()}
+
+    # ── 回填正确性 ────────────────────────────────────────────────────
+
+    def test_backfill_folds_every_identifiable_device(self):
+        """三份快照、两台设备（其中一台只出现两次）→ 资产表两行。"""
+        self._legacy_v3([
+            (1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}]),
+            (2000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"},
+                      {"ip": "1.1.1.2", "mac": "AA:BB:CC:DD:EE:02"}]),
+            (3000.0, [{"ip": "1.1.1.2", "mac": "AA:BB:CC:DD:EE:02"}]),
+        ])
+        history_store.list_snapshots(self.db)
+        got = self._assets()
+        self.assertEqual(set(got), {"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"})
+        self.assertEqual(got["aa:bb:cc:dd:ee:01"]["seen_count"], 2)
+        self.assertEqual(got["aa:bb:cc:dd:ee:02"]["seen_count"], 2)
+        self.assertEqual(got["aa:bb:cc:dd:ee:01"]["first_seen"], 1000.0)
+        self.assertEqual(got["aa:bb:cc:dd:ee:01"]["last_seen"], 2000.0)
+        self.assertEqual(got["aa:bb:cc:dd:ee:02"]["first_seen"], 2000.0)
+        self.assertEqual(got["aa:bb:cc:dd:ee:02"]["last_seen"], 3000.0)
+
+    def test_backfill_agrees_with_query_history(self):
+        """**回填正确性的硬标准**：与 `query_history()` 逐台对表。
+
+        只在「有 MAC 且 IP 没变过」的设备上比 —— 见本类 docstring。
+        """
+        self._legacy_v3([
+            (1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"},
+                      {"ip": "1.1.1.2", "mac": "AA:BB:CC:DD:EE:02"}]),
+            (2500.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}]),
+            (4000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"},
+                      {"ip": "1.1.1.2", "mac": "AA:BB:CC:DD:EE:02"}]),
+        ])
+        history_store.list_snapshots(self.db)
+        assets = self._assets()
+        hist = {r["mac"]: r for r in history_store.query_history(db_path=self.db)}
+        self.assertEqual(len(hist), 2)
+        for rec in hist.values():
+            key = history_store.identity_key(rec["mac"], rec["ip"])
+            self.assertIn(key, assets)
+            self.assertEqual(assets[key]["first_seen"], rec["first_seen"],
+                             "首见时间不一致：%s" % key)
+            self.assertEqual(assets[key]["last_seen"], rec["last_seen"],
+                             "末见时间不一致：%s" % key)
+
+    def test_a_device_that_roamed_is_one_asset(self):
+        """换过 IP 的设备：query_history 是 N 行，assets 是 1 行 —— 这是改进。"""
+        self._legacy_v3([
+            (1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}]),
+            (2000.0, [{"ip": "1.1.1.9", "mac": "AA:BB:CC:DD:EE:01"}]),
+        ])
+        history_store.list_snapshots(self.db)
+        self.assertEqual(len(self._assets()), 1)
+        # 对照：按 IP 聚合的历史视图确实是两行
+        self.assertEqual(
+            len(history_store.query_history(db_path=self.db)), 2)
+
+    def test_devices_get_their_identity_key(self):
+        """回填顺带把 `devices.identity_key` 填上 —— 观测维度靠它连回资产。"""
+        self._legacy_v3([
+            (1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"},
+                      {"ip": "1.1.1.2"}]),      # 没有 MAC → 走 IP 回退
+        ])
+        history_store.list_snapshots(self.db)
+        import sqlite3
+        c = sqlite3.connect(self.db)
+        self.addCleanup(c.close)
+        got = {r[0] for r in c.execute("SELECT identity_key FROM devices")}
+        self.assertEqual(got, {"aa:bb:cc:dd:ee:01", "ip:1.1.1.2"})
+
+    def test_backfill_is_idempotent(self):
+        """重开库不该再折一遍 —— seen_count 翻倍是最典型的漂移。"""
+        self._legacy_v3([(1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}])])
+        history_store.list_snapshots(self.db)
+        first = self._assets()["aa:bb:cc:dd:ee:01"]["seen_count"]
+        import db_util
+        for _ in range(3):
+            db_util.close_connection(self.db)
+            history_store.list_snapshots(self.db)
+        self.assertEqual(self._assets()["aa:bb:cc:dd:ee:01"]["seen_count"], first)
+
+    def test_a_new_database_is_not_backfilled(self):
+        """新库不该再走一遍回填 —— 否则双写 + 回填会把 seen_count 记成 2。
+
+        （新库当然**会**有资产行：那是 `save_snapshot()` 双写出来的。）
+        """
+        history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        self.assertEqual(self._assets()["ip:1.1.1.1"]["seen_count"], 1)
+
+    def test_backfill_failure_leaves_the_database_openable(self):
+        """回填失败不能让程序打不开自己的库 —— 资产表是增强，不是前提。
+
+        而且因为只在最后 commit，失败后库仍是"assets 空"的状态，
+        **下次启动会自动重试** —— 这条顺带验证重试真的会发生。
+        """
+        self._legacy_v3([(1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}])])
+        with mock.patch.object(history_store, "_backfill_assets",
+                               side_effect=RuntimeError("boom")):
+            with self.assertLogs("ipscanner.history_store", level="ERROR"):
+                history_store.list_snapshots(self.db)
+        self.assertEqual(self._assets(), {})
+        # 快照本身照常可读 —— 历史功能不受影响
+        self.assertEqual(len(history_store.list_snapshots(self.db)), 1)
+
+        import db_util
+        db_util.close_connection(self.db)
+        history_store.list_snapshots(self.db)
+        self.assertEqual(len(self._assets()), 1)
+
+    # ── 双写 ──────────────────────────────────────────────────────────
+
+    def test_three_scans_of_one_device(self):
+        for ts in (1000.0, 2000.0, 3000.0):
+            history_store.save_snapshot(
+                [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=ts, db_path=self.db)
+        got = self._assets()["aa:bb:cc:dd:ee:01"]
+        self.assertEqual(got["seen_count"], 3)
+        self.assertEqual(got["first_seen"], 1000.0)
+        self.assertEqual(got["last_seen"], 3000.0)
+
+    def test_double_write_keeps_devices_and_assets_consistent(self):
+        """一次 save_snapshot 后，两边的 status / open_ports 必须一致。"""
+        history_store.save_snapshot(
+            [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01", status="online",
+                  open_ports="80,443")],
+            ts=1000.0, db_path=self.db)
+        asset = self._assets()["aa:bb:cc:dd:ee:01"]
+        snap = history_store.get_snapshot(1, db_path=self.db)
+        self.assertEqual(asset["status"], snap["devices"][0]["status"])
+        self.assertEqual(asset["open_ports"], snap["devices"][0]["open_ports"])
+        self.assertEqual(asset["ip"], "1.1.1.1")
+
+    def test_an_empty_field_does_not_wipe_a_known_value(self):
+        """属性合并规则与 query_history() 一致：「最近一次出现且非空」才覆盖。"""
+        history_store.save_snapshot(
+            [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01", hostname="pc-1")],
+            ts=1000.0, db_path=self.db)
+        history_store.save_snapshot(
+            [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01", hostname="")],
+            ts=2000.0, db_path=self.db)
+        self.assertEqual(self._assets()["aa:bb:cc:dd:ee:01"]["hostname"], "pc-1")
+
+    def test_writing_an_older_snapshot_does_not_move_the_times(self):
+        """乱序写入（旧 JSON 迁移、手工导入）不能把 last_seen 拉回去。
+
+        ⚠ 这条是**反向验证**逼出来的：把 `MAX(assets.last_seen, excluded.last_seen)`
+        换成 `excluded.last_seen` 之后，测试**全绿** —— 因为回填是按时间升序跑的，
+        `excluded` 永远不比已有的旧。于是那一半看似多余，
+        其实它只在"乱序写入"这条路上起作用，而这条路**当时没有任何测试**。
+        """
+        history_store.save_snapshot(
+            [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=5000.0, db_path=self.db)
+        # 补一份更早的（migrate_from_json 遇到未排序的 JSON 就是这样）
+        history_store.save_snapshot(
+            [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=1000.0, db_path=self.db)
+        got = self._assets()["aa:bb:cc:dd:ee:01"]
+        self.assertEqual(got["first_seen"], 1000.0)
+        self.assertEqual(got["last_seen"], 5000.0)
+        self.assertEqual(got["seen_count"], 2)
+
+    def test_pruning_does_not_roll_first_seen_back(self):
+        """prune() 删旧快照（连带 devices 行），但首见时间**不能**跟着被删掉。
+
+        这是 `assets` 把 first/last_seen 做成**累积列**而不是"从观测重算"的原因。
+        """
+        for ts in (1000.0, 2000.0, 3000.0):
+            history_store.save_snapshot(
+                [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01")], ts=ts, db_path=self.db)
+        self.assertEqual(len(history_store.list_snapshots(self.db)), 3)
+        history_store.prune(max_keep=1, db_path=self.db)
+        self.assertEqual(len(history_store.list_snapshots(self.db)), 1)
+        got = self._assets()["aa:bb:cc:dd:ee:01"]
+        self.assertEqual(got["first_seen"], 1000.0)
+        self.assertEqual(got["last_seen"], 3000.0)
+        self.assertEqual(got["seen_count"], 3)
+
+    def test_services_are_stored_as_json(self):
+        """服务名可能带逗号，所以用 JSON 而不是像 open_ports 那样逗号分隔。"""
+        history_store.save_snapshot(
+            [_dev("1.1.1.1", mac="AA:BB:CC:DD:EE:01", services=["http", "ssh"])],
+            ts=1000.0, db_path=self.db)
+        raw = self._assets()["aa:bb:cc:dd:ee:01"]["services"]
+        self.assertEqual(json.loads(raw), ["http", "ssh"])
+        self.assertEqual(history_store._services_to_text("[]"), "[]")
+        self.assertEqual(history_store._services_to_text(None), "")
+
+    def test_services_that_cannot_be_serialised_do_not_break_the_snapshot(self):
+        """服务清单是展示信息 —— 不该因为一个怪元素把整份快照写不进去。"""
+        with self.assertLogs("ipscanner.history_store", level="WARNING"):
+            text = history_store._services_to_text([object()])
+        self.assertEqual(text, "")
+
+    # ── 升级前备份 ────────────────────────────────────────────────────
+
+    def test_the_old_file_is_backed_up_before_the_upgrade(self):
+        """升级前那份必须还在，而且**还是能被旧版程序打开**的形态。"""
+        self._legacy_v3([(1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}])])
+        history_store.list_snapshots(self.db)
+        backup = history_store._backup_path(self.db, 3)
+        self.assertTrue(os.path.exists(backup), "没有生成备份：%s" % backup)
+
+        import sqlite3
+        c = sqlite3.connect(backup)
+        self.addCleanup(c.close)
+        tables = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        # 旧版程序打开它：没有 assets 表、user_version 还是 0（推断值，没写进去）
+        self.assertNotIn("assets", tables)
+        self.assertEqual(int(c.execute("PRAGMA user_version").fetchone()[0]), 0)
+        # 数据在（WAL 里的内容也一起带走了 —— 用 backup API 就是为了这个）
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM devices").fetchone()[0], 1)
+
+    def test_a_new_database_is_not_backed_up(self):
+        """新库没东西可丢 —— 不该每次启动都往数据目录里扔一个备份文件。"""
+        history_store.save_snapshot([_dev("1.1.1.1")], db_path=self.db)
+        self.assertFalse(os.path.exists(history_store._backup_path(self.db, 3)))
+
+    def test_a_failed_backup_does_not_block_the_upgrade(self):
+        """备份是安全网不是门槛：备份失败不能反过来让库打不开。"""
+        self._legacy_v3([(1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01"}])])
+        with mock.patch.object(history_store.db_util, "backup_to_file",
+                               return_value=False):
+            history_store.list_snapshots(self.db)
+        self.assertEqual(len(self._assets()), 1)
+
+    # ── 对外行为不变 ──────────────────────────────────────────────────
+
+    def test_upgrade_does_not_change_existing_behaviour(self):
+        """老库升级后，`query_history()` / `device_timeline()` 结果不变。"""
+        self._legacy_v3([
+            (1000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01",
+                       "hostname": "pc-1"}]),
+            (2000.0, [{"ip": "1.1.1.1", "mac": "AA:BB:CC:DD:EE:01",
+                       "hostname": "pc-1"}]),
+        ])
+        before = history_store.query_history(db_path=self.db)
+        timeline = history_store.device_timeline(
+            mac="AA:BB:CC:DD:EE:01", db_path=self.db)
+        # 上面这句已经触发了升级；再取一次与它比对
+        after = history_store.query_history(db_path=self.db)
+        self.assertEqual(before, after)
+        self.assertEqual(len(timeline), 2)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ Downloads_*
 .DS_Store
 Thumbs.db
 *.log
+# 日志轮转的产物（`ipscanner.log.1` 之类）—— `*.log` 匹配不到带后缀的
+*.log.*
 .workbuddy/
 .workbuddy-ai/
 .ruff_cache/

@@ -187,5 +187,110 @@ class ApplyMigrationsTest(unittest.TestCase):
         self.assertFalse(db_util._table_exists(c, "nope"))
 
 
+class EffectiveVersionTest(unittest.TestCase):
+    """`effective_version()` —— 迁移**之前**就能知道"这次会不会真的动库"。
+
+    它存在的理由很具体：「升级前先备份」必须发生在迁移之前，而该不该备份取决于
+    **推断之后**的版本 —— 老库的版本号是 0，但它是有数据的。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "m.db")
+
+    def _conn(self):
+        c = sqlite3.connect(self.path)
+        self.addCleanup(c.close)
+        return c
+
+    def test_a_new_database_is_version_zero(self):
+        with self._conn() as c:
+            self.assertEqual(db_util.effective_version(c, _LEGACY), 0)
+
+    def test_a_stamped_database_reports_its_own_version(self):
+        with self._conn() as c:
+            c.executescript(_MIGS[0][1])
+            c.execute("PRAGMA user_version = 1")
+            self.assertEqual(db_util.effective_version(c, _LEGACY), 1)
+
+    def test_a_legacy_database_is_inferred(self):
+        """版本号是 0 但表都在 —— 这是引入 user_version 之前建的库。"""
+        with self._conn() as c:
+            c.executescript(_MIGS[0][1])
+            self.assertEqual(db_util.effective_version(c, _LEGACY), 1)
+
+    def test_it_does_not_write_the_version_back(self):
+        """只读 —— 把推断结果写进去是 `apply_migrations()` 的事，不是它的。"""
+        with self._conn() as c:
+            c.executescript(_MIGS[0][1])
+            db_util.effective_version(c, _LEGACY)
+            self.assertEqual(int(c.execute("PRAGMA user_version").fetchone()[0]), 0)
+
+    def test_it_agrees_with_apply_migrations(self):
+        """两处必须是同一套规则 —— 否则"要不要备份"会判断错。"""
+        with self._conn() as c:
+            c.executescript(_MIGS[0][1])
+            self.assertEqual(db_util.effective_version(c, _LEGACY), 1)
+            db_util.apply_migrations(c, _MIGS, legacy_tables=_LEGACY)
+            self.assertEqual(db_util.effective_version(c, _LEGACY), 2)
+
+
+class BackupToFileTest(unittest.TestCase):
+    """`backup_to_file()` —— 升级前的那一份。
+
+    关键是**WAL**：直接拷 .db 文件会漏掉还在 -wal 里的最后一批写入，
+    所以必须走 SQLite 的在线备份接口。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "m.db")
+        self.dest = os.path.join(self.tmp, "m.db.bak")
+
+    def test_it_copies_the_data(self):
+        c = sqlite3.connect(self.path)
+        self.addCleanup(c.close)
+        c.execute("PRAGMA journal_mode=WAL")
+        c.executescript(_MIGS[0][1])
+        c.execute("INSERT INTO t (name) VALUES ('x')")
+        c.commit()
+
+        self.assertTrue(db_util.backup_to_file(c, self.dest))
+
+        d = sqlite3.connect(self.dest)
+        self.addCleanup(d.close)
+        self.assertEqual(d.execute("SELECT name FROM t").fetchall(), [("x",)])
+
+    def test_it_copies_wal_content_that_is_not_in_the_db_file_yet(self):
+        """WAL 模式下 commit 之后内容可能还在 -wal 里 —— 备份必须也带上。
+
+        这条是 `backup_to_file()` 存在的**全部理由**：`shutil.copy` 拷 .db
+        在 WAL 模式下会漏数据，而且漏得悄无声息（只在"最后一次写入还没 checkpoint"
+        这个窗口里发生）。
+        """
+        c = sqlite3.connect(self.path)
+        self.addCleanup(c.close)
+        c.execute("PRAGMA journal_mode=WAL")
+        c.executescript(_MIGS[0][1])
+        c.execute("INSERT INTO t (name) VALUES ('before-checkpoint')")
+        c.commit()
+        # 不 checkpoint —— 内容此时仍在 -wal 里
+        self.assertTrue(db_util.backup_to_file(c, self.dest))
+
+        d = sqlite3.connect(self.dest)
+        self.addCleanup(d.close)
+        self.assertEqual(d.execute("SELECT name FROM t").fetchall(),
+                         [("before-checkpoint",)])
+
+    def test_it_does_not_raise_when_it_fails(self):
+        """备份是安全网不是门槛 —— 失败不能让程序打不开自己的库。"""
+        c = sqlite3.connect(self.path)
+        self.addCleanup(c.close)
+        # 一个不可能存在的目录
+        bad = os.path.join(self.tmp, "no", "such", "dir", "bak.db")
+        with self.assertLogs("ipscanner.db_util", level="WARNING"):
+            self.assertFalse(db_util.backup_to_file(c, bad))
+
+
 if __name__ == "__main__":
     unittest.main()

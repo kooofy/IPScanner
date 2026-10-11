@@ -12,12 +12,17 @@
 """
 import contextlib
 import ipaddress
+import json
 import os
 import time
 from typing import Optional
+from alert_policy import normalize_mac
 from app_paths import data_dir
+from app_logging import get_logger
 
 import db_util
+
+_log = get_logger(__name__)
 
 DB_PATH = os.path.join(data_dir(), "scan_history.db")
 
@@ -144,10 +149,59 @@ _SQL_V3 = """
         CREATE INDEX IF NOT EXISTS idx_sf_ip ON security_findings(ip);
 """
 
+# ── v4：资产表（v1.9 1.1）──────────────────────────────────────────────
+# ⚠ 这里**不用** `IF NOT EXISTS`（见上面的迁移链注释）：走到第 4 版时每个库
+#   都有 `user_version` 了，迁移只会跑一次，结构不符时**报错**比静默跳过好。
+#
+# `devices` 一行 = 「某快照里的某台设备」—— 同一台机器扫 3 次就有 3 行。
+# `assets` 一行 = **一台设备**。两者不是替换关系：快照是用户能理解的心智模型
+# （「10 月 9 日那份清单」），资产表是**实现**（建议书 §5.1 第 3 条）。
+#
+# ⚠ **观测维度不另建 `asset_observations`**：`devices` 本身就是「每快照一条观测」
+#   的表，再建一张等于把它整表复制一遍（/16 × 20 快照是百万行级）。所以只给
+#   `devices` 补一个 `identity_key` 列 —— 旧数据靠 `_backfill_assets()` 填，
+#   新数据由 `save_snapshot()` 写入时直接带上。
+_SQL_V4 = """
+        CREATE TABLE assets (
+            -- 身份键：归一化 MAC（小写 `aa:bb:cc:dd:ee:ff`）；无 MAC 时 `ip:<ip>`。
+            -- 见 identity_key()。做成主键 —— 「一台设备一行」靠它保证。
+            identity_key TEXT PRIMARY KEY,
+            mac          TEXT DEFAULT '',
+            ip           TEXT DEFAULT '',
+            status       TEXT DEFAULT '',
+            hostname     TEXT DEFAULT '',
+            vendor       TEXT DEFAULT '',
+            device_class TEXT DEFAULT '',
+            os_guess     TEXT DEFAULT '',
+            open_ports   TEXT DEFAULT '',
+            -- JSON 数组字符串（服务名里可能带逗号，不能用逗号分隔）。
+            -- ⚠ 历史快照**没有**服务（devices 从来没存过），回填时留空串。
+            services     TEXT DEFAULT '',
+            location     TEXT DEFAULT '',
+            user         TEXT DEFAULT '',
+            remark       TEXT DEFAULT '',
+            -- ⚠ first/last_seen / seen_count 是**单调累积**的列，不是从观测重算的：
+            --   prune() 会删掉旧快照（连带 devices 行），而首见时间不该跟着被删掉。
+            --   所以它们只在写入时按 MIN/MAX/自增推进，永不回退。
+            first_seen   REAL NOT NULL,
+            last_seen    REAL NOT NULL,
+            seen_count   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_assets_last_seen ON assets(last_seen);
+        CREATE INDEX idx_assets_ip ON assets(ip);
+        -- 观测维度：给 devices 补上身份键（见上面 `_SQL_V4` 的说明）
+        ALTER TABLE devices ADD COLUMN identity_key TEXT DEFAULT '';
+        CREATE INDEX idx_dev_identity ON devices(identity_key);
+"""
+
+#: 引入资产表的那一版迁移。`_init_db()` 靠它判断"要不要回填"。
+ASSETS_MIGRATION_VERSION = 4
+
 MIGRATIONS = [
     (1, _SQL_V1, "snapshots / devices + 三个索引"),
     (2, _SQL_V2, "switch_map / port_map + 三个索引"),
     (3, _SQL_V3, "security_findings + 两个索引"),
+    (4, _SQL_V4, "assets + devices.identity_key（资产表）"),
 ]
 
 #: 本程序支持的 schema 版本（= 迁移链最后一版）。
@@ -160,18 +214,202 @@ _LEGACY_TABLES = (
     ("switch_map", 2),
     ("port_map", 2),
     ("security_findings", 3),
+    ("assets", 4),
 )
 
 
-def _init_db(conn):
-    db_util.apply_migrations(conn, MIGRATIONS, legacy_tables=_LEGACY_TABLES)
+def identity_key(mac="", ip="") -> str:
+    """设备的身份键：**MAC 优先**，没有 MAC 才退回 ``ip:<ip>``。
+
+    与 `device_timeline()` 的匹配规则一致（它也是 MAC 优先、无 MAC 才用 IP）——
+    IP 会被 DHCP 回收后分给另一台机器，MAC 才是设备身份。
+
+    归一化复用 `alert_policy.normalize_mac()`（小写带冒号）而不是另写一份：
+    仓库里已经有 `excel_handler.normalize_mac`（绑 openpyxl）和
+    `alert_policy.normalize_mac`（零依赖）两份了，第三份只会让三处漂移。
+
+    既没有 MAC 也没有 IP 的设备**没有身份**（返回空串），不进资产表 ——
+    它连"是哪台"都说不清，硬塞进去只会污染去重结果。
+    （`query_history()` 也一样：它按 IP 聚合，先滤掉空 IP 的行。）
+    """
+    m = normalize_mac(mac)
+    if m:
+        return m
+    _ip = (ip or "").strip()
+    return ("ip:" + _ip) if _ip else ""
+
+
+#: `assets` 里"随观测刷新"的属性列（身份键与时间列不在此列）。
+_ASSET_COLS = (
+    "mac", "ip", "status", "hostname", "vendor", "device_class", "os_guess",
+    "open_ports", "services", "location", "user", "remark",
+)
+
+# 写入用 UPSERT：同一身份键第二次出现时**只推进时间、不覆盖好值**。
+#
+# 属性合并规则与 `query_history()` 完全一致 ——「最近一次出现且非空」才覆盖。
+# 用**生成**的 SQL 而不是手写，是为了让"加列"这件事不可能忘记同步合并规则：
+# 手写的话，新增一列后忘了在 DO UPDATE 里带上，表现是"这个字段永远是第一次
+# 扫到的值"，非常难查。
+#
+# ⚠ MIN/MAX 用的是 SQLite 的**标量** min/max（两个参数的那一个），不是聚合函数。
+_ASSET_UPSERT = (
+    "INSERT INTO assets (identity_key, " + ", ".join(_ASSET_COLS) +
+    ", first_seen, last_seen, seen_count) "
+    "VALUES (?, " + ", ".join("?" * len(_ASSET_COLS)) + ", ?, ?, 1) "
+    "ON CONFLICT(identity_key) DO UPDATE SET " +
+    ", ".join("%s = CASE WHEN excluded.%s <> '' THEN excluded.%s ELSE assets.%s END"
+              % (c, c, c, c) for c in _ASSET_COLS) +
+    ", first_seen = MIN(assets.first_seen, excluded.first_seen)"
+    ", last_seen  = MAX(assets.last_seen, excluded.last_seen)"
+    ", seen_count = assets.seen_count + 1"
+)
+
+_UPDATE_IDENTITY_SQL = "UPDATE devices SET identity_key=? WHERE id=?"
+
+#: 回填时一次攒多少行再提交。太小则往返多，太大则事务日志膨胀。
+_BACKFILL_BATCH = 2000
+
+#: 回填取数：按快照时间**升序**，这样"非空即覆盖"自然等价于「最近一次出现且非空」
+#: —— 与 `query_history()` 里那段注释是同一个道理。
+_BACKFILL_SQL = (
+    "SELECT d.id AS id, d.mac AS mac, d.ip AS ip, d.status AS status, "
+    "d.hostname AS hostname, d.vendor AS vendor, "
+    "d.device_class AS device_class, d.os_guess AS os_guess, "
+    "d.open_ports AS open_ports, d.location AS location, d.user AS user, "
+    "d.remark AS remark, s.time AS snap_time "
+    "FROM devices d JOIN snapshots s ON s.id = d.snapshot_id "
+    "ORDER BY s.time ASC, d.id ASC"
+)
+
+#: "有没有值得回填的数据"：至少有一行能算出身份键。
+_HAS_IDENTIFIABLE_SQL = (
+    "SELECT 1 FROM devices WHERE TRIM(COALESCE(mac, '')) <> '' "
+    "OR TRIM(COALESCE(ip, '')) <> '' LIMIT 1"
+)
+
+
+def _backfill_assets(conn) -> int:
+    """把已有快照一次性折进 `assets`（迁移 v4 的**第二步**）。
+
+    与"新快照入库"走**同一个** `_ASSET_UPSERT`，所以回填与在线写入不可能漂移 ——
+    两套逻辑各写一遍是这类改造最容易错的地方。
+
+    ⚠ **只在最后 commit 一次**：中途失败则什么都没改（`assets` 空、
+    `devices.identity_key` 空），下次启动会**重新回填**（见 `_init_db()`）。
+    这是有意的 —— 让重试天然幂等，不留半截状态。
+
+    Returns:
+        折进去的观测行数（devices 行数，不是资产数）。
+    """
+    keys = []      # [(identity_key, devices.id), ...]
+    assets = []    # [_ASSET_UPSERT 的参数元组, ...]
+    total = 0
+
+    def _flush():
+        if not keys:
+            return
+        conn.executemany(_UPDATE_IDENTITY_SQL, keys)
+        conn.executemany(_ASSET_UPSERT, assets)
+        keys.clear()
+        assets.clear()
+
+    for r in conn.execute(_BACKFILL_SQL):
+        key = identity_key(r["mac"], r["ip"])
+        if not key:
+            continue
+        keys.append((key, r["id"]))
+        assets.append((
+            key, r["mac"], r["ip"], r["status"], r["hostname"], r["vendor"],
+            r["device_class"], r["os_guess"], r["open_ports"],
+            "",  # services：历史快照从来没存过，无从回填
+            r["location"], r["user"], r["remark"],
+            r["snap_time"], r["snap_time"],
+        ))
+        total += 1
+        if len(keys) >= _BACKFILL_BATCH:
+            _flush()
+    _flush()
+    conn.commit()
+    return total
+
+
+def _assets_need_backfill(conn) -> bool:
+    """`assets` 是空的、但库里有能算出身份键的设备行 → 需要回填。
+
+    这个判定同时充当**重试条件**：回填失败时因为只在最后 commit，库会原样留在
+    "assets 空"的状态，于是下次启动自动重试。反之若库里压根没有可识别的设备
+    （比如全部没 MAC 也没 IP），这里返回 False —— 不会每次启动都空跑一遍。
+    """
+    if conn.execute("SELECT COUNT(*) AS c FROM assets").fetchone()["c"]:
+        return False
+    return conn.execute(_HAS_IDENTIFIABLE_SQL).fetchone() is not None
+
+
+def _services_to_text(services) -> str:
+    """服务清单 → 落库的文本形式（JSON 数组字符串）。
+
+    为什么是 JSON 而不是像 `open_ports` 那样逗号分隔：服务名本身可能带逗号
+    （`http-alt`、`microsoft-ds` 之类的别名不至于，但自定义服务名会），
+    而 `open_ports` 是端口号、天然不含逗号。
+
+    接受两种输入：list（转成 JSON）与 str（**假定已经是 JSON**，原样存）。
+    后者是为了让"从 `assets.services` 读出来再写回去"这类往返不需要特判。
+    """
+    if not services:
+        return ""
+    if isinstance(services, str):
+        return services
+    try:
+        return json.dumps(list(services), ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        # 服务清单是展示信息，不该因为一个不可序列化的元素把整份快照写不进去。
+        _log.warning("服务清单序列化失败，本次不落库：%s", e)
+        return ""
+
+
+def _backup_path(db_path, version) -> str:
+    """升级前备份文件的位置：`<库路径>.bak-v<升级前版本>`。"""
+    return "%s.bak-v%d" % (db_path, version)
+
+
+def _init_db(conn, db_path=None):
+    """建库 / 升级。`db_path` 只用来算备份文件的位置。"""
+    # effective_version() 含"老库推断"，所以**全新库**在这里是 0 ——
+    # 没数据可丢，不备份。
+    before = db_util.effective_version(conn, _LEGACY_TABLES)
+    if 0 < before < SCHEMA_VERSION:
+        # 升级前备份一份。失败不拦（db_util.backup_to_file 内部只记日志）。
+        db_util.backup_to_file(conn, _backup_path(db_path, before))
+    after = db_util.apply_migrations(conn, MIGRATIONS, legacy_tables=_LEGACY_TABLES)
+    # ⚠ 上界 `<= SCHEMA_VERSION` 不能省：库比程序**新**时（`after` 更大）
+    #   `assets` 这张表可能根本不存在，下面的回填一查就会抛
+    #   `no such table` —— 而"新版建的库被旧版打开"必须**不报错**
+    #   （见 `db_util.apply_migrations()` 里那条不降级规则）。
+    if ASSETS_MIGRATION_VERSION <= after <= SCHEMA_VERSION and _assets_need_backfill(conn):
+        # 回填失败**不能**让程序打不开自己的库：资产表是增强，不是前提。
+        # 因为只在最后 commit，失败后库仍是"assets 空"的状态，下次启动会重试。
+        try:
+            n = _backfill_assets(conn)
+            _log.info("资产表回填完成：%d 条观测 → %d 台设备", n,
+                      conn.execute("SELECT COUNT(*) AS c FROM assets")
+                          .fetchone()["c"])
+        except Exception as e:  # noqa: BLE001
+            _log.error("资产表回填失败，下次启动会重试（历史功能不受影响）：%s", e)
 
 
 @contextlib.contextmanager
 def _conn(db_path=None):
     """复用进程级单例连接（按 db_path 缓存，线程安全）。"""
     path = db_path or DB_PATH
-    with db_util.connection(path, init_fn=_init_db, pragmas=_PRAGMAS) as c:
+
+    def _init(c):
+        # 闭包而不是直接传 `_init_db`：`_init_db` 需要**库路径**来算升级前的
+        # 备份文件放哪，而 `db_util` 的 init_fn 只给 conn。这样 `db_util` 不用
+        # 为此多一个参数。
+        _init_db(c, path)
+
+    with db_util.connection(path, init_fn=_init, pragmas=_PRAGMAS) as c:
         yield c
 
 
@@ -201,23 +439,45 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
         if sid is None:
             raise RuntimeError("快照 INSERT 未返回 rowid，拒绝继续写入 devices")
         sec_rows = []
+        asset_rows = []
         for d in devices:
+            key = identity_key(d.get("mac", ""), d.get("ip", ""))
             conn.execute(
                 "INSERT INTO devices "
                 "(snapshot_id, ip, status, mac, hostname, vendor, "
-                "device_class, os_guess, open_ports, location, user, remark) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "device_class, os_guess, open_ports, location, user, remark, "
+                "identity_key) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     sid,
                     d.get("ip", ""), d.get("status", ""), d.get("mac", ""),
                     d.get("hostname", ""), d.get("vendor", ""), d.get("device_class", ""),
                     d.get("os_guess", ""), d.get("open_ports", ""), d.get("location", ""),
                     d.get("user", ""), d.get("remark", ""),
+                    key,
                 ),
             )
+            # 双写：devices 是"这一份快照里的设备"，assets 是"这台设备"。
+            # 两者口径不同，缺一不可 —— 只写前者则资产表永远停在升级那天，
+            # 只写后者则快照比对 / 时间线这些"按份看"的功能没有数据。
+            if key:
+                asset_rows.append((
+                    key,
+                    d.get("mac", ""), d.get("ip", ""), d.get("status", ""),
+                    d.get("hostname", ""), d.get("vendor", ""),
+                    d.get("device_class", ""), d.get("os_guess", ""),
+                    d.get("open_ports", ""),
+                    _services_to_text(d.get("services")),
+                    d.get("location", ""), d.get("user", ""), d.get("remark", ""),
+                    ts, ts,
+                ))
             ip = d.get("ip", "")
             for kind, value in (d.get("security_findings") or ()):
                 sec_rows.append((sid, ip, kind, value))
+        if asset_rows:
+            # 同一份快照里出现重复身份键（例如同 MAC 两行）时，UPSERT 的
+            # seen_count 会各记一次 —— 与"这台设备在这次扫描里被看到几次"一致。
+            conn.executemany(_ASSET_UPSERT, asset_rows)
         if sec_rows:
             conn.executemany(
                 "INSERT INTO security_findings (snapshot_id, ip, kind, value) "

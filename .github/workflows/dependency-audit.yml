@@ -51,6 +51,13 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: pip-audit（门禁，只审运行时依赖）
+        # ⚠ `continue-on-error` 按触发方式分档：
+        #   * **每周那次 / 手动那次**：**拦**（exit 非 0 就红）—— 那是审计的时刻，
+        #     红了就说明"要么真有漏洞、要么审计根本没跑成"，两者都该有人看。
+        #   * **push / PR 那次**：**只报告不拦** —— 能走到这里的提交一定是
+        #     改了 requirements.txt，改了什么本来就有 code review 在看；
+        #     再叠一层"看网络脸色"的红只会训练人忽略红。
+        continue-on-error: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
         # 只审**运行时**依赖：开发依赖（pyinstaller 等）不进发布产物，
         # 它的漏洞不影响用户，但会制造「必须升级才能出包」的假压力。
         # 本项目依赖极少（PyQt5 三件套 + openpyxl + xlrd），它同时也是

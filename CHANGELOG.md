@@ -17,6 +17,26 @@
 ## [Unreleased]
 
 ### 新增
+- **资产表 —— v1.9 路线图 1.1 的第 ①② 刀**（迁移 v4 + 回填 + 双写，详见
+  [`docs/ROADMAP_V1.9.md`](docs/ROADMAP_V1.9.md) §1.1）。
+  此前「台账」不是一个**东西**，而是「最后一份快照」的别名 —— 首见/末见时间要靠
+  `query_history()` 把 N 份快照读一遍在内存里推出来。现在 `assets` **一行 = 一台设备**。
+  - `identity_key` 主键：**MAC 优先**（复用 `alert_policy.normalize_mac()`，小写），
+    没有 MAC 才退回 `ip:<ip>` —— 与 `device_timeline()` 的匹配规则一致。
+    既没 MAC 也没 IP 的设备没有身份，不进资产表。
+  - **观测维度不另建表**：`devices` 本身就是「每快照一条观测」的表，
+    再建一张 `asset_observations` 等于把它整表复制一遍（/16 × 20 快照是百万行级）。
+    改为给 `devices` 加 `identity_key` 列。
+  - `first_seen` / `last_seen` / `seen_count` 是**累积列**，不是从观测重算的 ——
+    `prune()` 删旧快照时首见时间不能跟着被删掉。
+  - **老库自动回填**：升级时把已有快照折进 `assets`（与在线写入走**同一个**
+    UPSERT，两套逻辑各写一遍是这类改造最容易错的地方）。只在最后 commit 一次，
+    所以失败 = 库原样留在「assets 空」，**下次启动自动重试**；失败**不拦**
+    程序打开库（资产表是增强，不是前提）。
+  - **升级前备份**：`<库>.bak-v<N>`，走 SQLite backup API 而不是拷文件
+    （库是 WAL 模式，直接拷 .db 会漏掉 -wal 里还没 checkpoint 的写入）。
+    备份失败只记日志，不拦升级。
+  - ⚠ 尚未对外暴露读路径（③ 未开工），目前是「写入并落库、还没有人读」。
 - **质量门禁 —— v1.9 路线图 1.4**（资产表那次大改的**安全网**，详见
   [`docs/ROADMAP_V1.9.md`](docs/ROADMAP_V1.9.md) §1.4）。三个工具各占一个 CI job
   （`quality-coverage` / `quality-types` / `quality-audit`）：红了拦合并，

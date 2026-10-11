@@ -75,6 +75,46 @@ def infer_legacy_version(conn, legacy_tables) -> int:
     return version
 
 
+def effective_version(conn, legacy_tables=()):
+    """库"相当于"哪一版 —— 含对老库的推断。**只读**，不改写 `user_version`。
+
+    与 `apply_migrations()` 内部的判定是**同一套规则**（本文件里两处共用），
+    这样调用方才能在迁移**之前**就知道"这次会不会真的动库" ——
+    比如「升级前先备份一份」必须发生在迁移之前，而该不该备份取决于
+    **推断之后**的版本（老库的版本号是 0，但它是有数据的）。
+    """
+    current = _user_version(conn)
+    if current == 0:
+        current = infer_legacy_version(conn, legacy_tables)
+    return current
+
+
+def backup_to_file(conn, dest_path) -> bool:
+    """把库完整复制一份到 `dest_path`。失败记日志并返回 False，**不抛异常**。
+
+    为什么用 SQLite 的 backup API 而不是 `shutil.copy` 拷 .db 文件：库是
+    **WAL 模式**，直接拷文件会漏掉还留在 `-wal` 里的最后一批写入
+    （`close_all()` 的 docstring 里就写着这个坑）。backup API 走的是 SQLite
+    自己的在线备份接口，WAL 内容一并带走。
+
+    不抛异常是有意的：备份是**安全网**，不是门槛 —— 备份失败（磁盘满、
+    目录只读）不应该反过来让程序打不开自己的库。
+    """
+    dest = None
+    try:
+        dest = sqlite3.connect(dest_path)
+        conn.backup(dest)
+        dest.commit()
+        return True
+    except Exception as e:  # noqa: BLE001
+        _log.warning("备份数据库到 %s 失败：%s", dest_path, e)
+        return False
+    finally:
+        if dest is not None:
+            with contextlib.suppress(Exception):
+                dest.close()
+
+
 def apply_migrations(conn, migrations, legacy_tables=()):
     """按 `PRAGMA user_version` 顺序应用迁移链，返回最终版本号。
 
@@ -92,12 +132,12 @@ def apply_migrations(conn, migrations, legacy_tables=()):
     只记一条 warning 后原样返回 —— 报错会让"回退到旧版 exe"变成一个打不开的库，
     比版本不一致严重得多。
     """
-    current = _user_version(conn)
-    if current == 0:
-        inferred = infer_legacy_version(conn, legacy_tables)
-        if inferred:
-            current = inferred
-            _log.info("历史库无 schema 版本号，按已有表推断为 v%d", current)
+    raw = _user_version(conn)
+    # 用 effective_version()（同一套推断规则），但日志仍只在"真的是老库"时打 ——
+    # 这条日志是推断路径的唯一可观测证据，有测试盯着它。
+    current = effective_version(conn, legacy_tables)
+    if raw == 0 and current:
+        _log.info("历史库无 schema 版本号，按已有表推断为 v%d", current)
     if current > migrations[-1][0]:
         _log.warning(
             "库的 schema 版本 v%d 高于本程序支持的 v%d，跳过迁移",
