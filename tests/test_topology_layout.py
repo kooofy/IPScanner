@@ -19,6 +19,10 @@
 2. **只画在线设备**，隐藏数量如实写进图例；
 3. `fitInView` 必须生效，且**只缩不放**（三个节点时不该被放大到糊）；
 4. 设备过多时按上限丢掉辐条 / 标签 / 节点本身，而不是把画布撑爆。
+
+另有一条**尚未达标**的验收标准（建议书 §6.2，v1.9 #9 的前置）：
+真实拓扑的画布宽高比在交换机多于一排时会失控（50 台 → 37:1）。见
+`AspectRatioAcceptanceTest` —— 那里明确标了 `expectedFailure`。
 """
 import math
 import os
@@ -351,6 +355,129 @@ class RealTopologyViewTest(_DialogCase):
         dlg = self._dialog_with(topo)
         self.assertTrue(dlg._real_rendered)
         self.assertEqual(len(self._boxes(dlg)), 1)
+
+
+# ── 画布宽高比验收（建议书 §6.2，v1.9 #9 的前置） ──
+
+
+_GATEWAY = "10.0.0.1"
+
+
+def _build_topology(n_switches, hosts_per_switch):
+    """造一个规整拓扑：网关 → N 台交换机 → 每台 M 个终端。
+
+    这是建议书 §4.4 量化「宽网络不可读」时用的同一种形状 —— 交换机都在
+    网关下面一层，因此骨干层会被排成**一行**，宽度随台数线性增长。
+    """
+    from topology_discovery import (KIND_GATEWAY, KIND_SWITCH, TopoLink,
+                                    TopoNode, Topology)
+    topo = Topology()
+    topo.nodes.append(TopoNode(id=_GATEWAY, label="gw", ip=_GATEWAY,
+                               is_switch=True, kind=KIND_GATEWAY,
+                               is_gateway=True))
+    for s in range(n_switches):
+        sid = "10.%d.0.1" % (s + 1)
+        topo.nodes.append(TopoNode(id=sid, label="sw-%d" % s, ip=sid,
+                                   is_switch=True, kind=KIND_SWITCH))
+        topo.links.append(TopoLink(_GATEWAY, sid, "GE0/%d" % (s + 1),
+                                   "GE0/1", "LLDP"))
+        for h in range(hosts_per_switch):
+            hid = "10.%d.0.%d" % (s + 1, h + 10)
+            topo.nodes.append(TopoNode(id=hid, label="pc", ip=hid))
+            topo.links.append(TopoLink(sid, hid, "GE1/0/%d" % (h + 1), "", "FDB"))
+    return topo
+
+
+class AspectRatioAcceptanceTest(unittest.TestCase):
+    """拓扑画布宽高比的验收标准（建议书 §6.2）。
+
+    `[实测]` 现状 —— 骨干层把同一层的交换机排成**一行**，于是画布宽度随
+    交换机台数线性增长，而高度几乎不变（约 990px）：
+
+        1 交换机 /   100 终端  →     666 ×  990   比 0.7   ✓
+        4 交换机 /   400 终端  →   2 886 ×  990   比 2.9   ✓
+       10 交换机 / 1 000 终端  →   7 326 ×  990   比 7.4   ✗
+       50 交换机 / 5 000 终端  →  36 926 ×  990   比 37.3  ✗
+
+    建议书 §6.2 给的验收标准是「50 台设备以内，画布宽高比 ≤ 3:1；1000 台以内
+    最长边 ≤ 4000px 且最短边 ≥ 600px」。修法是 v1.9 #9 的「过宽折行」。
+
+    **本类刻意现在就写、现在就会失败** —— 建议书 §10 第 8 件原话是
+    「现在写会失败，这正是它该成为待办的理由」：先有验收标准，再有实现。
+    为了让 CI 保持绿色，未达标的用例标了 `@unittest.expectedFailure`；
+    一旦 #9 落地，它会变成「意外成功」而报错，逼着把装饰器摘掉并把它并进
+    上面的回归守卫 —— 不会悄悄变成一条永远不执行的摆设。
+    """
+
+    #: 建议书 §6.2 的验收阈值
+    MAX_ASPECT = 3.0
+    MAX_EDGE = 4000.0
+    MIN_EDGE = 600.0
+
+    def _canvas(self, n_switches, hosts_per_switch):
+        """画布尺寸 = 所有节点坐标的外接矩形。
+
+        口径与建议书附录 A 一致（那边量出的 666×990、2 886×990 与本函数
+        完全吻合），所以这里可以直接用纯函数、不必起 Qt。
+        """
+        from topology_discovery import layout_real_topology
+        positions = layout_real_topology(
+            _build_topology(n_switches, hosts_per_switch), _GATEWAY)
+        xs = [x for x, _ in positions.values()]
+        ys = [y for _, y in positions.values()]
+        return max(xs) - min(xs), max(ys) - min(ys)
+
+    def _aspect(self, n_switches, hosts_per_switch):
+        width, height = self._canvas(n_switches, hosts_per_switch)
+        return width / height if height else float("inf")
+
+    def test_scales_that_already_fit_stay_within_target(self):
+        """今天已经达标的几档必须继续达标 —— 防止 #9 修过头或修坏。
+
+        这几档的共同点是**交换机 ≤ 4 台**：骨干层还是一行，但那一行不够宽，
+        画布仍是竖长或接近方形。（元组是「交换机台数, 每台终端数」；
+        建议书里的「4 / 400」指 4 台交换机 / **合计** 400 台终端。）
+        """
+        for n_sw, hosts in ((1, 100), (1, 1000), (2, 20), (3, 30), (4, 100)):
+            with self.subTest(switches=n_sw, hosts=hosts):
+                aspect = self._aspect(n_sw, hosts)
+                self.assertLessEqual(
+                    aspect, self.MAX_ASPECT,
+                    f"{n_sw} 交换机 / {hosts} 终端 的宽高比 {aspect:.2f} 超过 "
+                    f"{self.MAX_ASPECT}（这一档本来是达标的，被改坏了）")
+
+    @unittest.expectedFailure
+    def test_target_scales_are_within_acceptance(self):
+        """v1.9 #9 的验收标准 —— 现在**必然失败**（见类 docstring 的实测表）。
+
+        #9 落地后这条会报「意外成功」，请摘掉 `@expectedFailure`，并把它并进
+        `test_scales_that_already_fit_stay_within_target`。
+        """
+        for n_sw, hosts in ((6, 30), (10, 100), (50, 100)):
+            with self.subTest(switches=n_sw, hosts=hosts):
+                aspect = self._aspect(n_sw, hosts)
+                self.assertLessEqual(
+                    aspect, self.MAX_ASPECT,
+                    f"{n_sw} 交换机 / {hosts} 终端 的宽高比 {aspect:.2f} "
+                    f"超过 {self.MAX_ASPECT}（v1.9 #9「过宽折行」）")
+
+    @unittest.expectedFailure
+    def test_canvas_stays_within_pixel_budget(self):
+        """建议书 §6.2 的第二条：1000 台设备以内，最长边 ≤ 4000px、最短边 ≥ 600px。
+
+        高度那一边是"别被压成一条线"，宽度那一边是"别把画布撑爆"。
+        """
+        for n_sw, hosts in ((1, 1000), (4, 100), (10, 100)):
+            with self.subTest(switches=n_sw, hosts=hosts):
+                width, height = self._canvas(n_sw, hosts)
+                self.assertLessEqual(
+                    max(width, height), self.MAX_EDGE,
+                    f"{n_sw} 交换机 / {hosts} 终端 的画布最长边 "
+                    f"{max(width, height):.0f}px 超过 {self.MAX_EDGE:.0f}px")
+                self.assertGreaterEqual(
+                    min(width, height), self.MIN_EDGE,
+                    f"{n_sw} 交换机 / {hosts} 终端 的画布最短边 "
+                    f"{min(width, height):.0f}px 低于 {self.MIN_EDGE:.0f}px")
 
 
 if __name__ == "__main__":
