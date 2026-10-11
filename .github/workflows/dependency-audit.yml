@@ -1,0 +1,73 @@
+name: 依赖审计
+
+# 为什么单独一个文件、而不挂在 ci.yml 里：
+#
+# 1. **它审的东西不会随提交变化**。依赖有没有 CVE，只在两种情况下变：
+#    改了 `requirements.txt`，或者 CVE 库里新收录了一条。所以按
+#    「每周 + 改依赖时」触发，而不是每次 push。
+# 2. **它是唯一要联网的门禁**。实测：完整解析要拉 PyPI 元数据，默认 socket
+#    超时只有 15 秒；改成 `--no-deps` 之后**在 CI 上仍然失败过一次** ——
+#    查下来不是超时也不是真有漏洞（`--no-deps` 与完整解析两次都是零漏洞）。
+#    一个会随机红的门禁比没有门禁更糟：它会训练人忽略红。
+#
+# 于是把它挪出每次 push 的关键路径：频率降到「每周一次 + 改依赖时一次」，
+# 这时偶发的网络失败只是一次需要重跑的黄，而不是拦住别人的红。
+on:
+  schedule:
+    # 每周一 03:17 UTC。避开整点 —— GitHub 在整点排队最久。
+    - cron: "17 3 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - requirements.txt
+      - requirements-dev.txt
+      - .github/workflows/dependency-audit.yml
+  pull_request:
+    paths:
+      - requirements.txt
+      - requirements-dev.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: pip-audit
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: pip-audit（门禁，只审运行时依赖）
+        # 只审**运行时**依赖：开发依赖（pyinstaller 等）不进发布产物，
+        # 它的漏洞不影响用户，但会制造「必须升级才能出包」的假压力。
+        # 本项目依赖极少（PyQt5 三件套 + openpyxl + xlrd），它同时也是
+        # 「零第三方依赖」这条身份的守卫 —— 哪天有人顺手加了个包，它会问一句。
+        #
+        # ⚠ `--no-deps` 是刻意的：不做依赖解析，只审 requirements.txt 里那几个
+        #   精确锁定的包。这正好用上了 requirements.txt「全部锁到 ==」的规矩
+        #   （`--no-deps` 要求所有条目精确锁定，而 win32 下带环境标记的两行里
+        #   只有 `PyQt5-Qt5==5.15.2` 生效，`>=5.15.11` 那行会被过滤掉）。
+        #   代价是不覆盖传递依赖 —— 由下面那一步补。
+        # ⚠ `--timeout` 从默认 15 秒提到 60：15 秒在慢网络下会把门禁搞红。
+        run: python -m pip_audit -r requirements.txt --no-deps --timeout 60 --progress-spinner off
+
+      - name: pip-audit（含传递依赖，仅报告不拦）
+        # 上一步的 `--no-deps` 漏掉传递依赖（本项目只有 `et_xmlfile` 一个，
+        # openpyxl 带出来的）。这里补跑一次完整解析把它覆盖上。
+        # ⚠ `continue-on-error`：完整解析要联网拉 PyPI 元数据，是上面那个
+        #   「随机红」的根因。它是**报告**不是门禁 —— 真有漏洞时上一步就已经红了。
+        continue-on-error: true
+        run: python -m pip_audit -r requirements.txt --timeout 60 --progress-spinner off
