@@ -341,6 +341,15 @@ python cli.py import nmap_scan.xml --save          # 确认无误后写库
 
 # 拓扑导出为可读文本（tree / markdown / ascii，语言无关）
 python cli.py topology -r 192.168.1.0/24 -f tree -o topo.txt
+
+# 端口利用率：每台交换机各端口接了几台设备（「还有几个口可用」）
+python cli.py ports                 # 表格
+python cli.py ports -f json         # 便于脚本消费（含 reason 字段）
+
+# 注意：ports 的数据依赖扫描时显式加 --switch-map（默认关闭）：
+python cli.py scan -r 192.168.1.0/24 --save-snapshot --switch-map
+# 未采集过时 ports 会说明是「没采过」并给出上面这条命令，不会给你一张空表。
+# 另：只统计「接了什么」，不含空闲口 —— 转发表里没有空闲口的记录。
 ```
 
 > ⚠ **`import` 的两个语义提醒**：① Nmap 的 `up` 只表示「至少一个探针有回应」、

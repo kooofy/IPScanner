@@ -1155,6 +1155,116 @@ def cmd_import(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── 端口利用率 ──────────────────────────
+
+def cmd_ports(args) -> int:
+    """每台交换机各端口的接入设备数 / 空闲口（「还有几个口可用」）。
+
+    数据来自**最近一次**扫描落库的交换机转发表 —— 而采集转发表要显式加
+    ``scan --switch-map``（**默认关**，见 `docs/ROADMAP_V1.9.md` §6）。
+
+    🔴 因此本命令在**没有数据**时必须说清「是没采过，不是没有设备」，
+    并给出下一步该敲什么 —— 否则用户看到空表会得出「我的交换机一个口都没用」
+    这个**与事实相反**的结论。
+
+    ⚠ 只报**下限**（有设备的端口数），不编造利用率百分比：转发表里没有空闲口，
+    而 `ifNumber` 含环路口 / 聚合口 / vlan 口，拿它当物理端口总数会算错。
+    """
+    import history_store
+
+    u = history_store.port_utilization(db_path=_db_path(args))
+    reason = u["reason"]
+
+    if reason:
+        # 规范值 → 人看的说明 + **下一步动作**（不要只说"没有数据"）
+        hint, action = _PORT_UTIL_REASON.get(
+            reason, ("没有可用的交换机端口数据。", ""))
+        log(hint)
+        if action:
+            log(action)
+        if args.format == "json":
+            emit(json.dumps(u, ensure_ascii=False, indent=2), args.output)
+        return EXIT_OK
+
+    if args.format == "json":
+        emit(json.dumps(u, ensure_ascii=False, indent=2), args.output)
+        return EXIT_OK
+
+    switches = u["switches"]
+    if args.format == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["switch_ip", "switch_name", "status", "port_name",
+                    "port_source", "device_count", "devices"])
+        for sw in switches:
+            if sw["status"] != "ok":
+                w.writerow([sw["switch_ip"], sw["switch_name"], "error",
+                            "", "", "", sw["error"]])
+                continue
+            for p in sw["ports"]:
+                devs = "; ".join(d["ip"] or d["mac"] for d in p["devices"])
+                w.writerow([sw["switch_ip"], sw["switch_name"], "ok",
+                            p["port_name"], p["port_source"],
+                            p["device_count"], devs])
+        emit(buf.getvalue(), args.output)
+    else:
+        lines = []
+        for sw in switches:
+            if sw["status"] != "ok":
+                lines.append(f"{sw['switch_name']} ({sw['switch_ip']}) "
+                             f"— 读取失败：{sw['error'] or '未知原因'}")
+                lines.append("")
+                continue
+            lines.append(
+                f"{sw['switch_name']} ({sw['switch_ip']}) —— "
+                f"{sw['used_port_count']} 个口在用 / 共接入 "
+                f"{sw['device_count']} 台设备")
+            head = ("端口", "设备数", "接入设备")
+            body = []
+            for p in sw["ports"]:
+                name = p["port_name"] or "(未知端口)"
+                if p["port_source"] == "bridge_port":
+                    name += " [仅端口号，不确]"
+                devs = ", ".join(d["ip"] or d["mac"] for d in p["devices"])
+                body.append((name, str(p["device_count"]), devs))
+            if not body:
+                lines.append("  （转发表可用，但没有记录到任何设备）")
+            else:
+                widths = [max(len(str(x)) for x in col)
+                          for col in zip(head, *body)]
+                lines.append("  " + "  ".join(h.ljust(w)
+                                              for h, w in zip(head, widths)))
+                for row in body:
+                    lines.append("  " + "  ".join(str(c).ljust(w)
+                                                  for c, w in zip(row, widths)))
+            lines.append("")
+        lines.append("⚠ 只统计「接了什么」，不含空闲口 —— 转发表里没有空闲口的记录。")
+        emit("\n".join(lines) + "\n", args.output)
+
+    if args.output:
+        log(f"已导出端口利用率 → {args.output}")
+    return EXIT_OK
+
+
+#: 端口利用率「没有数据」的原因 → (说明, 下一步动作)。规范值来自
+#: `history_store.LOCATE_*`，语言无关；文案只在这里翻译（仓库铁律）。
+_PORT_UTIL_REASON = {
+    "no_snapshot": (
+        "还没有任何扫描记录。",
+        "请先跑一次扫描（如 `ipscanner scan -r <网段> --save-snapshot`）。",
+    ),
+    "no_switch_data": (
+        "有扫描记录，但从未采集过交换机转发表。",
+        "采集需显式开启：`ipscanner scan -r <网段> --save-snapshot --switch-map`"
+        "（默认关闭，因为它需要交换机 SNMP 可达）。",
+    ),
+    "switch_scan_failed": (
+        "采集过交换机，但每一台都取不到转发表。",
+        "多为 SNMP 不可达 / community 不对；可加 `--community <口令>` 重试。",
+    ),
+}
+
+
 # ────────────────────────── 拓扑文本导出 ──────────────────────────
 
 def cmd_topology(args) -> int:
@@ -1735,6 +1845,22 @@ def build_parser() -> argparse.ArgumentParser:
     ip_.add_argument("-o", "--output", metavar="文件",
                      help="把解析结果写到文件（省略则写 stdout）")
     ip_.set_defaults(func=cmd_import)
+
+    # ── ports ──
+    pp = sub.add_parser("ports", help="每台交换机各端口的接入设备数 / 空闲口",
+                        parents=[common],
+                        description="按最近一次扫描落库的交换机转发表，汇总每台交换机"
+                                    "各端口接了几台设备（「还有几个口可用」）。"
+                                    "⚠ 数据依赖 `scan --switch-map`（默认关）；"
+                                    "没有数据时会说明是「没采过」并给出下一步命令，"
+                                    "不会给你一张会误导的空表。"
+                                    "⚠ 只报有设备的端口数，不含空闲口 —— "
+                                    "转发表里没有空闲口的记录。")
+    pp.add_argument("-f", "--format", choices=("table", "json", "csv"),
+                    default="table", help="输出格式（默认 table）")
+    pp.add_argument("-o", "--output", metavar="文件",
+                    help="写到文件（省略则写 stdout）")
+    pp.set_defaults(func=cmd_ports)
 
     # ── watch ──
     wp = sub.add_parser("watch", help="被动发现：不发包地看最近谁在网络上出现过",

@@ -10,6 +10,7 @@
 注意：除"规模校验"外，本测试**不发起真实网络扫描**，全部走本地 SQLite 与纯函数。
 """
 import contextlib
+import csv
 import io
 import json
 import os
@@ -1174,3 +1175,111 @@ class ImportCommandTest(unittest.TestCase):
         self.assertTrue(args.save)
         self.assertEqual(args.format, "json")
         self.assertIs(args.func, cli.cmd_import)
+
+
+class PortsCommandTest(unittest.TestCase):
+    """`ports` 子命令：每台交换机各端口的接入设备数。
+
+    🔴 重点是**没有数据时的表现**：采集转发表要显式 `--switch-map`（默认关）。
+    绝大多数用户没开过 —— 此时**必须**说明「是没采过」并给出下一步命令，
+    绝不能给一张让人误以为「一个口都没用」的空表。
+    """
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def _seed(self, db, with_switch):
+        sid = history_store.save_snapshot(
+            [{"ip": "10.0.0.11", "status": "online", "mac": "AA:BB:CC:00:00:01",
+              "hostname": "pc1"},
+             {"ip": "10.0.0.12", "status": "online", "mac": "AA:BB:CC:00:00:02",
+              "hostname": "pc2"}],
+            db_path=db)
+        if with_switch:
+            history_store.save_port_map(sid, [{
+                "switch_ip": "10.0.0.2", "switch_name": "sw-core", "error": "",
+                "mappings": [
+                    {"mac": "AA:BB:CC:00:00:01", "port_name": "GE0/1",
+                     "port_is_real": True},
+                    {"mac": "AA:BB:CC:00:00:02", "port_name": "GE0/1",
+                     "port_is_real": True},
+                ],
+            }], db_path=db)
+        return sid
+
+    def test_empty_db_explains_and_suggests_next_step(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            rc, out, err = self._run(["--db", db, "ports"])
+            self.assertEqual(rc, cli.EXIT_OK)
+            self.assertIn("还没有任何扫描记录", err)
+            self.assertIn("scan", err)          # 给出下一步
+            db_util.close_connection(db)
+
+    def test_no_switch_data_points_at_switch_map_flag(self):
+        """🔴 有快照但没采交换机 → 必须提到 --switch-map（否则用户无从下手）。"""
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            self._seed(db, with_switch=False)
+            rc, out, err = self._run(["--db", db, "ports"])
+            self.assertEqual(rc, cli.EXIT_OK)
+            self.assertIn("从未采集过交换机转发表", err)
+            self.assertIn("--switch-map", err)
+            db_util.close_connection(db)
+
+    def test_table_lists_ports_with_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            self._seed(db, with_switch=True)
+            rc, out, err = self._run(["--db", db, "ports"])
+            self.assertEqual(rc, cli.EXIT_OK)
+            self.assertIn("sw-core", out)
+            self.assertIn("GE0/1", out)
+            self.assertIn("2", out)                 # 设备数
+            self.assertIn("10.0.0.11", out)
+            self.assertIn("不含空闲口", out)         # 明确不谎报
+            db_util.close_connection(db)
+
+    def test_json_has_reason_and_switches(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            self._seed(db, with_switch=True)
+            rc, out, err = self._run(["--db", db, "ports", "-f", "json"])
+            self.assertEqual(rc, cli.EXIT_OK)
+            data = json.loads(out)
+            self.assertEqual(data["reason"], "")
+            self.assertEqual(data["switches"][0]["switch_name"], "sw-core")
+            db_util.close_connection(db)
+
+    def test_json_no_data_still_consumable(self):
+        """没有数据时 JSON 也要给得出 reason，便于脚本判定。"""
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            self._seed(db, with_switch=False)
+            rc, out, err = self._run(["--db", db, "ports", "-f", "json"])
+            self.assertEqual(rc, cli.EXIT_OK)
+            data = json.loads(out)
+            self.assertEqual(data["reason"], "no_switch_data")
+            self.assertEqual(data["switches"], [])
+            db_util.close_connection(db)
+
+    def test_csv_lists_one_row_per_port(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            self._seed(db, with_switch=True)
+            rc, out, err = self._run(["--db", db, "ports", "-f", "csv"])
+            self.assertEqual(rc, cli.EXIT_OK)
+            rows = list(csv.reader(io.StringIO(out)))
+            self.assertEqual(rows[0][:3], ["switch_ip", "switch_name", "status"])
+            self.assertEqual(len(rows), 2)          # 表头 + 1 个端口
+            self.assertEqual(rows[1][3], "GE0/1")
+            db_util.close_connection(db)
+
+    def test_parser_accepts_ports(self):
+        p = cli.build_parser()
+        args = p.parse_args(["ports", "-f", "json"])
+        self.assertEqual(args.format, "json")
+        self.assertIs(args.func, cli.cmd_ports)

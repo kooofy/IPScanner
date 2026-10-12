@@ -473,3 +473,165 @@ class CollectSwitchPortMapsTest(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortUtilizationTest(_Base):
+    """端口利用率：每台交换机各端口的接入设备数 / 空闲口。
+
+    🔴 本项的核心风险**不是统计**，而是「数据从哪来」：采集转发表需要显式
+    `scan --switch-map`（**默认关**）。绝大多数用户从没开过 —— 此时给一张空表
+    会让用户得出「我的交换机一个口都没用」，与事实（「我们从没读过转发表」）
+    完全相反。所以这里把**四种「没有数据」的区分**逐条钉住。
+    """
+
+    def test_ok_path_groups_port_devices_and_counts(self):
+        """有数据时：按端口分组、给出设备数、按设备数降序、带设备明细。"""
+        sid = self._snap(1000.0, [
+            _dev("10.0.0.11", mac="AA:BB:CC:00:00:01", hostname="pc1"),
+            _dev("10.0.0.12", mac="AA:BB:CC:00:00:02", hostname="pc2"),
+            _dev("10.0.0.13", mac="AA:BB:CC:00:00:03"),
+            _dev("10.0.0.14", mac="AA:BB:CC:00:00:04", hostname="printer"),
+        ])
+        history_store.save_port_map(sid, [
+            _sw("10.0.0.2", "sw-core", [
+                _pm("AA:BB:CC:00:00:01", "GE0/1"),
+                _pm("AA:BB:CC:00:00:02", "GE0/1"),      # 同一口两台（级联/AP）
+                _pm("AA:BB:CC:00:00:03", "GE0/2"),
+                _pm("AA:BB:CC:00:00:04", "GE0/3"),
+            ]),
+        ], db_path=self.db)
+
+        u = history_store.port_utilization(db_path=self.db)
+
+        self.assertEqual(u["reason"], "")
+        self.assertEqual(len(u["switches"]), 1)
+        sw = u["switches"][0]
+        self.assertEqual(sw["status"], "ok")
+        self.assertEqual(sw["device_count"], 4)
+        self.assertEqual(sw["used_port_count"], 3)
+        # 设备多的口排最前
+        self.assertEqual(sw["ports"][0]["port_name"], "GE0/1")
+        self.assertEqual(sw["ports"][0]["device_count"], 2)
+        # 明细带 IP / 主机名（从同一快照的设备表取）
+        ips = {d["ip"] for d in sw["ports"][0]["devices"]}
+        self.assertEqual(ips, {"10.0.0.11", "10.0.0.12"})
+
+    def test_port_name_confidence_is_preserved(self):
+        """桥接端口号（不确）必须原样带出 —— 展示层要据此加标注。"""
+        sid = self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        history_store.save_port_map(sid, [
+            _sw("10.0.0.2", "sw", [
+                _pm("AA:BB:CC:00:00:01", "GE0/1", real=True),
+                _pm("AA:BB:CC:00:00:02", "Port 5", real=False),
+            ]),
+        ], db_path=self.db)
+        u = history_store.port_utilization(db_path=self.db)
+        sources = {p["port_name"]: p["port_source"] for p in u["switches"][0]["ports"]}
+        self.assertEqual(sources["GE0/1"], history_store.PORT_SOURCE_IF_NAME)
+        self.assertEqual(sources["Port 5"], history_store.PORT_SOURCE_BRIDGE_PORT)
+
+    def test_empty_db_reports_no_snapshot(self):
+        """空库 → no_snapshot（连设备都没见过），不是 no_switch_data。"""
+        u = history_store.port_utilization(db_path=self.db)
+        self.assertEqual(u["reason"], history_store.LOCATE_NO_SNAPSHOT)
+        self.assertEqual(u["switches"], [])
+        self.assertIsNone(u["snapshot_id"])
+
+    def test_snapshot_without_switch_map_reports_no_switch_data(self):
+        """🔴 有快照但没开 --switch-map → no_switch_data。
+
+        这是**最常见**的情况（默认关），必须与「交换机一个口都没用」分开。
+        """
+        self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        u = history_store.port_utilization(db_path=self.db)
+        self.assertEqual(u["reason"], history_store.LOCATE_NO_SWITCH_DATA)
+        self.assertEqual(u["switches"], [])
+        self.assertEqual(u["snapshot_id"], 1)
+
+    def test_all_switches_failed_reports_scan_failed(self):
+        """扫了但全失败 → switch_scan_failed，且失败原因仍可见（不隐藏故障）。"""
+        sid = self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        history_store.save_port_map(sid, [
+            _sw("10.0.0.2", "sw-a", [], error="SNMP 超时"),
+            _sw("10.0.0.3", "sw-b", [], error="community 拒绝"),
+        ], db_path=self.db)
+        u = history_store.port_utilization(db_path=self.db)
+        self.assertEqual(u["reason"], history_store.LOCATE_SWITCH_SCAN_FAILED)
+        self.assertEqual(len(u["switches"]), 2)
+        self.assertTrue(all(s["status"] == "error" for s in u["switches"]))
+        self.assertEqual({s["error"] for s in u["switches"]},
+                         {"SNMP 超时", "community 拒绝"})
+
+    def test_partial_failure_keeps_reason_empty_but_shows_error(self):
+        """一台成功一台失败 → reason 为空（有数据），但失败那台照样列出。"""
+        sid = self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        history_store.save_port_map(sid, [
+            _sw("10.0.0.2", "sw-ok", [_pm("AA:BB:CC:00:00:01", "GE0/1")]),
+            _sw("10.0.0.3", "sw-bad", [], error="SNMP 超时"),
+        ], db_path=self.db)
+        u = history_store.port_utilization(db_path=self.db)
+        self.assertEqual(u["reason"], "")
+        self.assertEqual(len(u["switches"]), 2)
+        self.assertEqual(u["switches"][0]["status"], "ok")   # ok 排前面
+        self.assertEqual(u["switches"][1]["status"], "error")
+        self.assertEqual(u["switches"][1]["error"], "SNMP 超时")
+
+    def test_only_reads_the_latest_snapshot(self):
+        """只统计**最近一次**快照 —— 端口会变，混着算毫无意义。"""
+        sid1 = self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        history_store.save_port_map(sid1, [
+            _sw("10.0.0.2", "sw", [_pm("AA:BB:CC:00:00:01", "GE0/1")]),
+        ], db_path=self.db)
+        sid2 = self._snap(2000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01"),
+                                   _dev("10.0.0.12", mac="AA:BB:CC:00:00:02")])
+        history_store.save_port_map(sid2, [
+            _sw("10.0.0.2", "sw", [_pm("AA:BB:CC:00:00:01", "GE0/9"),
+                                   _pm("AA:BB:CC:00:00:02", "GE0/9")]),
+        ], db_path=self.db)
+
+        u = history_store.port_utilization(db_path=self.db)
+        self.assertEqual(u["snapshot_id"], sid2)
+        self.assertEqual(u["switches"][0]["used_port_count"], 1)
+        self.assertEqual(u["switches"][0]["ports"][0]["port_name"], "GE0/9")
+
+    def test_does_not_invent_utilization_percent(self):
+        """🔴 不编造「利用率 %」：转发表没有空闲口，物理口数无法从 FDB 得出。"""
+        sid = self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        history_store.save_port_map(sid, [
+            _sw("10.0.0.2", "sw", [_pm("AA:BB:CC:00:00:01", "GE0/1")]),
+        ], db_path=self.db)
+        u = history_store.port_utilization(db_path=self.db)
+        sw = u["switches"][0]
+        self.assertNotIn("utilization", sw)
+        self.assertNotIn("total_ports", sw)
+        self.assertNotIn("free_ports", sw)
+        self.assertEqual(sw["used_port_count"], 1)   # 只报下限
+
+    def test_mac_matching_is_case_insensitive(self):
+        """FDB 里的 MAC 大小写不定，明细要能对上设备表的 IP / 主机名。"""
+        sid = self._snap(1000.0, [_dev("10.0.0.11", mac="aa:bb:cc:00:00:01",
+                                       hostname="pc1")])
+        history_store.save_port_map(sid, [
+            _sw("10.0.0.2", "sw", [_pm("AA:BB:CC:00:00:01", "GE0/1")]),
+        ], db_path=self.db)
+        u = history_store.port_utilization(db_path=self.db)
+        dev = u["switches"][0]["ports"][0]["devices"][0]
+        self.assertEqual(dev["ip"], "10.0.0.11")
+        self.assertEqual(dev["hostname"], "pc1")
+
+    def test_prune_cascades_to_port_data(self):
+        """prune 掉旧快照后，利用率仍只反映剩下的那一次。"""
+        sid1 = self._snap(1000.0, [_dev("10.0.0.11", mac="AA:BB:CC:00:00:01")])
+        history_store.save_port_map(sid1, [
+            _sw("10.0.0.2", "sw", [_pm("AA:BB:CC:00:00:01", "GE0/1")]),
+        ], db_path=self.db)
+        sid2 = self._snap(2000.0, [_dev("10.0.0.12", mac="AA:BB:CC:00:00:02")])
+        history_store.save_port_map(sid2, [
+            _sw("10.0.0.2", "sw", [_pm("AA:BB:CC:00:00:02", "GE0/2")]),
+        ], db_path=self.db)
+        history_store.prune(max_keep=1, db_path=self.db)
+
+        u = history_store.port_utilization(db_path=self.db)
+        self.assertEqual(u["snapshot_id"], sid2)
+        self.assertEqual(u["switches"][0]["ports"][0]["port_name"], "GE0/2")
+        self.assertEqual(u["switches"][0]["device_count"], 1)

@@ -28,12 +28,13 @@ DB_PATH = os.path.join(data_dir(), "scan_history.db")
 
 _PRAGMAS = ("PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON")
 
-# ── locate_device() 的结果码 ──
+# ── locate_device() / port_utilization() 的结果码 ──
 # 存储层只产出**语言无关的规范值**，展示时再经 i18n 的 tr() 翻译（仓库铁律）。
 LOCATE_NO_DEVICE = "no_device"                  # 库里压根没有这台设备
 LOCATE_NO_SWITCH_DATA = "no_switch_data"        # 从未扫过交换机（或未落库）
 LOCATE_SWITCH_SCAN_FAILED = "switch_scan_failed"  # 扫了交换机，但都没取到转发表
 LOCATE_MAC_NOT_IN_FDB = "mac_not_in_fdb"        # 交换机正常，但转发表里没有这个 MAC
+LOCATE_NO_SNAPSHOT = "no_snapshot"              # 库里一次快照都没有（还没扫描过）
 
 # 端口名可信度：'named' = 真实 ifName/ifDescr；'index_only' = 只有桥接端口号
 PORT_SOURCE_IF_NAME = "if_name"
@@ -935,6 +936,124 @@ def locate_device(mac="", ip="", hostname="", db_path=None) -> dict:
     else:
         result["reason"] = LOCATE_MAC_NOT_IN_FDB
     return result
+
+
+def port_utilization(db_path=None) -> dict:
+    """每台交换机各端口的**接入设备数**与空闲口 —— 「还有几个口可用」。
+
+    回答的是「这台交换机还剩几个空口」。数据来自**最近一次**扫描落库的
+    交换机转发表（`port_map` + `switch_map`，见 `save_port_map`）。
+
+    🔴 **为什么必须返回 `reason` 而不是空表**：`--switch-map` 是**默认关**的
+    （见 ROADMAP §6「依赖默认关的 --switch-map；默认无数据的视图会误导」）。
+    绝大多数用户从没开过它 —— 此时若只给一张空表，用户的结论会是
+    「我的交换机一个口都没用」，而事实是「**我们从没读过转发表**」。
+    两者是相反的结论，必须能分开，且要能告诉用户下一步怎么做。
+
+    `reason` 沿用 `locate_device` 的同一套词汇（同一个世界的同一个问题）：
+
+    ========================== ==============================================
+    ``""``                     有数据（可能某些交换机失败，见各自 ``error``）。
+    ``no_snapshot``            库里一次快照都没有 —— 还没扫描过。
+    ``no_switch_data``         有快照，但从未扫过交换机（`--switch-map` 没开）。
+    ``switch_scan_failed``     扫了交换机，但每一台都取不到转发表。
+    ========================== ==============================================
+
+    ⚠ **只统计「接了什么」**，不推断「物理上总共几个口」：转发表里没有
+    空闲口的记录，而 `ifNumber` 包含环路口 / 聚合口 / vlan 口 —— 拿它当
+    「物理端口总数」会算出错误的利用率。所以本函数只报**下限**
+    （``used_port_count`` = 有设备的端口数），不编造 ``Util%``。
+
+    Returns:
+        ``{"reason", "snapshot_id", "snapshot_time", "switches": [...]}``
+
+        每个 switch 是 ``{"switch_ip","switch_name","status","error",
+        "ports":[{"port_name","port_source","device_count","devices":[...]}],
+        "used_port_count","device_count"}``，按设备数降序、端口名升序。
+        ``status`` 为 ``"error"`` 的交换机没有 ``ports``（取不到转发表），
+        ``error`` 里是原因。
+    """
+    result = {
+        "reason": LOCATE_NO_SWITCH_DATA,
+        "snapshot_id": None,
+        "snapshot_time": None,
+        "switches": [],
+    }
+    with _conn(db_path) as conn:
+        last = conn.execute(
+            "SELECT id, time FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        if last is None:
+            result["reason"] = LOCATE_NO_SNAPSHOT
+            return result
+        result["snapshot_id"] = last["id"]
+        result["snapshot_time"] = last["time"]
+
+        sw_rows = conn.execute(
+            "SELECT switch_ip, switch_name, status, error, mac_count "
+            "FROM switch_map WHERE snapshot_id=? ORDER BY switch_name",
+            (last["id"],)).fetchall()
+        if not sw_rows:
+            result["reason"] = LOCATE_NO_SWITCH_DATA
+            return result
+
+        # 一次取完这台快照的所有端口记录，在内存里分组 —— 逐交换机查是 N+1。
+        pm_rows = conn.execute(
+            "SELECT switch_ip, switch_name, mac, port_name, port_source "
+            "FROM port_map WHERE snapshot_id=?", (last["id"],)).fetchall()
+        # 设备的 IP / 主机名从**同一快照**的设备表取，便于展示"谁在那个口"
+        dev_rows = conn.execute(
+            "SELECT mac, ip, hostname FROM devices WHERE snapshot_id=?",
+            (last["id"],)).fetchall()
+        dev_by_mac = {(r["mac"] or "").upper(): (r["ip"] or "", r["hostname"] or "")
+                      for r in dev_rows if r["mac"]}
+
+        by_switch = {}
+        for r in pm_rows:
+            key = (r["switch_ip"] or "", r["switch_name"] or "")
+            port = by_switch.setdefault(key, {}).setdefault(
+                (r["port_name"] or "", r["port_source"] or ""), [])
+            mac = (r["mac"] or "").upper()
+            ip, host = dev_by_mac.get(mac, ("", ""))
+            port.append({"mac": r["mac"] or "", "ip": ip, "hostname": host})
+
+        switches = []
+        for sw in sw_rows:
+            key = (sw["switch_ip"] or "", sw["switch_name"] or "")
+            item = {
+                "switch_ip": sw["switch_ip"] or "",
+                "switch_name": sw["switch_name"] or sw["switch_ip"] or "",
+                "status": sw["status"] or "",
+                "error": sw["error"] or "",
+                "ports": [],
+                "used_port_count": 0,
+                "device_count": 0,
+            }
+            if item["status"] == "ok":
+                ports = by_switch.get(key, {})
+                for (pname, psource), devs in ports.items():
+                    item["ports"].append({
+                        "port_name": pname,
+                        "port_source": psource,
+                        "device_count": len(devs),
+                        "devices": sorted(devs, key=lambda d: (d["ip"], d["mac"])),
+                    })
+                item["device_count"] = sum(p["device_count"]
+                                           for p in item["ports"])
+                item["used_port_count"] = len(item["ports"])
+                # 设备多的口排前面（那是用户最想看的：级联口/AP 上行），
+                # 同级按端口名 —— 保证输出**确定**，便于 golden/断言。
+                item["ports"].sort(key=lambda p: (-p["device_count"],
+                                                  p["port_name"]))
+            switches.append(item)
+
+        # 有取到数据的排在前面；全是 error 的按名字留在后面（不隐藏故障）
+        switches.sort(key=lambda s: (s["status"] != "ok", s["switch_name"]))
+        result["switches"] = switches
+        if any(s["status"] == "ok" for s in switches):
+            result["reason"] = ""
+        else:
+            result["reason"] = LOCATE_SWITCH_SCAN_FAILED
+        return result
 
 
 def prune(max_keep=20, db_path=None):
