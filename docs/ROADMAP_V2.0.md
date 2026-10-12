@@ -410,6 +410,78 @@ SNMP v1/v2c 团体字是全局候选列表（`["public","private",""]`），无�
 **账目**：v2.0 进度 **2.1 ✅ / 2.2 ✅ / 2.3 ✅ / 2.4 待**（3/4）。
 **2.1 + 2.2 已达「可发 v2.0」里程碑；2.3 是「能进真实环境」的门槛，补齐即更稳。**
 
+#### 落地记录（2.4）
+
+**范围裁定**（与用户确认后锁定，三项都是推荐项）：
+
+1. **出口形态 = 并入 `watch`**（不新增子命令）。读 NDP 缓存与读 ARP 表在
+   语义上完全同构（都是零发包读本机表），折进 `watch` 比新开一个命令更自洽；
+   IPv6 小节在文本输出里跟在台账/新设备之后，JSON 里是每台设备的
+   `ipv6_addresses` 字段（语言无关，脚本可依赖）。
+2. **`ff02::1` 多播默认关**（`--ipv6-probe` 显式开启），与 mDNS 的
+   `--mdns-active` 同口径 —— 「watch 默认零发包」这条既有承诺**不能破**。
+3. **挂靠 = `ScanResult.ipv6_addresses` 新字段 + 纯 MAC 匹配**。不做指纹兜底：
+   指纹关联会引入误配风险（同厂商同型号的两台设备会被并成一台），
+   而 MAC 相等是**确定性**证据。关联不上的纯 IPv6 设备**如实丢弃**。
+
+**动到的文件**：
+
+- **新增 `scanner/ndp.py`**（166 statements，94% 覆盖）：纯解析器
+  `parse_windows_ndp_cache()` / `parse_linux_ip_neigh()` / `parse_macos_ndp()`、
+  `dump_ndp_cache()`、`attach_ipv6()`（按 MAC 挂靠）、`sort_ipv6()`、
+  `ipv6_enabled()`（降级判定）、`probe_all_nodes()`（唯一发包分支）。
+  零 PyQt、零第三方、零网络（除显式 probe）。
+- **`scanner/passive.py`**：`passive_discover(ipv6=False, ipv6_probe=False)`
+  新增两参；新增 `_attach_ndp()`（读缓存 + 降级日志）；`PassiveWatcher.poll()`
+  透传两参并新增 `_accumulate_ipv6()`（IPv6 跨轮累积，与「不报消失」同一立场）。
+  默认参数下行为**逐字节不变**。
+- **`scanner/models.py`**：`ScanResult.ipv6_addresses: List[str]` 新字段。
+- **`cli.py`**：`watch` 加 `--ipv6` / `--ipv6-probe`；`_render_ipv6_text()`
+  新增（文本小节）；`_watch_payload()` 的每台设备加 `ipv6_addresses`。
+- **`tests/test_ndp.py`** 新增 **49 个测试**。
+- `.github/workflows/ci.yml` 新增 `./scanner/ndp.py` 覆盖门禁（下界 85%）；
+  `pyproject.toml` 的 pyright include 加 `scanner/ndp.py`；README 补一节。
+
+**踩到的坑**：
+
+- 🔴 **`netsh` 三列不等宽**，实测是「地址 44 字符 + 2 空格 / MAC 17 字符 + 2 空格
+  / Type」。按**至少两个空格**切分而不是定长切片 —— 微软改列宽时定长切片会
+  **静默错位**（把 MAC 的小半截当 Type）。
+- 🔴 **`Permanent` 的组播行没有 MAC**（`ff02::2` / `ff02::c` / `ff02::1:ffXX:XXXX`），
+  **`Unreachable` 行的 MAC 是全零 `00-00-00-00-00-00`**。两者都不是设备；
+  前者靠「地址是 `ff00::/8`」拦，后者靠 `_mac_usable()` 拦（复用 passive.py 判据）。
+- 🔴 **macOS `ndp -an` 的地址带 `%iface` 作用域后缀**（`fe80::1%en0`）——
+  必须剥掉，否则与 MAC 关联时的 key 形状对不上。
+- ⚠ **无 IPv6 机器的空缓存要能和「启用了但没邻居」分开**：本机实测只有
+  link-local 条目时 `ipv6_enabled()` 返回 `True`，日志走 info；
+  真正没启用 IPv6 的机器也走 info 但不谎称「没有设备」。
+
+**验收（实测，49 个 IPv6 测试）**：
+
+- **三平台解析**：Windows 真实抓取的 `netsh` 输出 → 3 条真设备；
+  组播 / 全零 MAC / `Unreachable` 全部跳过。Linux `ip -6 neigh` 样本 →
+  2 条（`FAILED` 无 lladdr 的跳过）。macOS `ndp -an` 样本 → 2 条
+  （`(incomplete)` 跳过、`%en0` 剥掉）。
+- **MAC 挂靠（验收原文）**：已有 IPv4 资产 + MAC 一致的 IPv6 邻居 →
+  **并入同一行**，返回挂靠条数 1；MAC 对不上的纯 IPv6 设备 →
+  **不新增资产**（返回 0，宿主 `ipv6_addresses` 保持空）。
+- **默认零发包**：`passive_discover(mdns=False)` 断言 `dump_ndp_cache`
+  **一次都没被调用**；`ipv6=True` 断言 `probe_all_nodes` **未调用**；
+  `ipv6_probe=True` 断言 `probe_all_nodes` **恰好调用一次**。
+- **优雅降级**：读 NDP 抛异常 / 探测失败 → ARP 结果**一条不丢**；
+  非空输出解析不出条目 → 记 warning。
+- **跨轮累积**：第二轮 ARP 表空了，台账里那台设备的 `ipv6_addresses`
+  仍保留上一轮的值（不报消失）。
+- **真机端到端**：`watch --no-mdns --ipv6` 在开发机上把 2 台 IPv4 设备的
+  link-local IPv6 地址成功挂靠（`fe80::b069:…` → `10.193.29.7`，
+  `fe80::e6e7:…` → `10.193.31.188`）；`--ipv6-probe` 路径不崩。
+- 全量 **2001 tests OK**（基线 1952 → +49）；`ruff check .` 通过；
+  **门禁**：`scanner/ndp.py` **94%**（登记下界 85%）、`history_store.py` 96%、
+  `db_util.py` 93%、`report_engine.py` 100%、`credentials.py` 100%；
+  pyright **0 error**（include 已加 `scanner/ndp.py`）。
+
+**账目**：v2.0 进度 **2.1 ✅ / 2.2 ✅ / 2.3 ✅ / 2.4 ✅**（**4/4，全部完成**）。
+
 ---
 
 ### 2.4 IPv6 可见性（只做 NDP + `ff02::1` 挂靠）
@@ -521,7 +593,7 @@ v2.0「让台账认得出一台设备，并且让别人用得上」
 ├─ 2.3 凭据配置档（按网段/组的只读账户）           P1  ← 能进真实环境
 └─ 2.4 IPv6 可见性（NDP + ff02::1，只挂靠不扫描）  P1  ← 看得见 IPv6-only 设备
 
-进度：3/4 完成（2.1 ✅、2.2 ✅、2.3 ✅；落地记录见 §3）；下一步 2.4
+进度：4/4 完成（2.1 ✅、2.2 ✅、2.3 ✅、2.4 ✅；落地记录见 §3）—— **v2.0 全部交付**
 
 不做（明确）：PySide6 迁移 / REST API / Apprise / Prometheus 常驻 /
              多站点中心库 / MCP 查询层 —— 全部因「开端口 / 加依赖 / 装 agent」出局

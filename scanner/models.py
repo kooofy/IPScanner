@@ -37,6 +37,19 @@ class ScanResult:
     shares: List[str] = field(default_factory=list)
     # 发现方式："ping" / "arp" / "mdns" / ""（离线），用于 UI 标记与导出
     discovery_method: str = ""
+    # ── IPv6 可见性（v2.0 §2.4）─────────────────────────────────────────
+    #
+    # 本工具**只扫 IPv4**（刻意决定，见 `scanner/range.py`）。但现代网络里
+    # 设备普遍带 IPv6，只看 IPv4 会漏掉「只有 IPv6 的设备」。这里存的是
+    # **挂靠到本台 IPv4 设备上的 IPv6 地址**（按 MAC 关联，见 `scanner.ndp`）。
+    #
+    # ⚠ 这是**可见性**，不是**IPv6 资产清单**：一个 /64 有 2⁶⁴ 个地址，
+    # 「盘点」在语义上不成立。列表为空 = 本次没看到该设备的 IPv6 地址
+    # （很可能它只有 IPv4，或本机未启用 IPv6），**不是**「它没有 IPv6」。
+    #
+    # **不新建**「IPv6-only 资产」这种一等实体 —— 关联不上的纯 IPv6 地址
+    # 由 `scanner.ndp.attach_ipv6()` 如实丢弃。
+    ipv6_addresses: List[str] = field(default_factory=list)
     # 扫描末尾的 mDNS 阶段是否**就地修改过**本结果（追加 mDNS 服务/主机名、或置为在线）。
     #
     # 结果对象在 enrich 完成时就已通过 result_callback 交给 UI 渲染过一轮；

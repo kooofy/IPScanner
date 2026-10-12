@@ -38,6 +38,8 @@ scan_history.json
 scan_history.db
 scan_history.db-shm
 scan_history.db-wal
+# schema 迁移前的自动备份（如 scan_history.db.bak-v4）—— 运行期产物
+scan_history.db.bak-*
 audit_log.db
 audit_log.db-shm
 audit_log.db-wal

@@ -37,6 +37,7 @@ ARP 条目会过期，设备从表里消失**不等于**它下线了 ——
 """
 import platform
 import re
+import time
 from typing import Callable, Dict, List, Optional, Set
 
 from app_logging import get_logger
@@ -45,6 +46,7 @@ from device_fingerprint import fingerprint
 from .dns import mdns_discover
 from .engine import _merge_mdns
 from .models import ScanResult, get_mac_vendor
+from .ndp import attach_ipv6, dump_ndp_cache, ipv6_enabled, probe_all_nodes
 from .util import _run_cmd
 
 _log = get_logger(__name__)
@@ -170,8 +172,42 @@ def dump_arp_table() -> Dict[str, str]:
 
 # ── 一次被动发现 ──────────────────────────────────────────────────────
 
+def _attach_ndp(results: Dict[str, ScanResult], *, probe: bool) -> int:
+    """读 NDP 缓存并把 IPv6 地址挂到已有 IPv4 设备上（v2.0 §2.4）。
+
+    返回挂上去的地址条数。任何一步失败都不抛 —— 看得见多少算多少，
+    不能因为 IPv6 侧出问题把**已经读到的 ARP 结果**一起弄没。
+
+    ``probe=True`` 时先向 `ff02::1` 发一次多播（唯一发包分支）；
+    发完等一小会儿再读缓存，否则设备的邻居通告还没到。
+    """
+    try:
+        if probe:
+            if probe_all_nodes():
+                # 等一拍让链路上的设备把 ICMPv6 echo reply 发回来、
+                # 内核把邻居缓存建起来。0.5s 是"多数本链路设备都来得及"
+                # 的经验值；不设更长是因为被动发现本身要求快。
+                time.sleep(0.5)
+        table = dump_ndp_cache()
+    except Exception as e:  # noqa: BLE001
+        _log.warning("读取 IPv6 邻居缓存失败，本次跳过 IPv6 可见性: %s", e,
+                     exc_info=True)
+        return 0
+    if not table:
+        # 空缓存分两种：本机根本没启用 IPv6（预期，不必惊动用户），
+        # 与启用着却一台设备都没读到（可能只是本链路安静）。
+        # 用 ipv6_enabled() 把两者分开，免得用户看到"没有设备"而反复排查。
+        if not ipv6_enabled():
+            _log.info("本机未启用 IPv6，本次无 IPv6 可见性可报。")
+        else:
+            _log.debug("NDP 缓存为空（本机启用了 IPv6，但当前无邻居条目）。")
+        return 0
+    return attach_ipv6(table, results.values())
+
+
 def passive_discover(*, mdns: bool = True, mdns_active: bool = False,
                      mdns_timeout: float = 2.5,
+                     ipv6: bool = False, ipv6_probe: bool = False,
                      library_lookup: Optional[Callable] = None
                      ) -> Dict[str, ScanResult]:
     """跑一次被动发现，返回 ``{ip: ScanResult}``。
@@ -181,11 +217,21 @@ def passive_discover(*, mdns: bool = True, mdns_active: bool = False,
         mdns_active: ``False``（默认）走 mDNS **只听模式，零发包**；
             ``True`` 才复用主动查询（发组播包，发现更全）。
         mdns_timeout: 听组播的时长（秒）。主动模式下也是等响应的时长。
+        ipv6: 是否同时读 **NDP / IPv6 邻居缓存**并把地址挂到已有 IPv4 设备上
+            （v2.0 §2.4）。**默认关**：多数排障场景只看 IPv4，读 NDP 是额外
+            开销。开启后**本身零发包**（纯读本机缓存）。
+        ipv6_probe: 读 NDP 缓存前先向 `ff02::1` 发**一次** ICMPv6 echo，
+            促使设备回邻居通告。**这是本函数唯一会发包的分支**，默认关。
+            仅在 ``ipv6=True`` 时有意义。
         library_lookup: 地址库内存匹配回调，对 ARP 新设备各调一次。
 
     关于 ``status``：ARP 表里有记录就标 ``online`` —— 那意味着本机最近
     确实和它有 L2 往来。但这**不等于**"此刻可达"（条目可能已过期）。
     真正的证据在 ``discovery_method``（``arp`` / ``mdns``）里，展示层据此区分。
+
+    关于 IPv6：本函数**不新建** IPv6-only 设备行（一个 /64 有 2⁶⁴ 个地址，
+    「盘点」不成立）—— 只把 NDP 里 MAC 与已有 IPv4 设备对上的地址追加到
+    它的 ``ipv6_addresses`` 上（见 `scanner.ndp.attach_ipv6()`）。
     """
     results: Dict[str, ScanResult] = {}
 
@@ -193,6 +239,9 @@ def passive_discover(*, mdns: bool = True, mdns_active: bool = False,
         results[ip] = ScanResult(ip=ip, status="online", mac=mac,
                                  vendor=get_mac_vendor(mac),
                                  discovery_method="arp")
+
+    if ipv6:
+        _attach_ndp(results, probe=ipv6_probe)
 
     if library_lookup is not None:
         for r in results.values():
@@ -252,15 +301,25 @@ class PassiveWatcher:
         self._library_lookup = library_lookup
 
     def poll(self, *, mdns: bool = True, mdns_active: bool = False,
-             mdns_timeout: float = 2.5):
+             mdns_timeout: float = 2.5, ipv6: bool = False,
+             ipv6_probe: bool = False):
         """轮询一次。返回 ``(台账列表, 本次新出现的列表)``。
 
         台账是**累积**的：这一轮没出现的设备不会从台账里消失（见模块
         docstring —— 不报"消失"）。
+
+        ``ipv6`` / ``ipv6_probe`` 透传给 `passive_discover`（v2.0 §2.4）。
+        已经挂在设备上的 IPv6 地址**跨轮累积**：NDP 条目会过期，某一轮读不到
+        不代表设备没有 IPv6 —— 与"不报消失"同一立场（宁可不说，不要造谣）。
         """
         found = passive_discover(mdns=mdns, mdns_active=mdns_active,
                                  mdns_timeout=mdns_timeout,
+                                 ipv6=ipv6, ipv6_probe=ipv6_probe,
                                  library_lookup=self._library_lookup)
+        # 本轮读到的 IPv6 按 MAC 累积回台账里已有的设备上：即使这一轮 ARP 表
+        # 里没有它（L2 条目过期），上一轮看到的 IPv6 也不该凭空消失。
+        if ipv6:
+            self._accumulate_ipv6(found)
         fresh: List[ScanResult] = []
         fps = {ip: fingerprint(r) for ip, r in found.items()}
         for ip, r in found.items():
@@ -280,3 +339,30 @@ class PassiveWatcher:
         self.ledger.update(found)
         self.known.update(found)
         return list(self.ledger.values()), fresh
+
+    def _accumulate_ipv6(self, found: Dict[str, ScanResult]) -> None:
+        """把本轮新读到的 IPv6 地址并进**台账**里对应的老设备上。
+
+        做法：先用 MAC 建「本轮设备的 MAC → IP」索引，再把本轮设备上挂到的
+        IPv6 追加到台账里同 MAC 的**老资产**上。这样即便某台设备这一轮的
+        ARP 条目已过期（不在 ``found`` 里），它上一轮看到的 IPv6 也不会消失。
+
+        **不新建**行：``found`` 里若有一台 IPv4 设备是台账里没有的（第一次
+        出现），它的 ``ipv6_addresses`` 由 `passive_discover` 已经挂好，
+        ``ledger.update(found)`` 会带进去，这里不需要额外处理。
+        """
+        # MAC → 台账里的既有结果（同一 MAC 可能对应多条历史行，全都要更新）。
+        ledger_by_mac: Dict[str, list] = {}
+        for r in self.ledger.values():
+            mac = (r.mac or "").lower()
+            if mac:
+                ledger_by_mac.setdefault(mac, []).append(r)
+        for r in found.values():
+            if not r.ipv6_addresses:
+                continue
+            for old in ledger_by_mac.get((r.mac or "").lower(), ()):
+                if old is r:
+                    continue
+                for addr in r.ipv6_addresses:
+                    if addr not in old.ipv6_addresses:
+                        old.ipv6_addresses.append(addr)

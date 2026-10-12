@@ -1638,6 +1638,29 @@ def _render_watch_text(ledger, fresh) -> str:
     return "\n".join(lines)
 
 
+def _render_ipv6_text(ledger):
+    """IPv6 可见性小节（v2.0 §2.4）。没有任何设备带 IPv6 地址时返回 None。
+
+    **措辞必须说清是「可见性」不是「资产清单」**：本工具只扫 IPv4，
+    这里列的是「本机 NDP 缓存里、且与已有 IPv4 设备 MAC 对上的 IPv6 地址」。
+    一个 /64 有 2^64 个地址，「盘点 IPv6」在语义上不成立。
+    """
+    from scanner.ndp import sort_ipv6
+
+    rows = [(r, sort_ipv6(r.ipv6_addresses))
+            for r in ledger if getattr(r, "ipv6_addresses", None)]
+    if not rows:
+        return None
+    out = [f"IPv6 可见性: {len(rows)} 台设备带 IPv6 地址"
+           "（只做可见性，不是 IPv6 资产清单）"]
+    for r, addrs in sorted(rows, key=lambda t: _ip_sort_key(t[0].ip)):
+        tail = f"  {r.hostname}" if r.hostname else ""
+        out.append(f"  {r.ip:<15} {r.mac or '—':<17}{tail}")
+        for a in addrs:
+            out.append(f"      {a}")
+    return "\n".join(out)
+
+
 def _watch_payload(ledger, fresh, round_no=None) -> dict:
     """JSON 输出。字段名与取值**语言无关**，脚本可依赖。
 
@@ -1648,7 +1671,10 @@ def _watch_payload(ledger, fresh, round_no=None) -> dict:
         return {"ip": r.ip, "mac": r.mac, "hostname": r.hostname,
                 "vendor": r.vendor, "status": r.status,
                 "discovery_method": r.discovery_method,
-                "services": list(r.services)}
+                "services": list(r.services),
+                # v2.0 §2.4：挂靠到本设备上的 IPv6 地址（可见性，非资产清单）。
+                # 字段名语言无关，脚本可依赖；没开 --ipv6 时恒为空列表。
+                "ipv6_addresses": list(getattr(r, "ipv6_addresses", []) or [])}
 
     payload = {
         "device_count": len(ledger),
@@ -1712,7 +1738,9 @@ def cmd_watch(args) -> int:
     def _cycle():
         return watcher.poll(mdns=not args.no_mdns,
                             mdns_active=args.mdns_active,
-                            mdns_timeout=args.mdns_timeout)
+                            mdns_timeout=args.mdns_timeout,
+                            ipv6=getattr(args, "ipv6", False),
+                            ipv6_probe=getattr(args, "ipv6_probe", False))
 
     # ── 单次轮询（默认） ──
     if not looping:
@@ -1722,7 +1750,11 @@ def cmd_watch(args) -> int:
         if args.format == "json":
             emit(render_json(_watch_payload(ledger, fresh)), args.output)
         else:
-            emit(_render_watch_text(ledger, fresh), args.output)
+            body = _render_watch_text(ledger, fresh)
+            v6 = _render_ipv6_text(ledger)
+            if v6:
+                body = body + "\n" + v6
+            emit(body, args.output)
         # `--fail-on-change` 与 diff 的语义保持一致：有新设备 → 退出码 2。
         return EXIT_CHANGES if (args.fail_on_change and fresh) else EXIT_OK
 
@@ -1739,8 +1771,11 @@ def cmd_watch(args) -> int:
                 sys.stdout.write(render_json(
                     _watch_payload(ledger, fresh, round_no=rounds)) + "\n")
             else:
-                sys.stdout.write(f"[第 {rounds} 轮]\n"
-                                 + _render_watch_text(ledger, fresh) + "\n")
+                body = _render_watch_text(ledger, fresh)
+                v6 = _render_ipv6_text(ledger)
+                if v6:
+                    body = body + "\n" + v6
+                sys.stdout.write(f"[第 {rounds} 轮]\n" + body + "\n")
             sys.stdout.flush()
             if limit and rounds >= limit:
                 break
@@ -2268,6 +2303,15 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("--mdns-active", action="store_true",
                     help="mDNS 改用主动查询（会发组播包，发现更全；"
                          "默认只听不发，零发包）")
+    wp.add_argument("--ipv6", action="store_true",
+                    help="同时读本机 IPv6 邻居缓存（NDP），把地址挂到已有 "
+                         "IPv4 设备上（按 MAC 关联，不新建资产）。"
+                         "默认关；开启后本身零发包。只做「可见性」，"
+                         "不是 IPv6 资产清单。")
+    wp.add_argument("--ipv6-probe", action="store_true",
+                    help="读 NDP 前先向 ff02::1 发一次 ICMPv6 echo（唯一会发包的"
+                         "一步，让设备回邻居通告；需要管理员/root）。"
+                         "默认关。仅在 --ipv6 时有意义。")
     wp.add_argument("--save-snapshot", action="store_true",
                     help="把台账存为一条快照（默认不存；只能配合单次轮询）")
     wp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")

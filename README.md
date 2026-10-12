@@ -110,6 +110,16 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
 > CLI `ipscanner watch`（`--interval` 持续轮询、`--fail-on-change` 有新设备时退出码 2）；
 > GUI 在「设置 → 持续发现」（**默认关**），打开后每 30 秒后台轮询一次。
 
+> **IPv6 可见性（只做可见性，不扫 IPv6）**：现代网络里设备普遍带 IPv6，只看 IPv4
+> 会漏掉「只有 IPv6 的设备」。但**完整的 IPv6 资产盘点在语义上不成立** —— 一个 /64
+> 有 2⁶⁴ 个地址。所以本工具**只做可见性**：读本机 **NDP / IPv6 邻居缓存**
+> （Windows `netsh interface ipv6 show neighbors` / Linux `ip -6 neigh` /
+> macOS `ndp -an`，**零发包**），把地址**按 MAC 挂到已有 IPv4 设备上**，
+> **不新建**「IPv6-only 资产」。用 `watch --ipv6` 开启（默认关）。
+> 另有 `--ipv6-probe` 会向 `ff02::1` 发**一次** ICMPv6 echo（**唯一会发包的一步**，
+> 需要管理员/root，默认关），促使设备回邻居通告。
+> ⚠ 本项产出的是「**可见性**」，不是「**IPv6 资产清单**」。
+
 ### 识别与指纹
 
 - **MAC 厂商库**：内置 OUI 数据库，支持在线更新；未知厂商可按前缀批量查询。
@@ -313,6 +323,8 @@ python cli.py watch                       # 读 ARP 表 + 只听 mDNS，单次�
 python cli.py watch --no-mdns             # 只读 ARP 表（最快，几十毫秒）
 python cli.py watch --fail-on-change      # 有新设备时退出码 2（便于计划任务告警）
 python cli.py watch --interval 60         # 每 60 秒轮询一次，Ctrl+C 停止
+python cli.py watch --ipv6                # 同时挂靠 IPv6 地址（只读 NDP 缓存，零发包）
+python cli.py watch --ipv6 --ipv6-probe   # 先向 ff02::1 发一次多播（需管理员/root）
 
 # 对比资产变更（相对上一次快照；有变更时退出码为 2）
 python cli.py diff -r 192.168.1.0/24 --fail-on-change
@@ -588,6 +600,7 @@ IPScanner/
 │  ├─ osfp.py                 #   操作系统指纹
 │  ├─ dns.py                  #   mDNS / DNS-SD（含「只听不发」模式）
 │  ├─ passive.py              #   被动发现（本机 ARP 整表 + mDNS 只听，零发包）
+│  ├─ ndp.py                  #   IPv6 可见性（NDP 邻居缓存只读 + 可选 ff02::1 挂靠，按 MAC）
 │  ├─ netbios.py              #   NetBIOS NBSTAT
 │  ├─ wmi.py                  #   WMI / WinRM 远程识别（需管理员凭据）
 │  ├─ snmp.py                 #   SNMP v2c（团体字）
