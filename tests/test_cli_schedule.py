@@ -152,6 +152,21 @@ class ScheduleRegisterTest(unittest.TestCase):
         _code, _err, m = self._register(["--name", "夜班巡检"])
         self.assertEqual(m.call_args[0][0], "夜班巡检")
 
+    # ── 报表投递（v2.0 §2.2）：纯追加，不破坏既有命令行 ──
+    def test_report_flag_appended_to_command(self):
+        _code, _err, m = self._register(
+            ["--report", "changes", "--report-output", "D:/r/chg.html"])
+        command = m.call_args[0][1]
+        self.assertIn("--report changes", command)
+        self.assertIn("--report-output D:/r/chg.html", command)
+        # 扫描本身仍在（报表是收尾动作，不取代扫描）
+        self.assertIn("--save-snapshot", command)
+
+    def test_no_report_by_default_keeps_command_unchanged(self):
+        """不指定 --report 时命令行里**不能**出现报表参数（老行为逐字节不变）。"""
+        _code, _err, m = self._register([])
+        self.assertNotIn("--report", m.call_args[0][1])
+
 
 class DescribeScheduleTest(unittest.TestCase):
 

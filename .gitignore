@@ -6,6 +6,10 @@ venv/
 .venv/
 env/
 
+# 误建的 Windows 缓存目录（某个子进程把未展开的 %SystemDrive% 当字面路径用了；
+# 在项目根下会重建出一棵 ProgramData/.../Caches 树，纯属噪声，不入库）
+%SystemDrive%/
+
 # 个人数据（本地生成的 MAC 地址库，含内部设备信息，不入库）
 mac_library.db
 

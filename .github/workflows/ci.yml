@@ -60,6 +60,7 @@ jobs:
           python cli.py --version
           python cli.py scan -r 127.0.0.1/32 --no-ports --no-mdns --format json
           python cli.py history --list --format json
+          python cli.py report -t assets --generated-at 2026-01-01T00:00:00 -o report_smoke.html
 
   test-cross-platform:
     name: 跨平台测试 (${{ matrix.os }})
@@ -154,16 +155,28 @@ jobs:
           foreach ($p in @("$dir\IPScanner_$ver.exe", "$dir\_internal",
                            "$dir\_internal\i18n", "$dir\_internal\oui.db",
                            "$dir\_internal\assets\styles\light.qss",
-                           "$dir\_internal\assets\styles\dark.qss")) {
+                           "$dir\_internal\assets\styles\dark.qss",
+                           "$dir\_internal\assets\report_templates\assets.html",
+                           "$dir\_internal\assets\report_templates\changes.html",
+                           "$dir\_internal\assets\report_templates\exposure.html")) {
             if (-not (Test-Path $p)) { throw "GUI 产物缺失: $p" }
           }
           Write-Host "GUI 产物 OK: $dir"
 
       - name: 验证 CLI 产物可独立执行
-        # 打包后的 exe 不依赖源码目录，这一步能真实暴露「模块没被收进去」
+        # 打包后的 exe 不依赖源码目录，这一步能真实暴露「模块没被收进去」。
+        # 末行额外验证报表：`report` 要读 assets/report_templates，
+        # 没进 onefile 包的话会静默退回兜底模板（观感变差但不报错）——
+        # 所以这里断言产物里确实带了**模板特征串**（兜底模板没有 "Asset inventory"）。
         run: |
           .\dist\IPScanner_cli.exe --version
           .\dist\IPScanner_cli.exe scan -r 127.0.0.1/32 --no-ports --no-mdns --format json
+          .\dist\IPScanner_cli.exe report -t assets --generated-at 2026-01-01T00:00:00 -o report_smoke.html
+          $html = Get-Content report_smoke.html -Raw
+          if ($html -notmatch "Asset inventory") {
+            throw "报表模板未打进 CLI 产物（退回了兜底模板）"
+          }
+          Write-Host "CLI 报表产物 OK"
 
   # ── 质量门禁（v1.9 1.4）──────────────────────────────────────────
   # 三个门禁各自独立成一个 job：红了要能一眼看出是**哪一个**红的，
@@ -209,9 +222,12 @@ jobs:
         # ⚠ 匹配不到文件时 coverage 以**退出码 1** 失败（不是静默通过），
         #    因此改文件名 / 打错字会当场红，不会悄悄失去门禁。
         # v1.9 1.1（资产表）新增"要碰的文件"时，在这里**加一行**并登记当时的实测值。
+        #   report_engine.py  95%（v2.0 §2.2 新增；2026-10-12 实测 100%，
+        #                          下界定 95% 是留出少量无害分支的余量）
         run: |
           python -m coverage report --include="history_store.py" --fail-under=95
           python -m coverage report --include="db_util.py" --fail-under=90
+          python -m coverage report --include="report_engine.py" --fail-under=95
 
   quality-types:
     name: 类型门禁（pyright）

@@ -643,7 +643,62 @@ def cmd_scan(args) -> int:
 
     if notifiers:
         _notify_changes(results, baseline_id, notifiers, args, notify_config)
+    _deliver_report(args, baseline_id)
     return EXIT_OK
+
+
+def _deliver_report(args, baseline_id) -> None:
+    """扫描收尾时按需生成报表（v2.0 §2.2 的「定时投递」链路）。
+
+    ⚠ **刻意做成扫描内部的一个收尾动作**，而不是"两条命令串起来"：
+    schtasks 的 `/TR` 只收单条命令、cron 每行也只有一条，串联要么需要包装脚本
+    （多一个要分发的文件），要么在注册时拼 `&&`（schtasks 不认）。
+    放进 scan 内部 → 一次进程、无包装脚本、与 `--notify` 同一位置。
+
+    报表生成失败**绝不**影响扫描本身（扫描已经完成、快照已经落库）——
+    只是 `warn` 一句，退出码仍是成功。
+    """
+    report = (getattr(args, "report", "") or "").strip().lower()
+    if not report:
+        return
+    import history_store
+    import report_engine
+
+    try:
+        out = (getattr(args, "report_output", "") or "").strip()
+        if not out:
+            from app_paths import data_dir
+            out = os.path.join(
+                data_dir(), "report_%s_%s.html"
+                % (report, time.strftime("%Y%m%d_%H%M%S")))
+        db = _db_path(args)
+
+        if report == "changes":
+            import change_detector as cd
+            snaps = history_store.list_snapshots(db_path=db)
+            ids = [s["id"] for s in snaps]
+            to_id = ids[-1] if ids else None
+            from_id = ids[-2] if len(ids) >= 2 else to_id
+            if to_id is None or from_id is None:
+                warn("没有足够快照生成变更报表，跳过。")
+                return
+            old = history_store.get_snapshot(from_id, db_path=db)
+            new = history_store.get_snapshot(to_id, db_path=db)
+            if old is None or new is None:
+                warn("变更报表所需快照不存在，跳过。")
+                return
+            changes = cd.detect_changes(
+                [_SnapResult(d) for d in new["devices"]], old["devices"])
+            html_out = report_engine.render_report("changes", changes=changes)
+        else:
+            rows = history_store.list_assets(db_path=db)
+            html_out = report_engine.render_report(report, assets=rows)
+
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(html_out)
+        log("已生成报表 → %s（%d 字节）" % (out, len(html_out)))
+    except Exception as e:  # noqa: BLE001  — 报表失败不该让整个扫描失败
+        warn("生成报表失败（扫描本身不受影响）: %s" % e)
 
 
 def _load_alert_policy(args, config):
@@ -1115,6 +1170,92 @@ def cmd_export(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── 报表引擎 ──────────────────────────
+
+def cmd_report(args) -> int:
+    """把台账渲染成**版式可编辑**的 HTML 报表（v2.0 §2.2）。
+
+    三种内置模板（也可用 ``--template-file`` 指定任意模板文件）：
+
+    * ``assets``   资产清单：一行一台设备（读 ``list_assets``）；
+    * ``changes``  变更摘要：两份快照之间发生了什么（读 ``detect_changes``）；
+    * ``exposure`` 暴露面摘要：按「开放端口 + 服务」聚合，看谁开了什么。
+
+    **语言无关**：报表里的值一律落规范值（status → online/offline、
+    device_class → 中文源串、时间 → ISO），模板文案由模板文件承载、不进语言包 ——
+    与 ``export``（互操作导出）同口径。详见 ``report_engine.py``。
+    """
+    import history_store
+    import report_engine
+
+    kind = args.template
+    db = _db_path(args)
+
+    # 自定义模板文件（_--template-file_）优先于内置模板。
+    template_text = None
+    if args.template_file:
+        try:
+            with open(args.template_file, encoding="utf-8") as f:
+                template_text = f.read()
+        except OSError as e:
+            log("错误: 无法读取模板文件 %s：%s" % (args.template_file, e))
+            return EXIT_ERROR
+        if not template_text.strip():
+            log("错误: 模板文件为空: %s" % args.template_file)
+            return EXIT_ERROR
+
+    # ── 数据装配 ──
+    if kind == "changes":
+        import change_detector as cd
+
+        snaps = history_store.list_snapshots(db_path=db)
+        ids = [s["id"] for s in snaps]
+        if not ids:
+            log("错误: 没有任何历史快照，无法生成变更报表")
+            return EXIT_ERROR
+        from_id = args.from_id if args.from_id is not None else (
+            ids[-2] if len(ids) >= 2 else ids[-1])
+        to_id = args.to_id if args.to_id is not None else ids[-1]
+        old = history_store.get_snapshot(from_id, db_path=db)
+        new = history_store.get_snapshot(to_id, db_path=db)
+        if old is None:
+            log("错误: 快照 #%s 不存在" % from_id)
+            return EXIT_ERROR
+        if new is None:
+            log("错误: 快照 #%s 不存在" % to_id)
+            return EXIT_ERROR
+        changes = cd.detect_changes([_SnapResult(d) for d in new["devices"]],
+                                    old["devices"])
+        log("变更报表基线: 快照 #%s → #%s（%d 条变更）"
+            % (from_id, to_id, len(changes)))
+        html_out = report_engine.render_report(
+            "changes", changes=changes, template_text=template_text,
+            generated_at=args.generated_at)
+    else:
+        rows = history_store.list_assets(
+            device_class=args.device_class,
+            network=args.network,
+            ip_substr=args.ip,
+            limit=args.limit,
+            offset=args.offset,
+            db_path=db,
+        )
+        log("报表数据: %d 台资产（模板 %s）" % (len(rows), kind))
+        html_out = report_engine.render_report(
+            kind, assets=rows, template_text=template_text,
+            generated_at=args.generated_at)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(html_out)
+        log(f"已生成报表 → {args.output}（{len(html_out)} 字节）")
+    else:
+        sys.stdout.write(html_out)
+        if not html_out.endswith("\n"):
+            sys.stdout.write("\n")
+    return EXIT_OK
+
+
 # ────────────────────────── Nmap XML 读入 ──────────────────────────
 
 def cmd_import(args) -> int:
@@ -1578,6 +1719,10 @@ def cmd_schedule(args) -> int:
         cli_args += ["--db", args.db]
     if getattr(args, "notify_config", None):
         cli_args += ["--notify-config", args.notify_config]
+    # v2.0 §2.2：扫描后生成报表 —— 纯追加（不传 --report 时 build_delivery_argv
+    # 返回空列表，`build_task_command` 的输出与 2.2 之前逐字节一致）。
+    cli_args += scheduler.build_delivery_argv(
+        getattr(args, "report", ""), getattr(args, "report_output", ""))
     if args.quiet:
         cli_args.append("--quiet")
 
@@ -1771,6 +1916,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="通知配置文件路径（默认：数据目录下的 notify.json）")
     sp.add_argument("--no-policy", action="store_true",
                     help="忽略告警策略（维护窗口 / 静音 / 去重），所有变更都发送")
+    sp.add_argument("--report", choices=("assets", "changes", "exposure"),
+                    default="", metavar="模板",
+                    help="扫描收尾时生成 HTML 报表（assets/changes/exposure）。"
+                         "与 --notify 同位置执行，供定时任务一条命令完成"
+                         "「扫描 → 存快照 → 出报表」")
+    sp.add_argument("--report-output", metavar="文件",
+                    help="报表输出路径（省略则写到数据目录下带时间戳的文件名）")
     sp.add_argument("--fail-if-empty", action="store_true", help="无任何结果时返回退出码 1")
     sp.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table",
                     help="输出格式（默认 table）")
@@ -1867,6 +2019,37 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多导出 N 条（按末见时间降序截取）")
     xp.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
     xp.set_defaults(func=cmd_export)
+
+    # ── report ──
+    rp = sub.add_parser("report", help="生成版式可编辑的 HTML 报表",
+                        parents=[common],
+                        description="把台账渲染成 HTML 报表。内置模板："
+                                    "assets（资产清单）/ changes（变更摘要）/ "
+                                    "exposure（暴露面摘要）。"
+                                    "模板是数据文件（assets/report_templates/*.html），"
+                                    "可复制到数据目录改一份即生效；也可用 "
+                                    "--template-file 指定任意模板。"
+                                    "报表值语言无关（status→online/offline）。")
+    rp.add_argument("--template", "-t", choices=("assets", "changes", "exposure"),
+                    default="assets", metavar="模板",
+                    help="内置模板名：assets / changes / exposure（默认 assets）")
+    rp.add_argument("--template-file", metavar="文件", default=None,
+                    help="自定义模板文件路径（省略则用内置模板）")
+    rp.add_argument("--from", dest="from_id", type=int, default=None, metavar="N",
+                    help="变更报表的起始快照 id（仅 changes 模板用）")
+    rp.add_argument("--to", dest="to_id", type=int, default=None, metavar="N",
+                    help="变更报表的结束快照 id（仅 changes 模板用，默认最新）")
+    rp.add_argument("--generated-at", metavar="时间", default=None,
+                    help="覆盖报表里的生成时间（便于可复现输出 / 测试）")
+    rp.add_argument("-o", "--output", metavar="文件",
+                    help="输出文件路径（省略则写到 stdout）")
+    rp.add_argument("--device-class", metavar="类型", help="按设备类型过滤（子串匹配）")
+    rp.add_argument("--network", metavar="网段", help="按网段过滤，如 192.168.1.0/24")
+    rp.add_argument("--ip", metavar="关键字", help="按 IP 子串过滤")
+    rp.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="最多纳入 N 台设备（按末见时间降序截取）")
+    rp.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
+    rp.set_defaults(func=cmd_report)
 
     # ── import ──
     ip_ = sub.add_parser("import", help="读入外部 Nmap XML 并入资产表",
@@ -1965,6 +2148,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="通知配置文件路径（默认：数据目录下的 notify.json）")
     cp.add_argument("--highest", action="store_true",
                     help="以最高权限运行（SYN 半开扫描 / ARP 主动探测需要管理员权限）")
+    cp.add_argument("--report", choices=("assets", "changes", "exposure"),
+                    default="", metavar="模板",
+                    help="每次扫描后生成 HTML 报表（assets/changes/exposure）。"
+                         "与扫描在同一个任务里完成，无需包装脚本")
+    cp.add_argument("--report-output", metavar="文件",
+                    help="报表输出路径（省略则写到数据目录下带时间戳的文件名）")
     cp.add_argument("-q", "--quiet", action="store_true", help="定时任务静默运行")
     cp.set_defaults(func=cmd_schedule)
 

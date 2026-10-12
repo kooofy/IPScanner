@@ -204,6 +204,45 @@ def build_task_command(executable: str, prefix: Sequence[str],
     return " ".join(parts)
 
 
+#: 定时任务可以串联的「后置动作」清单（v2.0 §2.2）。
+#: 扫描完成后可选地生成报表；每一项都对应 CLI 上真实存在的子命令，
+#: 由 `build_delivery_argv()` 拼成参数片段。
+DELIVERY_REPORTS = ("assets", "changes", "exposure")
+
+
+def build_delivery_argv(report: str = "", output: str = "") -> List[str]:
+    """构造「扫描 + 存快照」之后**追加**的投递参数（v2.0 §2.2）。
+
+    设计约束（见 `docs/ROADMAP_V2.0.md` §3 2.2 验收）：
+    **这是纯新增** —— `build_scan_argv()` / `build_task_command()` 的输出
+    逐字节不变；不传 `report` 时本函数返回空列表，老调用方零感知。
+
+    ⚠ **为什么不用 `&&` / `;` 串联**：schtasks 的 `/TR` 只接受**单条**命令，
+    cron 每行也只是一条。想要"先扫描、再生成报表"，要么写一个包装脚本
+    （多一个要分发的文件），要么……把报表生成做成**扫描内部的收尾动作**。
+    这里选后者：CLI `scan` 已支持 `--notify`（扫描后发通知），
+    同理给它 `--report` / `--report-output` —— 一次进程内完成，无包装脚本。
+
+    Args:
+        report: 报表模板名（`assets`/`changes`/`exposure`）；空 = 不投递报表。
+        output: 报表输出路径；空 = 由 CLI 决定默认（数据目录下）。
+
+    Returns:
+        追加到扫描参数之后的片段（可能为空列表）。
+    """
+    r = (report or "").strip().lower()
+    if not r:
+        return []
+    if r not in DELIVERY_REPORTS:
+        raise ValueError("未知报表模板: %r（可选：%s）"
+                         % (report, ", ".join(DELIVERY_REPORTS)))
+    argv = ["--report", r]
+    out = (output or "").strip()
+    if out:
+        argv += ["--report-output", out]
+    return argv
+
+
 # ── 实际注册 / 卸载 ──────────────────────────────────────────────────
 
 def _run(argv: Sequence[str], timeout: float = 20) -> Tuple[bool, str]:

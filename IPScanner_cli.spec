@@ -5,8 +5,10 @@
 #   - 入口是 cli.py，不是 main.py；
 #   - console=True，供计划任务 / SSH / 容器调用；
 #   - 显式 excludes 掉 PyQt5 / 图形相关库，二进制体积远小于 GUI 版；
-#   - 只需要 i18n（语言包）、oui.db（MAC 厂商库）与 service_fingerprints.json
-#     （服务版本指纹规则），不需要 assets。
+#   - 需要 i18n（语言包）、oui.db（MAC 厂商库）、service_fingerprints.json
+#     （服务版本指纹规则）与 assets/report_templates（报表模板 —— v2.0 §2.2
+#     的 `report` 子命令要读它们；不打包的话会静默退回兜底模板，观感变差）。
+#     只额外收模板目录，不收 assets 下的图标（CLI 不用）。
 #
 # 构建：pyinstaller IPScanner_cli.spec
 # 产物：dist/IPScanner_cli.exe
@@ -16,7 +18,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('oui.db', '.'), ('i18n', 'i18n'),
-           ('service_fingerprints.json', '.')],
+           ('service_fingerprints.json', '.'),
+           ('assets/report_templates', 'assets/report_templates')],
     hiddenimports=['scanner'],
     hookspath=[],
     hooksconfig={},

@@ -247,6 +247,68 @@ v1.9 的四分法是「结构 / 出口 / 显示 / 安全网」。v2.0 沿用同�
 - 定时链路：给定 argv，`build_task_command` 产出与 2.2 前**逐字节一致**
   （不破坏既有定时）—— 投递是**新增**一个定时任务类型，不是改旧的。
 
+**落地记录（2026-10-12，第 1 刀完成：模板层 + CLI）**：
+
+用户选了「**分两刀**」：第 1 刀 = 模板层 + CLI `report`（本刀，已成）；
+第 2 刀 = 定时投递链路（见下方「第 2 刀」，**同刀一并落地**）。
+另两项用户裁定：内置模板取**三个**（资产清单 / 变更摘要 / 暴露面）；
+模板层**不进 i18n**（模板文案由模板文件承载，与 `interop_export` 同口径）。
+
+**实现（文件级）**：
+
+- **新增 `report_engine.py`**（零 PyQt / 零三方依赖 / 零网络）：
+  - **受限占位符**：`{{rows}}` / `{{summary}}` / `{{generated_at}}` /
+    `{{template_name}}` —— 只做字符串替换，**不执行代码、不引 Jinja2**。
+  - **加载策略**与 `oui.db` / `service_fingerprints.json` 一致：
+    `data_dir()/assets/report_templates/<名>.html`（用户可改）→
+    `resource_dir()/assets/report_templates/<名>.html`（内置）→ 模块内
+    `_FALLBACK_TEMPLATES`（最小兜底，只求能出表）。三级都不崩。
+  - **必须转义**：主机名/厂商是外部输入，`html.escape(quote=True)`；
+    读表里的 `&<>"'` 全部落实体 —— 否则报表可被注入坏标签甚至脚本。
+  - **语言无关**：`status` 规范化到 `online`/`offline`（`up`/`down` 等价写法也收）；
+    认不出的值**原样保留**（不静默抹成空单元格 —— 报表要如实呈现，不替上游擦屁股）。
+    `device_class` 直接是库规范串（中文源串，与 `interop_export` 同）。
+  - 三个装配器：`assets`（`list_assets` 行）、`changes`（`detect_changes` 的
+    `Change` 对象或 dict 都行）、`exposure`（按「端口 + 服务」聚合：
+    `open_ports` 容忍 `,`/`;`/`/tcp`/list 四种形态，`services` 容忍
+    `80=http;…`/JSON/list 四种；>20 台设备时列表截断标 `(+N)`）。
+- **新增 `assets/report_templates/{assets,changes,exposure}.html`**：三个内置模板
+  （纯 HTML + 内联 CSS，无 JS）。**进 GUI spec 的 `datas`**（`('assets','assets')`
+  已整体收，自动带上）；**CLI spec 原本不收 `assets`** → 本次补
+  `('assets/report_templates','assets/report_templates')`（不收的话冻结态 CLI 会
+  静默退回兜底模板，观感变差却不报错）。
+- **CLI `report` 子命令**：`-t/--template {assets,changes,exposure}`、
+  `--template-file`（自定义模板）、`--from/--to`（变更报表的快照区间）、
+  `--generated-at`（可复现输出）、`-o`、以及 `--device-class/--network/--ip/
+  --limit/--offset`（复用 `list_assets` 过滤）。
+- **定时投递（第 2 刀，同刀落地）**：`scheduler.build_delivery_argv(report, output)`
+  —— **纯新增函数**（`build_scan_argv`/`build_task_command` 一行未改）；
+  `cli schedule --register` 加 `--report/--report-output`；`cli scan` 加
+  `--report/--report-output`，把报表生成做成**扫描收尾动作**（与 `--notify` 同位置）。
+
+**⚠ 为什么报表要放进 `scan` 内部而不串联两条命令**：schtasks 的 `/TR` 只接受
+**单条**命令、cron 每行也只有一条 —— 串联要么多一个包装脚本（多一个要分发的文件），
+要么在注册时拼 `&&`（schtasks 不认）。放进 scan 内部 = 一次进程、无包装脚本。
+
+**验收（实测，47 个报表测试 + 2 个 schedule 测试）**：
+
+- 内置模板产出**可解析 HTML** 且含全部资产行（5 台 → 40 个 `<td>` 计数断言）；
+- **换模板即换版式**：同数据喂两个模板 → 产出不同、都合法、都含同一台设备
+  （证明换的只是版式不是数据）；
+- **语言无关**：`zh-CN` 与 `en-US` 下渲染**逐字节相同**（值不随语言变）；
+- **占位符注入**：`<script>` 主机名被转义成 `&lt;script&gt;`（安全断言）；
+- **定时链路逐字节兼容**：不传 `--report` 时 `build_task_command` 输出
+  **与 2.2 前完全相同**（测试钉死字面量）；
+- 模板缺失 → 回退兜底模板（不崩）；未知模板名 → `ValueError`（不静默出空文档）；
+- 老库无快照时 `changes` 报表 → 退出码 1 + 明确报「没有任何历史快照」。
+- 全量 **1902 tests OK**（基线 1853 → +49）；`ruff check .` 通过；
+  **门禁**：`report_engine.py` **100%**（新登记下界 95%）、
+  `history_store.py` 96%、`db_util.py` 93%；pyright **0 error**（include 已加
+  `report_engine.py`）。
+
+**账目**：v2.0 进度 **2.1 ✅ / 2.2 ✅ / 2.3 待 / 2.4 待**（2/4）。
+**2.1 + 2.2 完成 = 已达「可发 v2.0」的里程碑**（见 §6）。
+
 ---
 
 ### 2.3 凭据配置档（按网段/组的只读账户）
@@ -400,7 +462,7 @@ v2.0「让台账认得出一台设备，并且让别人用得上」
 ├─ 2.3 凭据配置档（按网段/组的只读账户）           P1  ← 能进真实环境
 └─ 2.4 IPv6 可见性（NDP + ff02::1，只挂靠不扫描）  P1  ← 看得见 IPv6-only 设备
 
-进度：1/4 完成（2.1 ✅；落地记录见 §3 2.1）；下一步 2.2
+进度：2/4 完成（2.1 ✅、2.2 ✅ —— **已达「可发 v2.0」里程碑**；落地记录见 §3）；下一步 2.3 / 2.4
 
 不做（明确）：PySide6 迁移 / REST API / Apprise / Prometheus 常驻 /
              多站点中心库 / MCP 查询层 —— 全部因「开端口 / 加依赖 / 装 agent」出局

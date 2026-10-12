@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IPScanner · Asset inventory</title>
+<style>
+  body { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 13px;
+         color: #1f2937; margin: 24px; background: #ffffff; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .meta { color: #6b7280; margin: 0 0 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  th { background: #2563eb; color: #ffffff; text-align: left; padding: 6px 8px;
+       border: 1px solid #d1d5db; white-space: nowrap; }
+  td { padding: 6px 8px; border: 1px solid #d1d5db; }
+  tbody tr:nth-child(even) { filter: brightness(0.98); }
+  .foot { color: #9ca3af; margin-top: 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Asset inventory</h1>
+  <p class="meta">{{summary}}</p>
+  <table>
+    <thead>
+      <tr>
+        <th>IP</th>
+        <th>Status</th>
+        <th>Hostname</th>
+        <th>MAC</th>
+        <th>Vendor</th>
+        <th>Device class</th>
+        <th>Location</th>
+        <th>User</th>
+      </tr>
+    </thead>
+    <tbody>
+{{rows}}
+    </tbody>
+  </table>
+  <p class="foot">Generated at {{generated_at}} · template: {{template_name}}</p>
+</body>
+</html>
