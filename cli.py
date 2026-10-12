@@ -1076,6 +1076,50 @@ def cmd_export(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── 拓扑文本导出 ──────────────────────────
+
+def cmd_topology(args) -> int:
+    """发现并导出网络拓扑为可读文本（tree / markdown / ascii）。
+
+    先扫描 ``--range`` 拿到设备清单，再走 `discover_topology` 抽拓扑
+    （交换机/路由器/网关/终端及其端口与协议），最后用
+    `topology_discovery.render_topology_text` 渲染。纯文本、语言无关，
+    不依赖图形坐标 —— 与建议书 §1.3「拓扑可读性包」一致。
+
+    详见 `docs/ROADMAP_V1.9.md` §1.3。
+    """
+    from topology_discovery import discover_topology, render_topology_text
+
+    results, _scanner = _run_scan(args)
+    if results is None:
+        return EXIT_ERROR
+    if not results:
+        log("没有可输出的结果（扫描范围可能被拒绝或为空）")
+        return EXIT_ERROR
+
+    gateway = getattr(args, "gateway", "") or ""
+    snmp_v3_user, snmp_v3_error = _resolve_snmp_v3(args)
+    if snmp_v3_error:
+        log(f"错误: {snmp_v3_error}")
+        return EXIT_ERROR
+
+    topo = discover_topology(
+        results,
+        gateway_ip=gateway,
+        enable_snmp_probe=not getattr(args, "no_snmp", False),
+        snmp_v3_user=snmp_v3_user,
+    )
+    text = render_topology_text(topo, args.format, gateway)
+    emit(text, args.output)
+    if args.output:
+        log(f"已导出拓扑（{args.format}）→ {args.output}："
+            f"{len(topo.nodes)} 个节点 / {len(topo.links)} 条链路")
+    else:
+        log(f"拓扑（{args.format}）：{len(topo.nodes)} 个节点 / "
+            f"{len(topo.links)} 条链路")
+    return EXIT_OK
+
+
 # ────────────────────────── 被动 / 持续发现 ──────────────────────────
 
 #: 被动发现的来源 -> 人看的短标签。语义与 `ScanResult.to_dict()` 里的
@@ -1646,9 +1690,43 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("-q", "--quiet", action="store_true", help="定时任务静默运行")
     cp.set_defaults(func=cmd_schedule)
 
-    # scan 与 diff 都会真正发起扫描，因此都需要 SNMPv3 参数。
+    # ── topology ──
+    tp = sub.add_parser("topology",
+                        help="发现并导出网络拓扑为可读文本",
+                        parents=[common],
+                        description="扫描网段并发现拓扑（交换机/路由器/网关/终端"
+                                    "及其端口与协议），再渲染成 tree / markdown / "
+                                    "ascii 文本。纯文本、语言无关。")
+    tp.add_argument("-r", "--range", action="append", required=True,
+                    dest="ranges", metavar="范围",
+                    help="IP 范围，可重复。支持 192.168.1.0/24、192.168.1.1-254、单个 IP")
+    tp.add_argument("--level", choices=("quick", "standard", "all"), default="quick",
+                    help="端口扫描级别（默认 quick=常用 21 个端口）")
+    tp.add_argument("--ports", metavar="列表",
+                    help="自定义端口，逗号分隔（覆盖 --level），如 80,443,3389")
+    tp.add_argument("--no-ports", action="store_true", help="完全跳过端口扫描（最快）")
+    tp.add_argument("--protocols", metavar="列表", default="",
+                    help="应用层协议识别，逗号分隔，如 HTTP,HTTPS,FTP,RDP,SNMP")
+    tp.add_argument("--tcp-mode", choices=("connect", "syn", "udp"), default="connect",
+                    help="端口探测方式（syn/udp 需管理员权限，默认 connect）")
+    tp.add_argument("--timeout", type=int, default=1000, metavar="毫秒",
+                    help="ping 超时毫秒（默认 1000）")
+    tp.add_argument("--threads", type=int, default=100, metavar="N",
+                    help="ping 并发线程数（默认 100）")
+    tp.add_argument("--library", action="store_true", help="启用地址库自动匹配（读 mac_library.db）")
+    tp.add_argument("--gateway", metavar="IP", default="",
+                    help="指定本机网关 IP（分层根；省略则按连接数推断）")
+    tp.add_argument("--no-snmp", action="store_true",
+                    help="不做 SNMP 探测（更快，但交换机可能识别不全）")
+    tp.add_argument("--format", "-f", choices=("tree", "markdown", "ascii"),
+                    default="tree", help="文本格式（默认 tree）")
+    tp.add_argument("-o", "--output", metavar="文件", help="写入文件而非 stdout")
+    tp.add_argument("-q", "--quiet", action="store_true", help="静默模式，不输出进度")
+    tp.set_defaults(func=cmd_topology)
+
+    # scan / diff / topology 都会真正发起扫描，因此都需要 SNMPv3 参数。
     # 放在最后统一挂载，避免两处 add_argument 各写一遍、日后再漂移。
-    for _sub in (sp, dp):
+    for _sub in (sp, dp, tp):
         _add_snmp_v3_args(_sub)
 
     return p

@@ -1383,6 +1383,13 @@ _HOST_COL = 74.0       # 终端节点网格的列距
 _HOST_ROW = 80.0       # 终端节点网格的行距
 _INFRA_STEP = 190.0    # 相邻两层网络设备的基准垂直间距
 
+# ── 过宽折行（v1.9 #9）──
+_WRAP_MAX_ASPECT = 3.0  # 整体宽高比超过此值才折行（建议书 §6.2 验收阈值）
+_WRAP_MAX_EDGE = 4000.0  # 像素预算：最长边 ≤ 4000（建议书 §6.2，1000 台以内）
+_WRAP_MIN_EDGE = 600.0   # 像素预算：最短边 ≥ 600（别压成一条线）
+_WRAP_GAP_X = 60.0      # 折行后并列子树之间的横向间隙
+_WRAP_GAP_Y = 40.0      # 折行后并列子树之间的纵向间隙
+
 
 def layout_real_topology(topo: "Topology",
                          gateway_ip: str = "") -> Dict[str, Tuple[float, float]]:
@@ -1535,6 +1542,72 @@ def layout_real_topology(topo: "Topology",
                 child_left += widths[kid]
         cursor += width
 
+    # ── 过宽折行（v1.9 #9）：骨干并列子树按行装箱 ──
+    # 仅在「不折行时整体宽高比会超 3:1」才动手，本就达标的窄拓扑（≤4 台交换机）
+    # 维持原样，避免修坏回归守卫。折行 = 把「一排交换机」变成「一片」：
+    # 每个子树内部坐标（tidy tree）保持不变，只整体平移进各自的格子。
+    _xs = [p[0] for p in positions.values()]
+    _ys = [p[1] for p in positions.values()]
+    _aspect_now = ((max(_xs) - min(_xs)) / (max(_ys) - min(_ys))
+                   if _ys and max(_ys) != min(_ys) else 0.0)
+    if _aspect_now > _WRAP_MAX_ASPECT:
+        def _subtree_infra(nid):
+            out = [nid]
+            stack = list(infra_children.get(nid, ()))
+            while stack:
+                x = stack.pop()
+                out.append(x)
+                stack.extend(infra_children.get(x, ()))
+            return out
+
+        for _root in infra_roots:
+            _kids = infra_children[_root]
+            if len(_kids) < 2:
+                continue
+            # 每个子树的占位尺寸（含其接入网格的预留跨度）
+            _kid_w = {k: max(1.0, widths[k]) * _X_UNIT for k in _kids}
+            _kid_h = {k: (_INFRA_STEP * 0.42 + rows_of[k] * _HOST_ROW)
+                      for k in _kids}
+            _cell_w = max(_kid_w.values()) + _WRAP_GAP_X
+            _cell_h = max(_kid_h.values()) + _WRAP_GAP_Y
+            # 选列数：在「尽量少换行」与「宽高比 ≤ 3:1」之间取平衡，
+            # 取能达标的最大列数（= 尽量保留成一行）；同时尽量别撑爆画布
+            # （最长边 ≤ 4000、最短边 ≥ 600，与建议书 §6.2 像素预算一致）。
+            # 设备过多时像素预算无法满足，则退而只保宽高比。
+            _n = len(_kids)
+            _cols = _n
+            _ok = None
+            while _cols >= 1:
+                _rows = math.ceil(_n / _cols)
+                _tw, _th = _cols * _cell_w, _rows * _cell_h
+                if ((_tw / _th) <= _WRAP_MAX_ASPECT
+                        and max(_tw, _th) <= _WRAP_MAX_EDGE
+                        and min(_tw, _th) >= _WRAP_MIN_EDGE):
+                    _ok = _cols
+                    break
+                _cols -= 1
+            if _ok is None:  # 像素预算无法满足（节点过多），只保宽高比
+                _cols = _n
+                while _cols > 1:
+                    _rows = math.ceil(_n / _cols)
+                    if (_cols * _cell_w) / (_rows * _cell_h) <= _WRAP_MAX_ASPECT:
+                        break
+                    _cols -= 1
+            else:
+                _cols = _ok
+            _grid_w = _cols * _cell_w
+            _base_x = positions[_root][0] - _grid_w / 2.0
+            _base_y = positions[_root][1] + _INFRA_STEP
+            for _i, _k in enumerate(sorted(_kids)):
+                _r = _i // _cols
+                _c = _i % _cols
+                # 平移该子树的整棵 infra 子树（含其下级交换机），保持内部相对坐标
+                _dx = (_base_x + _c * _cell_w) - (positions[_k][0] - _kid_w[_k] / 2.0)
+                _dy = (_base_y + _r * _cell_h) - positions[_k][1]
+                for _d in _subtree_infra(_k):
+                    _ox, _oy = positions[_d]
+                    positions[_d] = (_ox + _dx, _oy + _dy)
+
     # ── 接入层坐标：每个网络设备正下方的紧凑网格 ──
     for nid, hosts in blocks.items():
         if not hosts or nid not in positions:
@@ -1558,6 +1631,293 @@ def layout_real_topology(topo: "Topology",
             positions[nid] = (cx + (col - (cols - 1) / 2.0) * _HOST_COL,
                               top + row * _HOST_ROW)
     return positions
+
+
+# ── 拓扑文本导出（v1.9 #9 可读性包：树形 / Markdown / ASCII）──
+
+TOPO_TEXT_FORMATS = ("tree", "markdown", "ascii")
+
+
+def _topo_forest(topo, gateway_ip=""):
+    """从 links 抽一棵树（森林），供文本导出用。
+
+    根选择 / BFS 与 `layout_real_topology` 同一套 `_pick_roots` —— 文本和图形
+    讲同一个故事。返回 ``(nodes, parent, children, roots)``：
+    `parent[nid]` 是该节点的父（根 = None），`children[nid]` 是子列表，
+    `roots` 是所有森林根（含没有任何链路、被 `_pick_roots` 兜底成根的孤立节点）。
+    """
+    nodes = {n.id: n for n in topo.nodes}
+    if not nodes:
+        return nodes, {}, {}, []
+    adjacency = {nid: [] for nid in nodes}
+    for link in topo.links:
+        a, b = link.source_id, link.target_id
+        if a in nodes and b in nodes and a != b:
+            adjacency[a].append(b)
+            adjacency[b].append(a)
+    roots = _pick_roots(topo, nodes, adjacency, gateway_ip)
+    parent = {}
+    children = {nid: [] for nid in nodes}
+    # 「真正的森林根」= BFS 实际用到的起点。`_pick_roots` 把所有节点都列为候选根，
+    # 但 BFS 一旦从更早的根到达某节点，该节点就不再是根（parent 已设）。
+    # 下面只收「没被更早的根覆盖」的候选，渲染时按这个顺序画，避免同一台设备
+    # 既挂在上游下面、又被当成顶层再画一遍（重复节点）。
+    used_roots = []
+    for root in roots:
+        if root in parent:
+            continue
+        parent[root] = None
+        used_roots.append(root)
+        queue = [root]
+        while queue:
+            cur = queue.pop(0)
+            for nxt in adjacency[cur]:
+                if nxt in parent:
+                    continue
+                parent[nxt] = cur
+                children[cur].append(nxt)
+                queue.append(nxt)
+    return nodes, parent, children, used_roots
+
+
+def _topo_link_by_child(topo):
+    """``child_id -> 连接它的那条链路``（仅取第一条，纯展示用）。"""
+    by_child = {}
+    for link in topo.links:
+        a, b = link.source_id, link.target_id
+        if a and b and a != b:
+            by_child.setdefault(a, link)
+            by_child.setdefault(b, link)
+    return by_child
+
+
+def _topo_node_fields(node):
+    """节点的「类型 / 状态 / 厂商型号」展示片段（规范值，语言无关）。"""
+    kind = node.kind or (KIND_SWITCH if node.is_switch else KIND_HOST)
+    state = "up" if node.online else "down"
+    vm = ("%s %s" % (node.vendor, node.model)).strip()
+    return kind, state, vm
+
+
+def _topo_uplink(node, nid, pid, nodes, link_by_child):
+    """对某个子节点，拼出「上联：父设备:父端口 → 本端端口 (协议)」。"""
+    if pid is None:
+        return ""
+    link = link_by_child.get(nid)
+    if link is None:
+        return ""
+    if link.source_id == pid:
+        uport, dport = link.source_port, link.target_port
+    elif link.target_id == pid:
+        uport, dport = link.target_port, link.source_port
+    else:
+        return ""
+    proto = link.protocol or "-"
+    pname = nodes[pid].label or pid
+    if dport:
+        return "  ← %s:%s → %s (%s)" % (pname, uport, dport, proto)
+    return "  ← %s:%s (%s)" % (pname, uport, proto)
+
+
+def render_topology_tree(topo, gateway_ip=""):
+    """树形缩进文本：每个节点一行，子节点缩进并带树形连接符。
+
+    含端口与协议（见 `_topo_uplink`）。语言无关（kind/state 用 up/down 规范值，
+    device_class 用库里的规范串）。
+    """
+    nodes, parent, children, roots = _topo_forest(topo, gateway_ip)
+    if not nodes:
+        return ""
+    link_by_child = _topo_link_by_child(topo)
+
+    def _kids(nid):
+        return sorted(children[nid],
+                      key=lambda k: (0 if nodes[k].is_infra else 1,
+                                     nodes[k].label))
+
+    def _summary(nid):
+        node = nodes[nid]
+        kind, state, vm = _topo_node_fields(node)
+        base = "%s (%s)" % (node.label or nid, node.ip or nid)
+        extra = " [%s/%s]" % (kind, state)
+        if node.device_class:
+            extra += " " + node.device_class
+        if vm:
+            extra += " " + vm
+        extra += _topo_uplink(node, nid, parent.get(nid), nodes, link_by_child)
+        return base + extra
+
+    lines = []
+
+    def _walk(nid, prefix, is_last):
+        lines.append(prefix + ("└── " if is_last else "├── ") + _summary(nid))
+        child_prefix = prefix + ("    " if is_last else "│   ")
+        for i, kid in enumerate(_kids(nid)):
+            _walk(kid, child_prefix, i == len(children[kid]) - 1)
+
+    for root in roots:
+        lines.append(_summary(root))
+        for i, kid in enumerate(_kids(root)):
+            _walk(kid, "", i == len(children[kid]) - 1)
+    if topo.note:
+        lines.append("")
+        lines.append("# " + topo.note)
+    return "\n".join(lines)
+
+
+def render_topology_markdown(topo, gateway_ip=""):
+    """Markdown 表格：一列一个节点，含上联端口/协议。"""
+    nodes, parent, children, roots = _topo_forest(topo, gateway_ip)
+    if not nodes:
+        return ""
+    link_by_child = _topo_link_by_child(topo)
+    header = ["节点", "IP", "类型", "状态", "设备类", "厂商/型号",
+              "上联设备", "上联端口", "本端端口", "协议"]
+
+    def _kids(nid):
+        return sorted(children[nid],
+                      key=lambda k: (0 if nodes[k].is_infra else 1,
+                                     nodes[k].label))
+
+    def _order():
+        out = []
+        for root in roots:
+            stack = [root]
+            while stack:
+                nid = stack.pop(0)
+                if nid in out:
+                    continue
+                out.append(nid)
+                stack.extend(_kids(nid))
+        return out
+
+    def _row(nid):
+        node = nodes[nid]
+        kind, state, vm = _topo_node_fields(node)
+        pid = parent.get(nid)
+        uplink_dev = uport = dport = proto = "-"
+        if pid is not None:
+            link = link_by_child.get(nid)
+            if link is not None:
+                if link.source_id == pid:
+                    uport, dport = link.source_port, link.target_port
+                elif link.target_id == pid:
+                    uport, dport = link.target_port, link.source_port
+                proto = link.protocol or "-"
+                uplink_dev = nodes[pid].label or pid
+        return [node.label or nid, node.ip or "-", kind, state,
+                node.device_class or "-", vm or "-", uplink_dev,
+                uport or "-", dport or "-", proto]
+
+    lines = ["| " + " | ".join(header) + " |",
+             "| " + " | ".join(["---"] * len(header)) + " |"]
+    for nid in _order():
+        lines.append("| " + " | ".join(_row(nid)) + " |")
+    if topo.note:
+        lines.append("")
+        lines.append("> " + topo.note)
+    return "\n".join(lines)
+
+
+def render_topology_ascii(topo, gateway_ip=""):
+    """等宽 ASCII 表：节点名按树深度缩进，列对齐，含上联端口/协议。"""
+    nodes, parent, children, roots = _topo_forest(topo, gateway_ip)
+    if not nodes:
+        return ""
+    link_by_child = _topo_link_by_child(topo)
+
+    depth = {}
+    for root in roots:
+        depth[root] = 0
+        queue = [root]
+        while queue:
+            cur = queue.pop(0)
+            for kid in children[cur]:
+                depth[kid] = depth[cur] + 1
+                queue.append(kid)
+
+    def _kids(nid):
+        return sorted(children[nid],
+                      key=lambda k: (0 if nodes[k].is_infra else 1,
+                                     nodes[k].label))
+
+    def _order():
+        out = []
+        for root in roots:
+            stack = [root]
+            while stack:
+                nid = stack.pop(0)
+                if nid in out:
+                    continue
+                out.append(nid)
+                stack.extend(_kids(nid))
+        return out
+
+    def _uplink_str(nid):
+        pid = parent.get(nid)
+        if pid is None:
+            return "-"
+        link = link_by_child.get(nid)
+        if link is None:
+            return "-"
+        if link.source_id == pid:
+            uport, dport = link.source_port, link.target_port
+        elif link.target_id == pid:
+            uport, dport = link.target_port, link.source_port
+        else:
+            return "-"
+        proto = link.protocol or "-"
+        pname = nodes[pid].label or pid
+        if dport:
+            return "%s:%s→%s(%s)" % (pname, uport, dport, proto)
+        return "%s:%s(%s)" % (pname, uport, proto)
+
+    cols = []
+    for nid in _order():
+        node = nodes[nid]
+        kind, state, vm = _topo_node_fields(node)
+        name = "%s%s (%s)" % ("  " * depth[nid], node.label or nid,
+                              node.ip or "-")
+        cols.append((name, kind, state, node.device_class or "-",
+                     vm or "-", _uplink_str(nid)))
+
+    heads = ["NODE", "TYPE", "STATE", "CLASS", "VENDOR/MODEL", "UPLINK"]
+    w = [len(h) for h in heads]
+    for name, kind, state, dev, vm, up in cols:
+        w[0] = max(w[0], len(name))
+        w[1] = max(w[1], len(kind))
+        w[2] = max(w[2], len(state))
+        w[3] = max(w[3], len(dev))
+        w[4] = max(w[4], len(vm))
+        w[5] = max(w[5], len(up))
+
+    def _fmt(row):
+        return "  ".join(c.ljust(w[i]) for i, c in enumerate(row))
+
+    lines = [_fmt(heads), _fmt(["-" * w[i] for i in range(6)])]
+    for name, kind, state, dev, vm, up in cols:
+        lines.append(_fmt([name, kind, state, dev, vm, up]))
+    if topo.note:
+        lines.append("")
+        lines.append("# " + topo.note)
+    return "\n".join(lines)
+
+
+def render_topology_text(topo, fmt, gateway_ip=""):
+    """把 Topology 渲染成可读文本。
+
+    fmt ∈ ``TOPO_TEXT_FORMATS``（``tree`` / ``markdown`` / ``ascii``）。
+    三种格式都会遍历**整张**拓扑树（不依赖坐标），因此不会出现「因为
+    图形折行/分栏而丢节点」的情况 —— 每台交换机和它的每个下游节点都在。
+    """
+    if fmt not in TOPO_TEXT_FORMATS:
+        raise ValueError("未知拓扑文本格式: %r（应为 %s）"
+                         % (fmt, "/".join(TOPO_TEXT_FORMATS)))
+    if fmt == "markdown":
+        return render_topology_markdown(topo, gateway_ip)
+    if fmt == "ascii":
+        return render_topology_ascii(topo, gateway_ip)
+    return render_topology_tree(topo, gateway_ip)
 
 
 def _grid_columns(count: int) -> int:

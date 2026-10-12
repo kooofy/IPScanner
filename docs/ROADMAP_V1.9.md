@@ -277,7 +277,36 @@
 - 文本导出在三种格式下都包含**每一台交换机与它的每个下游节点** ——
   不许因为折行/分栏丢节点。
 
-**落地记录位**：待填（本项未开工）。
+**落地记录位**（2026-10-12，v1.9 第 4 项 / 收官）：
+
+- **折行**：`layout_real_topology` 在骨干 tidy tree 后新增「过宽折行」装箱
+  通道（阈值 `_WRAP_MAX_ASPECT=3.0`；像素预算 `_WRAP_MAX_EDGE=4000` /
+  `_WRAP_MIN_EDGE=600`，设备过多时退而只保宽高比）。仅当现状宽高比 > 3:1 才动手；
+  并列子树整体平移、内部 tidy-tree 坐标不变，不丢节点、不新增重叠。
+- **文本导出三种**：`topology_discovery.py` 新增 `TOPO_TEXT_FORMATS` 与
+  `render_topology_tree` / `render_topology_markdown` / `render_topology_ascii`
+  / 分发器 `render_topology_text` —— **纯函数、遍历整棵拓扑树（不依赖坐标）、
+  含端口与协议、语言无关**（kind/state 用 up/down 规范值、device_class 用库规范串）。
+  节点覆盖靠 `_topo_forest` 只收「BFS 实际用到的根」避免重复打印（已修过一次
+  候选根被当成顶层再画一遍的 bug）。
+- **CLI `ipscanner topology --text`**：新增 `topology` 子命令
+  （`-r/--range` 必填、`--format tree|markdown|ascii`、`-o`、`--gateway`、
+  `--no-snmp`、`--snmpv3-*`），复用 `_run_scan` + `discover_topology` +
+  `render_topology_text`。
+- **验收守卫去 `@expectedFailure`**：`AspectRatioAcceptanceTest` 从依赖 PyQt 的
+  `test_topology_layout.py` **迁出**到新建的 **PyQt 无关** `tests/test_topology_layout_pure.py`，
+  并转正为真正的回归守卫（宽高比 ≤3:1 + 像素预算 ≤4000/≥600）；
+  新增 `TopologyTextExportTest`（三格式覆盖全部节点、含端口与协议、非法格式抛
+  `ValueError`、空拓扑返回空串）。⚠ `test_topology_layout.py` 的 Qt 渲染测试
+  仍在原文件、本机（有 PyQt5）环境照常跑。
+- **验收（实测，9 个纯测试全绿、`ruff` 通过）**：
+  - 10 交换机 / 100 终端宽高比 **2.02**、50 交换机 / 100 终端 **2.74**，均 ≤ 3:1；
+  - 像素预算：(1,1000)=2750/2294、(4,100)=2266/1910、(10,100)=3866/1910 均落在
+    [600, 4000]；
+  - 文本导出三格式对 fixture（6/30、10/100、50/100）**逐节点覆盖**，无丢节点、
+    含 `LLDP`/`FDB` 与端口 `GE0/1`/`GE1/0/1`。
+- ⚠ 约束：本机 GUI 冒烟**未跑**（沙箱无 PyQt5）；`topology` 命令需真实扫描，
+  本次只在解析层（-h）与纯函数层验证，未发起网络扫描。
 
 ### 1.4 质量门禁（资产表的安全网）
 
