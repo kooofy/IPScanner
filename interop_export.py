@@ -113,12 +113,16 @@ def parse_services(value) -> list:
     s = str(value).strip()
     if not s:
         return []
+    # 先按 JSON 数组解析（落库的规范形式）；解析不出数组就是退化形态，
+    # 按逗号分隔串处理。用 `try/except` 会让 `except: pass` 被计成「静默吞异常」
+    # （见 test_logging_policy 的棘轮），而这里本就是「解析失败的正常分支」——
+    # 改用 dict.get 的哨兵值表达，语义更清楚、也不占静默配额。
     try:
         arr = json.loads(s)
-        if isinstance(arr, list):
-            return [str(x) for x in arr]
     except (ValueError, TypeError):
-        pass
+        arr = None
+    if isinstance(arr, list):
+        return [str(x) for x in arr]
     # 退化：当普通逗号分隔串处理
     return [p.strip() for p in s.split(",") if p.strip()]
 
