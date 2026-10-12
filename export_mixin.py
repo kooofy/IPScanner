@@ -210,5 +210,68 @@ class ExportMixin:
             "<table>" + f"<tr>{th}</tr>" + body + "</table></body></html>"
         )
 
+    def _export_assets_interop(self):
+        """把资产表导出为互操作格式（Nmap XML / Zabbix LLD / NetBox CSV / Oxidized router.db）。
+
+        v1.9 §1.2：资产表的第一个消费方。读 ``history_store.list_assets()``（1.1-③
+        读路径，与 CLI ``assets`` 子命令同源），调 ``interop_export`` 写出。
+        **零网络、零新依赖、语言无关**——导出值是规范值（status→online/offline、
+        device_class→中文源串），供别的系统解析，绝不落 ``tr()`` 展示串。
+
+        ⚠ 当前 GUI 还没有资产视图的筛选条（1.1-③ 只做了读路径），故此处导出**整张
+        资产表**；等资产视图接入筛选后，这里改为跟随其筛选即可（与 ``_export_results``
+        跟随 ``_visible_results`` 同口径）。
+        """
+        import re
+        import history_store
+        import interop_export
+
+        rows = history_store.list_assets()
+        if not rows:
+            msg_warn(self, tr("提示"), tr("没有可导出的资产记录"))
+            return
+
+        filters = ";;".join([
+            tr("Nmap XML") + " (*.xml)",
+            tr("Zabbix LLD JSON") + " (*.json)",
+            tr("NetBox 设备 CSV") + " (*.csv)",
+            tr("Oxidized router.db") + " (*.txt)",
+        ])
+        default_name = f"资产导出_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self, tr("导出资产（互操作格式）"), default_name, filters)
+        if not file_path:
+            return
+
+        # 从用户选的过滤器里取扩展名（比文件名后缀可靠，避免 .json 歧义）
+        m = re.search(r"\*\.(\w+)", selected_filter)
+        ext = m.group(1).lower() if m else ""
+        fmt_by_ext = {"xml": "nmap", "json": "zabbix",
+                      "csv": "netbox", "txt": "oxidized"}
+        fmt = fmt_by_ext.get(ext)
+        if fmt is None:
+            low = file_path.lower()
+            suf = low.rsplit(".", 1)[-1] if "." in low else ""
+            fmt = fmt_by_ext.get(suf, "netbox")
+        if ext and not file_path.lower().endswith("." + ext):
+            file_path += "." + ext
+
+        try:
+            interop_export.export_interop(fmt, rows, file_path)
+        except Exception as e:  # noqa: BLE001
+            msg_warn(self, tr("导出失败"), str(e))
+            return
+
+        self._audit(
+            audit_log.CAT_EXPORT, tr("导出资产（互操作）..."),
+            f"{fmt} · {len(rows)} 台 · {os.path.basename(file_path)}",
+        )
+        self.status_bar.showMessage(
+            tr("已导出 {n} 台资产 → {f}").format(
+                n=len(rows), f=os.path.basename(file_path)))
+        msg_info(
+            self, tr("导出成功"),
+            tr("已导出 {n} 台资产为 {fmt} 格式。").format(n=len(rows), fmt=fmt))
+
     # --- 关于 ---
 

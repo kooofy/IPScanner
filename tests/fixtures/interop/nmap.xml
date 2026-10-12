@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="IPScanner" version="1.0">
+  <host>
+    <status state="up"/>
+    <address addr="10.0.0.1" addrtype="ipv4"/>
+    <address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/>
+    <hostnames><hostname name="gw.local"/></hostnames>
+    <ports>
+      <port portid="80"><state state="open" reason="open" reason_ttl="0"/><service name="http"/></port>
+      <port portid="443"><state state="open" reason="open" reason_ttl="0"/><service name="https"/></port>
+      <port portid="22"><state state="open" reason="open" reason_ttl="0"/><service name="ssh"/></port>
+      <port portid="161"><state state="open" reason="open" reason_ttl="0"/><service name="snmp"/></port>
+    </ports>
+  </host>
+  <host>
+    <status state="down"/>
+    <address addr="10.0.0.9" addrtype="ipv4"/>
+    <address addr="11:22:33:44:55:66" addrtype="mac"/>
+    <hostnames/>
+    <ports>
+    </ports>
+  </host>
+</nmaprun>

@@ -214,7 +214,29 @@
   这条测试同时是「没有落展示串」的证明；
 - 0 台设备时产出**合法的空文档**，不是空文件、不是畸形 XML。
 
-**落地记录位**：待填（本项未开工）。
+**落地记录位**：✅ 已落地（v1.9 §1.2 完成，commit 见下方）。
+
+- 新增 `interop_export.py`：四格式的纯渲染函数（`render_nmap_xml` /
+  `render_zabbix_lld` / `render_netbox_csv` / `render_router_db`）+ 分发器
+  `build_interop()`（返回字节，便于 golden file）/ `export_interop()`。
+  **零 PyQt / 零网络 / 零新依赖 / 语言无关**——导出值是规范值
+  （`status`→online/offline、`device_class`→中文源串），绝不落 `tr()` 展示串。
+- 四格式要点：
+  - Nmap XML：含 `<host>/<address>/<hostnames>/<ports>/<status>`；⚠ **不编 `<os>`**
+    （只有 os_guess，编 `<osmatch>` 是撒谎，延续诚实降级）。
+  - Zabbix LLD JSON：`{"data":[{ "{#IP}","{#HOSTNAME}","{#MAC}","{#DEVICE.CLASS}",… }]}`。
+  - NetBox 设备 CSV：表头与官方 importer 一致（必填 `name/device_type/device_role/
+    site/status` 在最前）；`device_type`="Manufacturer Model"（vendor + device_class）、
+    `status`→Active/Offline、`site`←location、`device_role`←device_class 按名字解析外键。
+  - Oxidized `router.db`：`name:model:group`（model←device_class、group←location）。
+- 消费方接线：CLI `ipscanner export --format nmap|zabbix|netbox|oxidized`
+  （复用 1.1-③ 读路径 `list_assets`）；GUI `文件` 菜单「导出资产（互操作）...」
+  → `export_mixin._export_assets_interop`（遵循 tr / ui_msg / audit_log.CAT_EXPORT）。
+- 验收：`tests/test_interop_export.py` 四格式 **golden file 逐字节** + 0 台合法空文档
+  （可解析 XML 根 / 带表头 CSV / `{"data":[]}` / 空 router.db）+ **语言无关**
+  （zh-CN/en-US 字节完全一致）+ 外键解析，全绿；`ruff` 通过。
+- ⚠ 约束：GUI 动作本机冒烟**未跑**（沙箱无 PyQt5）；当前导出**整张资产表**
+  （资产视图筛选条是后续项，届时改为跟随其筛选，与 `_export_results` 同口径）。
 
 ### 1.3 拓扑可读性包（折行 + 文本导出）
 

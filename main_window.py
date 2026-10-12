@@ -608,6 +608,12 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.act_export.triggered.connect(self._export_results)
         file_menu.addAction(self.act_export)
 
+        # v1.9 §1.2：资产表互操作导出（Nmap XML / Zabbix LLD / NetBox CSV / Oxidized）
+        self.act_export_assets = QAction(tr("导出资产（互操作）..."), self)
+        self.act_export_assets.setIcon(_mi(QStyle.SP_DialogSaveButton))
+        self.act_export_assets.triggered.connect(self._export_assets_interop)
+        file_menu.addAction(self.act_export_assets)
+
         act_print = QAction(tr("打印..."), self)
         act_print.setIcon(_mi(QStyle.SP_FileDialogContentsView))
         act_print.setShortcut(QKeySequence("Ctrl+P"))

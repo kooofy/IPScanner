@@ -1044,6 +1044,38 @@ def cmd_assets(args) -> int:
     return EXIT_OK
 
 
+def cmd_export(args) -> int:
+    """导出资产表为互操作格式（Nmap XML / Zabbix LLD / NetBox CSV / Oxidized router.db）。
+
+    纯文件导出：读 ``assets``（1.1 读路径，与 `assets` 子命令同源），调
+    ``interop_export.export_interop`` 写出，**零网络、零新依赖、语言无关**。
+    导出的全是规范值（status→online/offline、device_class→中文源串），
+    供别的系统解析，绝不落 ``tr()`` 展示串。
+
+    详见 `docs/ROADMAP_V1.9.md` §1.2 与 `interop_export.py`。
+    """
+    import history_store
+    import interop_export
+
+    db = _db_path(args)
+    rows = history_store.list_assets(
+        device_class=args.device_class,
+        network=args.network,
+        ip_substr=args.ip,
+        limit=args.limit,
+        offset=args.offset,
+        db_path=db,
+    )
+    if args.output:
+        interop_export.export_interop(args.format, rows, args.output)
+        log(f"已导出 {len(rows)} 台资产 → {args.output}（格式: {args.format}）")
+    else:
+        sys.stdout.buffer.write(interop_export.build_interop(args.format, rows))
+        sys.stdout.buffer.flush()
+        log(f"已导出 {len(rows)} 台资产（格式: {args.format}，已写入 stdout）")
+    return EXIT_OK
+
+
 # ────────────────────────── 被动 / 持续发现 ──────────────────────────
 
 #: 被动发现的来源 -> 人看的短标签。语义与 `ScanResult.to_dict()` 里的
@@ -1527,6 +1559,25 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
     ap.add_argument("-o", "--output", metavar="文件")
     ap.set_defaults(func=cmd_assets)
+
+    # ── export ──
+    xp = sub.add_parser("export", help="导出资产表为互操作格式", parents=[common],
+                        description="把资产表（assets）导出为 Nmap XML / Zabbix LLD JSON / "
+                                    "NetBox 设备 CSV / Oxidized router.db，供外部系统集成。"
+                                    "纯文件导出，语言无关。")
+    xp.add_argument("--format", "-f",
+                    choices=("nmap", "zabbix", "netbox", "oxidized"),
+                    required=True, metavar="格式",
+                    help="导出格式：nmap / zabbix / netbox / oxidized")
+    xp.add_argument("-o", "--output", metavar="文件",
+                    help="输出文件路径（省略则写到 stdout）")
+    xp.add_argument("--device-class", metavar="类型", help="按设备类型过滤（子串匹配）")
+    xp.add_argument("--network", metavar="网段", help="按网段过滤，如 192.168.1.0/24")
+    xp.add_argument("--ip", metavar="关键字", help="按 IP 子串过滤")
+    xp.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="最多导出 N 条（按末见时间降序截取）")
+    xp.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
+    xp.set_defaults(func=cmd_export)
 
     # ── watch ──
     wp = sub.add_parser("watch", help="被动发现：不发包地看最近谁在网络上出现过",

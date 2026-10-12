@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "{#IP}": "10.0.0.1",
+      "{#HOSTNAME}": "gw.local",
+      "{#MAC}": "AA:BB:CC:DD:EE:FF",
+      "{#DEVICE.CLASS}": "路由器",
+      "{#VENDOR}": "MikroTik",
+      "{#STATUS}": "online",
+      "{#LOCATION}": "机房A",
+      "{#OS}": "RouterOS",
+      "{#SERVICES}": "http, https, ssh",
+      "{#PORTS}": "80, 443, 22, 161"
+    },
+    {
+      "{#IP}": "10.0.0.9",
+      "{#HOSTNAME}": "10.0.0.9",
+      "{#MAC}": "11:22:33:44:55:66",
+      "{#DEVICE.CLASS}": "打印机",
+      "{#VENDOR}": "",
+      "{#STATUS}": "offline",
+      "{#LOCATION}": "",
+      "{#OS}": "",
+      "{#SERVICES}": "",
+      "{#PORTS}": ""
+    }
+  ]
+}

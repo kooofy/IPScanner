@@ -1,0 +1,3 @@
+﻿name,device_type,device_role,site,status,serial,asset_tag,platform,comments
+gw.local,MikroTik 路由器,路由器,机房A,Active,,,RouterOS,"OS: RouterOS; Services: http, https, ssh; Ports: 80, 443, 22, 161; 核心网关"
+10.0.0.9,打印机,打印机,,Offline,,,,
