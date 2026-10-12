@@ -106,7 +106,7 @@ show_missing = true
 # 于是只列"本次改动要碰的文件"：加进来时就是 0 error，之后每碰一个文件就多钉一个。
 # 好处是不需要维护一份会随 pyright 版本漂移的"已知错误基线"。
 [tool.pyright]
-include = ["history_store.py", "db_util.py", "report_engine.py", "credentials.py", "scanner/ndp.py"]
+include = ["history_store.py", "db_util.py", "report_engine.py", "credentials.py", "scanner/ndp.py", "scanner/async_ports.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
 

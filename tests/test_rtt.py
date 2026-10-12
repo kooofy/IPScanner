@@ -1,10 +1,23 @@
 # -*- coding: utf-8 -*-
-"""RTT 自适应超时（仅 TCP connect）单元测试。"""
+"""RTT 自适应超时（仅 TCP connect）单元测试。
+"""
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 
 from scanner.engine import adaptive_timeout_from_samples
 from scanner.ports import scan_ports
+
+
+def _force_threaded():
+    """强制 connect 走**线程池**引擎。
+
+    v2.1 §2.1 起 connect 默认走 asyncio（IOCP）。本文件用 ``patch("scanner.ports.scan_port")``
+    模拟探测，而 ``scan_port`` 是**线程池路径**的函数 —— 异步路径不调用它。
+    因此本文件必须把引擎钉在线程池上，才能测到它真正要测的那条路径。
+    （异步路径的 RTT/超时行为由 ``tests/test_async_ports.py`` 覆盖。）
+    """
+    return patch.dict(os.environ, {"IPSCANNER_TCP_ENGINE": "threaded"})
 
 
 class TestAdaptiveTimeout(unittest.TestCase):
@@ -33,7 +46,8 @@ class TestAdaptiveTimeout(unittest.TestCase):
 class TestScanPortsRttCallback(unittest.TestCase):
     def test_connect_mode_invokes_callback_with_positive_elapsed(self):
         cb = MagicMock()
-        with patch("scanner.ports.scan_port", return_value=True):
+        with _force_threaded(), \
+                patch("scanner.ports.scan_port", return_value=True):
             open_ports = scan_ports("127.0.0.1", ports=[80], timeout=0.5,
                                     mode="connect", rtt_callback=cb)
         self.assertEqual(open_ports, [80])
@@ -42,7 +56,8 @@ class TestScanPortsRttCallback(unittest.TestCase):
 
     def test_no_open_port_no_callback(self):
         cb = MagicMock()
-        with patch("scanner.ports.scan_port", return_value=False):
+        with _force_threaded(), \
+                patch("scanner.ports.scan_port", return_value=False):
             open_ports = scan_ports("127.0.0.1", ports=[81, 82], timeout=0.5,
                                     mode="connect", rtt_callback=cb)
         self.assertEqual(open_ports, [])
@@ -87,7 +102,8 @@ class CoarseClockRegressionTest(unittest.TestCase):
 
     def test_rtt_sample_survives_coarse_monotonic_clock(self):
         cb = MagicMock()
-        with patch("scanner.ports.scan_port", return_value=True), \
+        with _force_threaded(), \
+                patch("scanner.ports.scan_port", return_value=True), \
                 patch("scanner.ports.time", _CoarseMonotonicClock()):
             open_ports = scan_ports("127.0.0.1", ports=[80], timeout=0.5,
                                     mode="connect", rtt_callback=cb)

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import concurrent.futures
+import os
 import platform
 import random
 import re
@@ -83,6 +84,64 @@ def shutdown_port_pool() -> None:
         pool, _port_pool = _port_pool, None
     if pool is not None:
         pool.shutdown(wait=False)
+
+
+# ── connect 扫描引擎选择（异步优先，线程池回退） ──────────────────────────
+#
+# v2.1 §2.1：connect 模式的并发探测默认改走 asyncio + IOCP（见
+# scanner/async_ports.py）。异步路径在 Windows 上用**一个线程**挂起上千个
+# connect，实测 2000 个关闭端口比线程池快约 1 倍（2× 提速），且无需任何驱动。
+#
+# 三条回退护栏，确保"换引擎"是**可回滚**的（v2.1 §0 原则 5）：
+#   1. 显式开关：环境变量 ``IPSCANNER_TCP_ENGINE=threaded`` 强制回退线程池；
+#      ``=async`` 强制异步（不可用时抛错，供测试）；未设 = 默认 auto。
+#   2. 平台能力：``ProactorEventLoop`` 不可用（非 Windows 等）→ 自动回退；
+#   3. 运行期失败：异步路径抛任何异常 → 记 warning 后**本次**回退线程池，
+#      并置位进程级标记，后续调用直接走线程池（避免每台设备都重试一次坏引擎）。
+_ENGINE_ENV = "IPSCANNER_TCP_ENGINE"
+
+# 进程级"异步引擎已判失败"标记：一旦异步路径在真实扫描中抛错，就永久回退，
+# 不再反复尝试。用 Event 而非 bool（与 _C._syn_failed 同口径，自带同步）。
+_async_engine_failed = threading.Event()
+
+
+def _async_engine_preference() -> str:
+    """解析引擎偏好：``auto``（默认）/ ``threaded`` / ``async``。"""
+    raw = (os.environ.get(_ENGINE_ENV) or "").strip().lower()
+    if raw in ("threaded", "thread", "sync"):
+        return "threaded"
+    if raw in ("async", "asyncio"):
+        return "async"
+    return "auto"
+
+
+def _use_async_connect() -> bool:
+    """本次 connect 扫描是否走异步路径。"""
+    pref = _async_engine_preference()
+    if pref == "threaded":
+        return False
+    if _async_engine_failed.is_set():
+        return False
+    from . import async_ports as _ap
+    ok, _reason = _ap.requires_proactor()
+    if not ok:
+        return False
+    if pref == "async":
+        return True
+    return True  # auto：能力满足即用
+
+
+def tcp_engine() -> str:
+    """当前 connect 扫描实际会用的引擎：``"async"`` 或 ``"threaded"``。
+
+    供测试与诊断读取（不触发任何探测）。
+    """
+    return "async" if _use_async_connect() else "threaded"
+
+
+def reset_async_engine_state() -> None:
+    """清空"异步引擎已失败"标记（供测试隔离；正常流程不需要）。"""
+    _async_engine_failed.clear()
 
 
 def scan_port(ip: str, port: int, timeout: float = 0.5) -> bool:
@@ -204,7 +263,29 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
         return _scan_ports_syn(ip, ports, timeout)
     if mode == "udp":
         return _scan_ports_udp(ip, ports, timeout)
-    # connect
+    # connect：默认走异步（IOCP），不可用/失败则回退线程池
+    if _use_async_connect():
+        try:
+            from . import async_ports as _ap
+            return _ap.probe_ports_async(
+                ip, ports, timeout=timeout, rtt_callback=rtt_callback,
+            )
+        except Exception as e:  # noqa: BLE001
+            # 异步引擎在真实扫描中失败：记 warning、永久回退线程池、本次立即重试。
+            # 这是"换引擎可回滚"的兜底 —— 绝不让一次引擎故障升级成扫描失败。
+            _async_engine_failed.set()
+            _log.warning("异步 connect 引擎失败，回退线程池并记入进程级回退标记 %s: %s",
+                         ip, e)
+    return _scan_ports_connect_threaded(ip, ports, timeout, rtt_callback)
+
+
+def _scan_ports_connect_threaded(ip: str, ports: List[int], timeout: float,
+                                 rtt_callback=None) -> List[int]:
+    """connect 模式的线程池实现（异步路径的回退，也是历史实现）。
+
+    与异步路径**结果契约完全一致**：返回排序后的开放端口列表，
+    ``rtt_callback`` 仅在端口开放时回调 connect 耗时。
+    """
     open_ports = []
     executor = _get_port_pool()
 

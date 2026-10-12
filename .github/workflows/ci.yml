@@ -231,6 +231,10 @@ jobs:
         #                          （`probe_all_nodes()` 真发包那段，需要
         #                          root/管理员才能在 CI 跑）与平台常量分支，
         #                          不是"没测"。下界 85% 就是把这部分差额明账。）
+        #   scanner/async_ports.py 90%（v2.1 §2.1 新增；2026-10-12 实测 96% ——
+        #                          剩下 3 行是两处**防御性兜底**：loop.close() 抛错
+        #                          的吞异常分支、socket.timeout 的第二超时分支
+        #                          （主超时分支已测）。下界 90% 把这部分明账。）
         # 🔴 `credentials.py` 的 include 必须写 `./credentials.py`（带 `./`）：
         #    coverage 的 --include 是**后缀匹配**，裸 `credentials.py` 会同时
         #    命中 `ui_dialogs/credentials.py`，于是 --fail-under 作用在**两文件
@@ -245,6 +249,7 @@ jobs:
           python -m coverage report --include="report_engine.py" --fail-under=95
           python -m coverage report --include="./credentials.py" --fail-under=95
           python -m coverage report --include="./scanner/ndp.py" --fail-under=85
+          python -m coverage report --include="./scanner/async_ports.py" --fail-under=90
 
   quality-types:
     name: 类型门禁（pyright）

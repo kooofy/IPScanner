@@ -45,12 +45,13 @@ v1.9/v2.0 的四分法是「结构 / 出口 / 显示 / 安全网」。v2.1 沿�
 
 | # | 角色 | 事项 | 优先级 | 工时 | 来源 |
 |---|---|---|---|---|---|
-| 2.1 | **结构** | 异步 connect 扫描（`asyncio` + IOCP，无 Npcap 提速） | **P0（主题项）** | 5–7 天 | `ROADMAP_V2.0.md` §2 `adv #2` |
+| 2.1 | **结构** | 异步 connect 扫描（`asyncio` + IOCP，无 Npcap 提速） ✅ | **P0（主题项）** | 5–7 天 | `ROADMAP_V2.0.md` §2 `adv #2` |
 | 2.2 | **可见性** | 无线切片（Native Wi-Fi API：信道拥塞 / 漫游日志 / SSID↔BSSID↔子网） | **P1** | 6–8 天 | §2 `adv #4` |
 | 2.3 | **安全网** | 离线 CVE + KEV/EPSS 排序（**先立数据快照维护模型，再编码**） | **P1** | 6–9 天 | §2 `adv #9` |
 | 2.4 | **出口** | 扫描节流与礼貌模式（并发上限 + 顺序随机化 + 包速率上限，且档位进导出/审计） | **P1** | 3–5 天 | `PRODUCT_ADVISORY.md` §4.1 |
 
 **合计 20–29 人天 ≈ 5–6 周**（与 v2.0 的 18–27 / 4–6 周同量级）。
+**进度：1/4**（2.1 ✅ 已落地，见 §2.1 落地记录）。
 
 > **为什么 2.1 是主题项**：它是**唯一动扫描引擎核心**的改动，是「不加依赖就提升体感」
 > 的最大单点（建议书 §4.1 原话）。它一落地，**所有**扫描（GUI 单次 / `watch` / CLI）
@@ -87,8 +88,9 @@ scanner/ports.py:93       result = sock.connect_ex((ip, port))
 **做法**：
 
 1. 新增 `scanner/async_ports.py`（**零 PyQt / 零第三方**，与现有 `scanner/` 同规矩）：
-   - `async def probe_ports_async(ip, ports, *, concurrency, timeout) -> Dict[int, bool]`，
-     用 `asyncio.open_connection()`（走 IOCP）替代 `connect_ex`；
+   - `probe_ports_async(ip, ports, *, concurrency, timeout, rtt_callback) -> List[int]`，
+     用 `asyncio.open_connection()`（走 IOCP）替代 `connect_ex`；返回**开放端口列表**
+     （已排序），与 `scan_ports` 同契约；
    - 每个端口一个 task，用 `asyncio.Semaphore(concurrency)` 限流（并发档位复用 2.4 的定义）；
 2. `ports.py` 增加**开关** `_probe_ports_async` vs 现有 `_probe_ports_threaded`，
    默认走异步；**保留线程池路径**，开关一关即可回退（§0 原则 5）。
@@ -107,6 +109,55 @@ scanner/ports.py:93       result = sock.connect_ex((ip, port))
 - **非 Windows 降级可测**：模拟 `ProactorEventLoop` 不可用（monkeypatch），
   断言**自动**落到线程池且结果仍正确 —— 对应 §0 的「新特点」要求；
 - 覆盖率闸门：`scanner/async_ports.py ≥ 85`（照 2.4 的 `ndp.py ≥ 85` 先例）。
+
+#### 落地记录（2.1）
+
+**交付**（2026-10-12）：
+
+- 新增 `scanner/async_ports.py`（~200 行，**零 PyQt / 零第三方 / 零网络**）：
+  - `requires_proactor() -> (bool, str)`：能力探测（本进程内缓存）；
+  - `probe_ports_async(ip, ports, *, concurrency=1024, timeout=0.5, rtt_callback=None)
+    -> List[int]`：`asyncio.open_connection` + `Semaphore` 限流 + `wait_for` 兜超时；
+  - **同步阻塞**接口（内部 `run_until_complete`）——调用方全是同步代码，做成协程要改
+    整条链路（GUI 线程 / CLI / 引擎），收益不抵改动面与风险；
+  - 事件循环进程内单例（`ProactorEventLoop`）+ `shutdown_loop()` 供测试隔离。
+- `scanner/ports.py`：connect 分支改为**异步优先**；新增三条回退护栏（可回滚）：
+  1. 环境变量 `IPSCANNER_TCP_ENGINE=threaded|async`（未设=auto）；
+  2. `ProactorEventLoop` 不可用 → 自动回退；
+  3. 异步路径运行期抛错 → `warning` + **置位进程级 `_async_engine_failed`** + 本次
+     立即回退线程池（后续直接走池，不再重试坏引擎）。
+  新增 `tcp_engine()` / `reset_async_engine_state()` 供测试与诊断。
+- `tests/test_async_ports.py`（30 测试）：对拍、并发上限、RTT、降级、失败回退、开关。
+
+**实测提速**（本机 `127.0.0.1`，2000 个关闭端口，`perf_counter`）：
+
+```
+async : 0.652s
+pool  : 1.299s   →  ratio ≈ 0.50（2× 提速）
+```
+
+**改动既有测试（诚实记账）**：connect 默认引擎从线程池改为异步后，以下测试断言的
+是**旧契约**，已**有意更新**（非删除）——
+
+- `tests/test_port_pool.py`：
+  - `test_scan_ports_connect_uses_shared_pool` → 改名为
+    `..._uses_shared_pool_when_threaded`，加 `IPSCANNER_TCP_ENGINE=threaded`（回退路径旧契约）；
+  - 新增 `test_scan_ports_connect_bypasses_pool_when_async`（**新契约**：默认异步不走池）；
+  - `test_no_inline_pool_creation_on_repeated_calls` 加 `threaded` 环境（否则异步根本不建池）；
+  - 文件 docstring 补「v2.1 §2.1 起 connect 默认异步」的说明。
+- `tests/test_rtt.py`：3 个用例补 `_force_threaded()` —— 它们 `patch("scanner.ports.scan_port")`
+  模拟线程池路径，而异步路径不调用 `scan_port`。异步的 RTT 行为另由
+  `tests/test_async_ports.py::RttCallbackTest` 覆盖。
+
+**验收对照**：功能等价 ✅（对拍 5 用例）；提速 ✅（实测 2×）；回退 ✅（3 用例）；
+非 Windows 降级 ✅（monkeypatch `requires_proactor` → 走池）；覆盖率 **96%**
+（闸门定 **90%**，余量是 2 处防御性兜底：`loop.close()` 吞异常、`socket.timeout`
+第二超时分支）。
+
+**教训**：`asyncio.open_connection` 是**协程函数**，测试里若用 `async def` 打桩会返回
+"协程的协程"；正确做法是打桩成**普通函数返回协程**（`def _fake(...): return _coro()`）。
+另：`writer.close()` 抛错会被外层兜底成"关闭"，而**只有 `wait_closed()` 抛错**才走
+"连接已成功、忽略关闭失败"那条分支 —— 测哪个分支要对准。
 
 ---
 
@@ -325,10 +376,13 @@ v2.1「看得更深 —— 扫得更快、看清无线归属、看清暴露面�
 ├─ 2.3 离线 CVE + KEV/EPSS（先立快照维护模型）          P1  ← 安全网（有产品门）
 └─ 2.4 扫描节流与礼貌模式（并发/随机化/包速率 + 审计）   P1  ← 出口（依赖 2.1）
 
+进度：1/4 完成（**2.1 ✅**；2.2/2.3/2.4 未开工；落地记录见 §2.1）
+
 不做（明确）：HTTP API / Apprise / Prometheus 常驻 / SNMP trap /
              Npcap 捆绑 / monitor 模式站点勘测 —— 依旧因「开端口 / 加依赖 / 装 agent」出局
 
 前置：2.3 必须先答「数据快照谁维护、多久更新、怎么验签」（v2.0 §5 未决项 1）
+      —— ✅ **已答**：见 `docs/CVE_SNAPSHOT_MODEL.md`
 
 工时：20–29 人天 ≈ 5–6 周（2.1 + 2.2 = 可发 v2.1 最低可发）
 

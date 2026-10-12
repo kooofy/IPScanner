@@ -9,8 +9,15 @@
 本测试锁死三条契约：
 1. 池是**单例**（多次取用返回同一对象，不重复新建）；
 2. 池是**有界**的（线程数有硬上限，不随设备/端口数放大）；
-3. ``scan_ports`` / ``_scan_ports_syn`` / ``_scan_ports_udp`` 都走这个共享池，
-   不再各自内联 ``ThreadPoolExecutor(...)``。
+3. ``_scan_ports_syn`` / ``_scan_ports_udp`` 走这个共享池，不再各自内联
+   ``ThreadPoolExecutor(...)``。
+
+⚠ v2.1 §2.1 起，**connect 模式的默认引擎改成了 asyncio（IOCP）**，不再走这个
+线程池（见 ``test_async_ports.py``）。线程池如今是 connect 的**回退路径**，
+以及 SYN/UDP 的主路径。因此本文件对 connect 的断言改为：
+- ``scan_ports`` 在**异步可用**时**不**使用线程池（新契约）；
+- ``scan_ports`` 在**强制回退**（``IPSCANNER_TCP_ENGINE=threaded``）时**仍**使用
+  共享池、且反复调用只建一次池（旧契约在回退路径下继续成立）。
 """
 import concurrent.futures
 import os
@@ -73,12 +80,24 @@ class SharedPoolUsageTest(unittest.TestCase):
         ports.shutdown_port_pool()
         ports._C._syn_failed.clear()
 
-    def test_scan_ports_connect_uses_shared_pool(self):
+    def test_scan_ports_connect_uses_shared_pool_when_threaded(self):
+        """强制回退线程池时，connect 仍复用共享池（回退路径的旧契约）。"""
         real = ports._get_port_pool()
-        with mock.patch.object(ports, "_get_port_pool",
+        with mock.patch.dict(os.environ, {ports._ENGINE_ENV: "threaded"}), \
+             mock.patch.object(ports, "_get_port_pool",
                                return_value=real) as spy:
             ports.scan_ports("127.0.0.1", ports=[80, 81], timeout=0.1)
         spy.assert_called()
+
+    def test_scan_ports_connect_bypasses_pool_when_async(self):
+        """默认（异步）引擎下，connect **不**走线程池（v2.1 §2.1 新契约）。"""
+        with mock.patch.object(ports, "_get_port_pool") as spy, \
+             mock.patch("scanner.async_ports.probe_ports_async",
+                        return_value=[80]) as aspy:
+            got = ports.scan_ports("127.0.0.1", ports=[80, 81], timeout=0.1)
+        aspy.assert_called_once()
+        spy.assert_not_called()
+        self.assertEqual(got, [80])
 
     def test_scan_ports_syn_uses_shared_pool(self):
         real = ports._get_port_pool()
@@ -101,6 +120,8 @@ class SharedPoolUsageTest(unittest.TestCase):
 
         ``ports`` 内部用 ``concurrent.futures.ThreadPoolExecutor(...)`` 构造池，
         因此补丁打在 ``ports`` 模块引用的那个名字上即可（不污染全局 concurrent.futures）。
+
+        ⚠ 必须强制 ``threaded`` 引擎：异步路径（v2.1 §2.1 起的默认）根本不碰池。
         """
         created = []
         real_cls = concurrent.futures.ThreadPoolExecutor
@@ -109,7 +130,8 @@ class SharedPoolUsageTest(unittest.TestCase):
             created.append(1)
             return real_cls(*a, **kw)
 
-        with mock.patch.object(ports.concurrent.futures,
+        with mock.patch.dict(os.environ, {ports._ENGINE_ENV: "threaded"}), \
+             mock.patch.object(ports.concurrent.futures,
                                "ThreadPoolExecutor", counting):
             for _ in range(5):
                 ports.scan_ports("127.0.0.1", ports=[80], timeout=0.05)

@@ -101,6 +101,15 @@ Requires Python 3.10–3.13. See [快速开始](#快速开始) for setup.
 > 实测现实负载（快 LAN / 多数端口关闭）下耗时与旧实现持平或略快，而线程数大幅下降；
 > 只有"整台主机端口全被防火墙丢包"的极端场景才有约 7% 的时延代价。
 > 另外，完整端口扫描已覆盖协议端口（80/443/21/3389）时不再重复探测，省掉一次多余往返。
+>
+> **connect 扫描为什么默认走异步（v2.1 §2.1）**：Windows 上 SYN 半开扫描依赖 Npcap，
+> 而 Npcap 免费授权禁止再分发、不能随包捆绑，于是绝大多数用户的结果只能来自 connect。
+> connect 的真正瓶颈是"同时在飞的 socket 数"，而 OS 线程有实打实的成本（Windows 默认
+> 1MB 栈、上下文切换）。现在 connect 默认改用 **`asyncio` + ProactorEventLoop(IOCP)**：
+> **一个线程**就能挂起上千个 connect，**不需要任何驱动、不需要管理员**。实测本机 2000 个
+> 关闭端口从 1.30s 降到 0.65s（**约 2× 提速**）。三条回退护栏保证可回滚：环境变量
+> `IPSCANNER_TCP_ENGINE=threaded` 强制回到线程池、非 Windows（无 Proactor）自动回退、
+> 运行期出错自动回退并记 warning。SYN/UDP 模式不变（仍走线程池）。
 
 > **被动发现为什么默认「只听」**：它读本机 **ARP 整表**（Windows `arp -a` /
 > Linux `/proc/net/arp` / macOS `arp -an`）并加入 mDNS 组播组，**只收不发** ——
@@ -593,7 +602,8 @@ IPScanner/
 ├─ scanner/                   # 扫描引擎（不依赖 PyQt，可独立复用）
 │  ├─ engine.py               #   扫描编排（ScanContext + 可插拔的 DiscoveryPhase）
 │  ├─ ping.py                 #   ICMP / ARP / 本机网段探测
-│  ├─ ports.py                #   端口探测（connect / syn / udp，进程内单例有界池）
+│  ├─ ports.py                #   端口探测（connect / syn / udp；connect 默认走 async）
+│  ├─ async_ports.py          #   异步 connect 探测（asyncio + IOCP，无 Npcap 提速）
 │  ├─ banners.py              #   扩展服务 banner 探测（Telnet/MySQL/Redis/VNC…）
 │  ├─ http.py                 #   HTTP / HTTPS / UPnP / SSH / FTP banner 与品牌提取
 │  ├─ classify.py             #   设备类型与型号推断
