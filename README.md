@@ -407,6 +407,35 @@ python cli.py scan -r 10.0.0.0/24 --snmpv3-user monitor \
 口令缺失或组合非法（如只给 `--snmpv3-priv` 不给 `--snmpv3-auth`）时，
 会在**扫描开始前**报错并以退出码 `1` 结束，不会白扫一个网段。
 
+**凭据配置档（按网段用不同只读账户）**
+
+真实企业里不同网段属于不同团队、用不同的只读账户；全局单一值要么不合规（全用同一个），
+要么每次手改（易错）。凭据配置档把凭据变成**带作用域的一组对象**，扫描时**按目标 IP
+做最长前缀匹配**自动选档。配置文件默认在数据目录的 `credentials.json`：
+
+```json
+{"profiles": [
+  {"name": "办公网", "scope": ["10.1.0.0/16"],
+   "protocol": "snmp_v2c", "community": "env:OFFICE_SNMP"},
+  {"name": "机房", "scope": ["10.1.2.0/24", "10.2.0.0/16"],
+   "protocol": "snmp_v3", "username": "monitor",
+   "auth_proto": "sha", "auth_key": "env:IDC_AUTH",
+   "priv_proto": "aes", "priv_key": "env:IDC_PRIV"}
+]}
+```
+
+```bash
+export OFFICE_SNMP='办公网团体字'
+python cli.py scan -r 10.1.0.0/16 --credentials credentials.json
+python cli.py credentials --file credentials.json          # 查看 / 校验
+```
+
+- **敏感值走 `env:VAR` 间接引用**，明文绝不落盘（与 SNMPv3 口令同一条原则）。
+- **最长前缀匹配**：`10.1.0.0/16` 与 `10.1.2.0/24` 并存时，`10.1.2.5` 命中更具体的 `/24`。
+- 🔴 **选不到就明确报「该目标无可用凭据」，绝不静默回落 `public`** ——
+  回落会让用户以为"扫过了"，其实用的是猜的团体字。
+- 不指定 `--credentials` 时**行为与历史逐字节一致**（老用户零感知）。
+
 ### 定时扫描与变更告警
 
 资产监控的价值在于"变化发生时被看见"，而不是"有人想起来时才扫一次"。
@@ -576,6 +605,7 @@ IPScanner/
 ├─ change_detector.py         # 资产变更检测
 ├─ device_fingerprint.py      # 随机化 MAC 识别：设备指纹（主机名/厂商/型号/序列号）配对
 ├─ notifier.py                # 变更告警渠道（Webhook / 企业微信 / 钉钉 / 邮件，零依赖）
+├─ credentials.py            # 凭据配置档：按网段选 SNMP/WMI 凭据（最长前缀匹配，零依赖）
 ├─ alert_policy.py            # 告警抑制：维护窗口 / 静音 / 通知去重（状态落盘，零依赖）
 ├─ scheduler.py               # 定时扫描调度（schtasks / crontab，命令构造为纯函数）
 ├─ history_store.py           # 历史快照存储（SQLite：快照 / 设备 / 交换机端口映射）

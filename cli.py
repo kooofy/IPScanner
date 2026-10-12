@@ -436,6 +436,21 @@ def _run_scan(args):
         log(f"SNMPv3 已启用：用户 {snmp_v3_user.username}，"
             f"安全级别 {snmp_v3_user.security_level()}")
 
+    # 凭据档册（v2.0 §2.3）：按目标 IP 选 SNMP 凭据。与上面的全局 SNMPv3
+    # 是"并存、档册优先"的关系 —— 档册覆盖到的目标用档册的凭据，没配档册时
+    # 完全走历史路径。档册启用时同样要把 SNMP 加进协议列表，否则引擎不做识别。
+    credential_book, cred_error = _resolve_credential_book(args)
+    if cred_error:
+        log(f"错误: {cred_error}")
+        return None, None
+    if credential_book is not None:
+        from scanner.constants import SVC_SNMP as _SVC
+        items = list(protocols or [])
+        if not any(p.upper() == _SVC for p in items):
+            items.append(_SVC)
+        protocols = items
+        log(f"凭据档已启用：{len(credential_book)} 档（按目标网段选择）")
+
     # 与 GUI/引擎一致：先只计数，超限时在构建任何列表之前就拒绝（避免 OOM）。
     # 放在这里而不是等引擎返回空列表，是为了给出精确的原因和干净的退出码。
     total_ips = 0
@@ -484,6 +499,7 @@ def _run_scan(args):
             progress_callback=_make_progress(not getattr(args, "quiet", False)),
             library_lookup=_build_library_lookup(getattr(args, "library", False)),
             snmp_v3_user=snmp_v3_user,
+            credential_book=credential_book,
         )
     except KeyboardInterrupt:
         scanner.stop()
@@ -1256,6 +1272,101 @@ def cmd_report(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── 凭据配置档 ──────────────────────────
+
+def cmd_credentials(args) -> int:
+    """列出 / 校验凭据配置档（v2.0 §2.3）。
+
+    **绝不回显明文口令**：只显示档名、作用域、协议，以及敏感值是否
+    以 ``env:VAR`` 引用（引用显示为 ``env:VAR``，且只在 ``--format json``
+    里附 ``resolved: true/false`` 表"这个变量当前解析得出值"）。
+    直接写进配置的明文**不打印**（避免终端日志泄露）。
+    """
+    from credentials import (default_config_path, load_profiles,
+                             PROTO_SNMP_V1, PROTO_SNMP_V2C, PROTO_SNMP_V3,
+                             PROTO_WMI, protocol_label)
+
+    path = args.file or default_config_path()
+    profiles = load_profiles(path)
+    if not profiles:
+        log(f"错误: 凭据文件 {path!r} 不存在或没有任何凭据档")
+        return EXIT_ERROR
+    if args.proto:
+        profiles = [c for c in profiles if c.protocol == args.proto]
+        if not profiles:
+            log(f"没有 {protocol_label(args.proto)} 协议的凭据档")
+            return EXIT_ERROR
+
+    # 敏感字段名（按协议）—— 用于"是否 env: 引用 / 能否解析"的判定。
+    # SNMP v1/v2c 只有 community；v3 有 auth_key/priv_key；WMI 有 password。
+    def _secrets_of(cred):
+        if cred.protocol in (PROTO_SNMP_V1, PROTO_SNMP_V2C):
+            return [("community", cred.community)]
+        if cred.protocol == PROTO_SNMP_V3:
+            return [("auth_key", cred.auth_key), ("priv_key", cred.priv_key)]
+        if cred.protocol == PROTO_WMI:
+            return [("password", cred.password)]
+        return []
+
+    def _secret_state(raw: str):
+        """返回 (是否 env: 引用, 是否有值)。**不返回明文**。"""
+        if not raw:
+            return False, False
+        if isinstance(raw, str) and raw.startswith("env:"):
+            from notifier import resolve_secret
+            return True, bool(resolve_secret(raw))
+        return False, True   # 明文：有值（但不打印具体内容）
+
+    if args.format == "json":
+        import json as _json
+        payload = {"path": path, "profiles": []}
+        for cred in profiles:
+            item = {
+                "name": cred.name,
+                "scope": list(cred.scope),
+                "protocol": cred.protocol,
+                "username": cred.username,
+                "domain": cred.domain,
+                "auth_proto": cred.auth_proto,
+                "priv_proto": cred.priv_proto,
+            }
+            for field, raw in _secrets_of(cred):
+                is_env, has_value = _secret_state(raw)
+                item[field] = {"env": is_env, "resolved": has_value}
+            payload["profiles"].append(item)
+        text = _json.dumps(payload, ensure_ascii=False, indent=2)
+    else:
+        lines = [f"凭据文件: {path}", f"共 {len(profiles)} 档"]
+        for cred in profiles:
+            lines.append("")
+            lines.append(f"  ● {cred.name or '(未命名)'}  [{protocol_label(cred.protocol)}]")
+            lines.append(f"    作用域: {', '.join(cred.scope) or '(未配)'}")
+            if cred.username:
+                who = cred.username
+                if cred.domain:
+                    who = f"{cred.domain}\\{who}"
+                lines.append(f"    账户: {who}")
+            for field, raw in _secrets_of(cred):
+                is_env, has_value = _secret_state(raw)
+                if not raw:
+                    lines.append(f"    {field}: (未配)")
+                elif is_env:
+                    state = "已解析" if has_value else "环境变量未设置/为空"
+                    # 显示 env:VAR 引用本身（变量名不敏感），但不显示值
+                    lines.append(f"    {field}: {raw}（{state}）")
+                else:
+                    lines.append(f"    {field}: ****（明文，建议改用 env: 引用）")
+        text = "\n".join(lines)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        log(f"已写出凭据清单 → {args.output}")
+    else:
+        sys.stdout.write(text + "\n")
+    return EXIT_OK
+
+
 # ────────────────────────── Nmap XML 读入 ──────────────────────────
 
 def cmd_import(args) -> int:
@@ -1830,6 +1941,35 @@ def _resolve_snmp_v3(args):
     return user, None
 
 
+def _resolve_credential_book(args):
+    """按 ``--credentials`` 载入凭据档册（v2.0 §2.3）。
+
+    返回 ``(book, error)``：
+      * ``(None, None)``      —— 未指定 ``--credentials``（行为与历史一致）；
+      * ``(None, "原因")``    —— 文件读不到 / 一档都没有（调用方报错退 1）；
+      * ``(book, None)``      —— 载入成功。
+
+    显式指定了文件却读不到是**硬错误**：用户期望用它，静默降级成"无凭据"
+    会让每台设备都报"无可用凭据"，根因被藏起来。
+    """
+    path = getattr(args, "credentials", None)
+    if not path:
+        return None, None
+    from credentials import CredentialBook, load_profiles
+    profiles = load_profiles(path)
+    if not profiles:
+        return None, f"凭据文件 {path!r} 不存在或没有任何凭据档"
+    return CredentialBook(profiles), None
+
+
+def _add_credentials_arg(parser):
+    """给会发起扫描的子命令挂上 ``--credentials``（凭据档册路径）。"""
+    parser.add_argument(
+        "--credentials", metavar="文件",
+        help="凭据配置档（JSON，按网段选 SNMP/WMI 凭据；"
+             "默认数据目录下的 credentials.json）")
+
+
 def _add_snmp_v3_args(parser):
     """给会发起扫描的子命令（scan / diff）挂上 SNMPv3 参数。
 
@@ -2051,6 +2191,24 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
     rp.set_defaults(func=cmd_report)
 
+    # ── credentials ──
+    crp = sub.add_parser("credentials",
+                         help="查看/校验凭据配置档（按网段选 SNMP 凭据）",
+                         parents=[common],
+                         description="列出凭据配置档（JSON），或校验某一档的 "
+                                     "env: 引用是否已解析。凭据档把「按网段用不同"
+                                     "只读账户」变成可配置的一组对象；"
+                                     "敏感值写成 env:VAR_NAME，明文不落盘。"
+                                     "配置文件默认在数据目录的 credentials.json。")
+    crp.add_argument("--file", metavar="文件", default=None,
+                     help="凭据文件路径（省略则用数据目录下的 credentials.json）")
+    crp.add_argument("--proto", choices="snmp_v1 snmp_v2c snmp_v3 wmi".split(),
+                     default=None, help="只列该协议的档")
+    crp.add_argument("-f", "--format", choices=("table", "json"), default="table",
+                     help="输出格式（默认 table）")
+    crp.add_argument("-o", "--output", metavar="文件", help="写到文件（省略则写 stdout）")
+    crp.set_defaults(func=cmd_credentials)
+
     # ── import ──
     ip_ = sub.add_parser("import", help="读入外部 Nmap XML 并入资产表",
                          parents=[common],
@@ -2200,6 +2358,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 放在最后统一挂载，避免两处 add_argument 各写一遍、日后再漂移。
     for _sub in (sp, dp, tp):
         _add_snmp_v3_args(_sub)
+        _add_credentials_arg(_sub)
 
     return p
 

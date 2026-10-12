@@ -104,14 +104,41 @@ def _probe_extra_services(result: ScanResult, ip: str, timeout: float) -> None:
         })
 
 
-def _identify_snmp(ip: str, snmp_v3_user=None):
+def _identify_snmp(ip: str, snmp_v3_user=None, credential_book=None):
     """SNMP 设备识别，返回 (info, error_message)。
 
     - 未配置 SNMPv3 用户 → 走 v2c 团体字探测（历史行为）；
     - 配置了 v3 用户 → **优先 v3**（明文团体字本就不该再用）。
       只有"目标根本不回话"才回退 v2c；凭据/配置类错误直接上报 ——
       回退会把"密码写错了"伪装成"这台设备不支持 SNMP"，更难排查。
+
+    ``credential_book``（v2.0 §2.3，可选）：传了 ``CredentialBook`` 时，
+    先按目标 IP 选档：
+      * 命中 ``snmp_v3`` 档 → 用该档的 v3 用户（优先 v3，同上面口径）；
+      * 命中 ``snmp_v1/v2c`` 档 → 用该档的**专属团体字**探测（不再撞全局默认）；
+      * **没有档覆盖该目标** → 🔴 **不回落 ``public``**，直接报
+        "该目标无可用凭据"并返回 ``(None, error)``。静默回落会让用户以为
+        扫过了，其实用的是猜的团体字（这正是 §2.3 要消灭的行为）。
+    ``credential_book=None``（默认）时行为与历史**逐字节一致**。
     """
+    if credential_book is not None and credential_book.has_any():
+        cred, reason = credential_book.for_target(ip)
+        if cred is None:
+            # 未覆盖：明确上报，绝不拿猜的团体字硬撞
+            return None, reason
+        v3_user = cred.to_snmp_v3_user()
+        if v3_user is not None:
+            snmp_v3_user = v3_user
+        else:
+            # v1/v2c 档：用该目标专属团体字（env: 已解析）
+            community = cred.resolved_community()
+            if not community:
+                return None, f"凭据档 {cred.name!r} 的团体字为空"
+            return snmp_get_system(ip, communities=[community]), None
+    elif credential_book is not None:
+        # 配了档册但一档都没有：同上，明确报"无可用凭据"，不回落 public
+        return None, "没有配置任何凭据档"
+
     if snmp_v3_user is None:
         return snmp_get_system(ip), None
 
@@ -245,7 +272,7 @@ class ScanContext:
                  protocols=None, mdns_discovery: bool = True, ports=None,
                  progress_callback=None, result_callback=None,
                  phase_callback=None,
-                 library_lookup=None, snmp_v3_user=None):
+                 library_lookup=None, snmp_v3_user=None, credential_book=None):
         self.scanner = scanner
         self.all_ips = list(all_ips)
         self.total = len(self.all_ips)
@@ -271,6 +298,8 @@ class ScanContext:
         self.phase_callback = phase_callback
         self.library_lookup = library_lookup
         self.snmp_v3_user = snmp_v3_user
+        # v2.0 §2.3：按目标 IP 选凭据（None = 不启用，行为与历史一致）
+        self.credential_book = credential_book
 
         self.proto_port_map, self.snmp_enabled = _build_proto_map(protocols)
 
@@ -455,7 +484,8 @@ def _enrich_device(ctx: ScanContext, ip: str) -> None:
     # SNMP 设备识别 (交换机/AP/打印机等)：取 sysDescr/sysName，
     # 作为主机名兜底，并把 "SNMP" 加入服务列表
     if ctx.snmp_enabled:
-        snmp_info, _snmp_error = _identify_snmp(ip, ctx.snmp_v3_user)
+        snmp_info, _snmp_error = _identify_snmp(
+            ip, ctx.snmp_v3_user, ctx.credential_book)
         if snmp_info:
             result.snmp_sys_name = snmp_info.get("sys_name", "")
             result.snmp_sys_descr = snmp_info.get("sys_descr", "")
@@ -744,7 +774,8 @@ class NetworkScanner:
              mdns_discovery: bool = True, ports: List[int] = None,
              progress_callback=None, result_callback=None,
              phase_callback=None,
-             library_lookup=None, snmp_v3_user=None) -> List[ScanResult]:
+             library_lookup=None, snmp_v3_user=None,
+             credential_book=None) -> List[ScanResult]:
         """
         扫描多个 IP 范围。
 
@@ -772,6 +803,9 @@ class NetworkScanner:
             snmp_v3_user: SNMPv3 用户参数（scanner.snmp_v3.SnmpV3User）。
                 为 None 时走 v2c 团体字探测；传入时**优先 v3**，仅在目标不响应
                 时才回退 v2c。凭据/配置类错误不回退，直接留 warning 便于排查。
+            credential_book: 可选的 ``credentials.CredentialBook``（v2.0 §2.3）。
+                传入时按目标 IP 选凭据档；未覆盖的目标**明确报无可用凭据**，
+                绝不回落 public。为 None 时行为与历史一致。
 
         Returns:
             ScanResult 列表
@@ -805,6 +839,7 @@ class NetworkScanner:
             phase_callback=phase_callback,
             library_lookup=library_lookup,
             snmp_v3_user=snmp_v3_user,
+            credential_book=credential_book,
         )
 
         try:

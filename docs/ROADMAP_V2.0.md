@@ -351,6 +351,65 @@ v1.9 的四分法是「结构 / 出口 / 显示 / 安全网」。v2.0 沿用同�
   （扫描配置文件文本断言）；
 - 单档配置下行为与现状**逐字节一致**（老用户零感知）。
 
+**落地记录（2026-10-12，一次落地）**：
+
+用户裁定三项：与现有全局凭据（`cred_store.py` 里的单个 WMI 账户 / SNMPv3 用户）
+**并存、配置档优先**；配置落 `data_dir()/credentials.json`（JSON + `env:VAR`）；
+本项**只做逻辑层 + CLI**，GUI 编辑留后续。
+
+**⚠ 现状与开工前的路线图描述有出入**（已按代码纠正）：路线图说"没有
+`credentials.py` 之类的模块"，实际**已有** `scanner/cred_store.py`（DPAPI 加密
+持久化的**单个** WMI 凭据 + **单个** SNMPv3 用户）与 `ui_dialogs/credentials.py`
+（采集对话框）。路线图的核心批评仍然成立：**没有按目标选择凭据的层**，
+SNMP v1/v2c 团体字是全局候选列表（`["public","private",""]`），无作用域。
+所以本项是"**新增选择层**"，不是"从零建凭据体系"。
+
+**实现（文件级）**：
+
+- **新增 `credentials.py`**（零 PyQt / 零三方 / 零网络）：
+  - `Credential` = `{name, scope(CIDR 列表), protocol, community/username/…}`；
+    `match_prefixlen(addr)` 返回**最长**匹配前缀长度（版本不同 → 不匹配）。
+  - `select_for_target(ip, profiles, protocol=None)` —— **最长前缀匹配**选档，
+    返回 `(cred, None)` 或 `(None, 原因)`。🔴 **绝不回落 `public`**：
+    无覆盖时明确返回"没有凭据档覆盖该目标"。
+  - `CredentialBook` —— 一次扫描用的凭据册（构造时加载一次，热路径只做内存匹配），
+    `communities_for(ip)` 供 v2c 探测取该目标**专属**团体字。
+  - 配置读写 `load_profiles()` / `save_profiles()`：文件缺失/损坏/结构不对
+    → 返回 `[]`（不抛），与 `notifier.load_config` 同口径。
+  - `env:VAR` 复用 `notifier.resolve_secret()`（同一条既有约定），
+    明文绝不落盘。
+- **扫描路径接线**（`scanner/engine.py`）：`_identify_snmp(ip, snmp_v3_user,
+  credential_book=None)` 新增可选参数；`ScanContext`/`scan()` 透传。
+  档册命中 v3 档 → 用它建 `SnmpV3User`；命中 v1/v2c 档 → 用专属团体字；
+  🔴 **无覆盖 → 返回 `(None, 原因)`，不发起任何 SNMP 请求**。
+  `credential_book=None`（默认）时行为**逐字节不变**。
+- **CLI**：`scan`/`diff`/`topology` 挂 `--credentials`；新增 `credentials`
+  子命令（`--file` / `--proto` / `-f table|json` / `-o`）列出与校验档。
+  ⚠ **绝不回显明文口令**：只显示档名/作用域/协议，敏感值显示为
+  `env:VAR（已解析/环境变量未设置）`；直接写进配置的明文**不打印**，只标
+  `****（明文，建议改用 env: 引用）`。
+
+**验收（实测，50 个凭据测试）**：
+
+- **最长前缀匹配**：`10.1.0.0/16` 与 `10.1.2.0/24` 并存，`10.1.2.5` 命中 `/24`；
+  与档顺序无关（选的是前缀长度，不是"第一个命中"）。
+- **无匹配不回落**：引擎层断言"档册存在但未覆盖 → `(None, 原因)` 且
+  `snmp_get_system` **未被调用**"（用 mock 钉死）。
+- **`env:VAR`**：能解析；写盘后文件文本**不含**真实口令（文本断言），
+  引用原样保留；缺失变量解析为空。
+- **逐字节一致**：无档册时 `_identify_snmp` 的签名默认仍是 `None`，
+  `snmp_get_system(ip)` 调用方式与历史完全相同（mock 钉死参数）。
+- 另覆盖：坏 CIDR 跳过并留痕、配置损坏/结构错返回 `[]`、协议过滤、
+  多网段作用域、IPv4 地址 vs IPv6 网段不匹配、`credentials` 子命令
+  三种格式与退出码。
+- 全量 **1952 tests OK**（基线 1902 → +50）；`ruff check .` 通过；
+  **门禁**：新增 `credentials.py` **100%**（登记下界 95%）、
+  `history_store.py` 96%、`db_util.py` 93%、`report_engine.py` 100%；
+  pyright **0 error**（include 已加 `credentials.py`，签名用 `Optional[str]`）。
+
+**账目**：v2.0 进度 **2.1 ✅ / 2.2 ✅ / 2.3 ✅ / 2.4 待**（3/4）。
+**2.1 + 2.2 已达「可发 v2.0」里程碑；2.3 是「能进真实环境」的门槛，补齐即更稳。**
+
 ---
 
 ### 2.4 IPv6 可见性（只做 NDP + `ff02::1` 挂靠）
@@ -462,7 +521,7 @@ v2.0「让台账认得出一台设备，并且让别人用得上」
 ├─ 2.3 凭据配置档（按网段/组的只读账户）           P1  ← 能进真实环境
 └─ 2.4 IPv6 可见性（NDP + ff02::1，只挂靠不扫描）  P1  ← 看得见 IPv6-only 设备
 
-进度：2/4 完成（2.1 ✅、2.2 ✅ —— **已达「可发 v2.0」里程碑**；落地记录见 §3）；下一步 2.3 / 2.4
+进度：3/4 完成（2.1 ✅、2.2 ✅、2.3 ✅；落地记录见 §3）；下一步 2.4
 
 不做（明确）：PySide6 迁移 / REST API / Apprise / Prometheus 常驻 /
              多站点中心库 / MCP 查询层 —— 全部因「开端口 / 加依赖 / 装 agent」出局

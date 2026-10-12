@@ -301,6 +301,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         )
         from main_window_tree import _CHANGE_LABEL
         from scanner import constants as _sc
+        from credentials import _PROTOCOL_TEXT
         from ui_msg import STANDARD_BUTTON_TEXT
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
@@ -322,6 +323,10 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
                 list(_sc._LOCATE_REASON_HINT.values()),
             # design_tokens 的行高档位显示名（同上：字面量表）。
             "design_tokens._DENSITY_TEXT": list(_DENSITY_TEXT.values()),
+            # credentials 的协议显示名表（同上：字面量表，AST 收集不到）。
+            # 当前四个值都非中文（SNMP v1/v2c/v3、WMI），所以本测试不会因它变红；
+            # 登记它是为了**将来**若有人把某协议显示名改成中文时能被拦住。
+            "credentials._PROTOCOL_TEXT": list(_PROTOCOL_TEXT.values()),
             # risk_rules 的风险等级 / 理由显示名（同上：字面量表，AST 收集不到）。
             "risk_rules._RISK_LEVEL_TEXT": list(_RISK_LEVEL_TEXT.values()),
             "risk_rules._REASON_TEXT": list(_RISK_REASON_TEXT.values()),
