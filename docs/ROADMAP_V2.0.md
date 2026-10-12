@@ -133,6 +133,73 @@ v1.9 的四分法是「结构 / 出口 / 显示 / 安全网」。v2.0 沿用同�
 **风险与回滚**：动主键 = 动 `assets` 的不变量。必须走 1.1 的同一套
 「迁移 + 备份 + 双写」流程，且 `SCHEMA_VERSION` +1。
 
+**落地记录（2026-10-12，✅ 完成）**：
+
+⚠ 落地时**改了两处原方案**，都在下面写明 —— 其中第一处是**设计纠正**（不改就是错的）。
+
+1. **不新开键形态（原方案说 `fp:<哈希>` 或原 MAC 键，二者皆可 —— 改成只锚 MAC）**。
+   原方案第 2 条写「找到就复用它的键（`fp:<哈希>` 或原 MAC 键），找不到才新建」。
+   实测过程中发现：**首见就发 `fp:` 键会制造"同一个东西两个键"** ——
+   指纹是**间歇可得**的（NetBIOS 关着、mDNS 没响那天就取不到），那一天同一台设备
+   会落到 MAC 键上 ⇒ 台账凭空多一台（正是本项要消灭的症状，反而被放大）。
+   正确规则：**键永远锚在 MAC 上；指纹只用来「找回」已有资产**。
+   `fp:` 键只在**完全没有 MAC** 且指纹够强时才产生（罕见兜底）。
+   ⇒ 实现为 `resolve_identity()`：非 LAA → MAC 键不变；LAA → 按指纹找**已有**键，
+   找到复用、找不到就用**本次的 MAC**（与旧行为一致）。
+2. **门槛与 `same_device()` 严格对齐（原方案未写）**。指纹键只用**身份锚点**
+   （`host=`/`serial=` 强，`model=` 且 ≥2 token 中）—— 只 `vendor=` 相同**不给键**。
+   否则两台苹果设备会得到同一个 `fp:` 键 = **错认**（比漏认严重）。
+
+**实现（文件级）**：
+
+- **迁移 v5**（`history_store._SQL_V5`）：`assets` 与 `devices` **各加一列**
+  `fingerprint TEXT DEFAULT ''` + `assets` 上建 `idx_assets_fingerprint` 索引。
+  ⚠ 两处都加：`assets.fingerprint` 是「这台设备的指纹是什么」（下次认回来的钩子），
+  `devices.fingerprint` 是观测维度留痕（否则时间线口径与资产表分裂）。
+  加列是 O(1) 元数据操作，不重建表、不重写数据。
+- **`db_util.infer_legacy_version()` 支持列标记**：`_LEGACY_TABLES` 现在接受
+  `(表名, 版本)` 与 `(表名, 列名, 版本)` 两种形态；新增 `db_util._column_exists()`。
+  **这一条是必需的、不是优化**：v5 **只加列不建表**，表探测推不出 v5 ⇒
+  `ALTER TABLE` 被重放 ⇒ `duplicate column name` ⇒ 库直接打不开。
+  `db_util.apply_migrations` 的 docstring 早有此警告，本次是第一个真踩到的迁移。
+- **`history_store.resolve_identity(conn, dev, pending=None)`**：身份决策的**唯一**
+  入口，`save_snapshot()`（在线写入）与 `_backfill_assets()`（迁移回填）**都调它** ——
+  两条路径的口径不可能漂移。
+- **`fingerprint_key(dev)` / `_fingerprint_is_anchor(tokens)` / `is_fingerprint_key(key)`**：
+  纯函数。键 = `"fp:" + sha1("|".join(sorted(tokens)))` —— 用哈希而非指纹原文，
+  避免长指纹撑爆索引、且序列号不明文进主键列。
+- **`_ASSET_UPSERT` 扩展**：`fingerprint` 走「**非空才覆盖**」——
+  一次拿不到指纹的观测不该把已记住的指纹抹掉（否则设备下次换 MAC 再也认不回来）。
+- **`pending` 参数（批次内可见性）**：`save_snapshot()` 把 `asset_rows` 攒到最后
+  一次 UPSERT，**同一份快照里后出现的行读 DB 看不到前一行**；回填同样按批 flush。
+  用 `pending_fp = {fingerprint: identity_key}` 字典把「本次事务内尚未落库的指纹」
+  挂进去，`resolve_identity()` 先查它再查 DB ⇒ 同一次扫描里同一台设备的两个随机
+  MAC 也收敛成一台。
+- **可解释性**：`list_assets()` / `get_asset()` 每行多返回 `fingerprint` 字段（空串 =
+  按 MAC/IP 认的）；CLI `assets` 的**表格**多一列「身份来源」=「指纹」/「MAC/IP」。
+  ⚠ 判据**不是**「有没有指纹」（几乎每台有主机名的设备都登记了指纹），
+  而是「**这把键是不是只能靠指纹得到**」（把该行 MAC/IP 丢回 `identity_key()`
+  比对）。CSV/JSON **不加**展示列（要机器可读用 `-f json`，那里本就有原始哈希）。
+
+**验收（实测）**：
+
+- 新增 `tests/test_history_store.py::FingerprintIdentityTest`（14 例）+
+  `FingerprintKeyUnitTest`（6 例），共 **20 例**；核心断言
+  `test_randomized_mac_change_collapses_to_one_asset` **通过**：
+  换 LAA MAC、主机名不变 → 资产 **1 行**、`seen_count` 2、`first_seen` 保持首次。
+- 防错认：两台不同设备（LAA + 不同主机名）→ **2 行**；只有 `vendor=` 相同 → **2 行**；
+  只有型号相同（1 token）→ **2 行**。
+- 老行为零影响：非 LAA 普通 MAC 换 MAC → **2 行**（不被指纹合并）；
+  键锚定首见 MAC（`test_key_stays_anchored_to_the_first_mac`）。
+- **老库升级**（手造 v4 形态、有 `assets` 无 `fingerprint`）→ 升到 v5
+  **不报 `duplicate column name`**、能回填、不重复。
+- 全量 **1853 tests OK**（基线 1833 → +20）；`ruff check .` 通过。
+- **门禁**：`coverage --include=history_store.py --fail-under=95` → **96%** 通过；
+  `--include=db_util.py --fail-under=90` → **93%** 通过。
+
+**账目**：v2.0 进度 **2.1 ✅ / 2.2 待 / 2.3 待 / 2.4 待**（1/4）。
+本项是 v2.0 主题项（地基），2.2 报表引擎依赖它的读数口径。
+
 ---
 
 ### 2.2 报表引擎（模板可编辑）+ 定时报表投递
@@ -333,7 +400,7 @@ v2.0「让台账认得出一台设备，并且让别人用得上」
 ├─ 2.3 凭据配置档（按网段/组的只读账户）           P1  ← 能进真实环境
 └─ 2.4 IPv6 可见性（NDP + ff02::1，只挂靠不扫描）  P1  ← 看得见 IPv6-only 设备
 
-进度：0/4 开工（本文为草案，待用户选定起点）
+进度：1/4 完成（2.1 ✅；落地记录见 §3 2.1）；下一步 2.2
 
 不做（明确）：PySide6 迁移 / REST API / Apprise / Prometheus 常驻 /
              多站点中心库 / MCP 查询层 —— 全部因「开端口 / 加依赖 / 装 agent」出局

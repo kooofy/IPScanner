@@ -57,6 +57,18 @@ def _table_exists(conn, name) -> bool:
     return row is not None
 
 
+def _column_exists(conn, table, column) -> bool:
+    """该表是否已有这一列。表不存在时返回 False（不抛）。
+
+    `PRAGMA table_info` 不接受参数绑定，只能拼字符串 —— 表名/列名都来自本模块
+    调用方的常量（`_LEGACY_MARKERS`），不是外部输入。
+    """
+    if not _table_exists(conn, table):
+        return False
+    rows = conn.execute("PRAGMA table_info(%s)" % table).fetchall()
+    return any(r[1] == column for r in rows)
+
+
 def infer_legacy_version(conn, legacy_tables) -> int:
     """给"引入 `user_version` 之前建的库"推断它相当于哪一版。
 
@@ -66,11 +78,27 @@ def infer_legacy_version(conn, legacy_tables) -> int:
     `security_findings`）—— 写死常量会让"只建到一半的老库"被误判成最新版，
     于是缺的那几张表永远不会被补上。
 
-    没有任何已知表 → 返回 0（新库，走完整迁移链）。
+    **`legacy_tables` 的每一项可以是两种形态**：
+      * ``(表名, 版本号)`` —— 只看「这张表在不在」；
+      * ``(表名, 列名, 版本号)`` —— 看「这张表有没有这一列」。
+
+    第二种是为**只加列、不建表**的迁移准备的（v5 给 `assets`/`devices` 加
+    `fingerprint`）。没有它的话，这类迁移推不出自己的版本，会被 `apply_migrations()`
+    原样重放 —— 而 `ALTER TABLE ADD COLUMN` 重放会直接报
+    `duplicate column name`，库就打不开了。表探测与列探测用**同一套**「取最大版本」
+    规则，所以两种形态可以混用。
+
+    没有任何已知标记 → 返回 0（新库，走完整迁移链）。
     """
     version = 0
-    for table, introduced in legacy_tables:
-        if introduced > version and _table_exists(conn, table):
+    for marker in legacy_tables:
+        if len(marker) == 2:
+            table, introduced = marker
+            present = _table_exists(conn, table)
+        else:
+            table, column, introduced = marker
+            present = _column_exists(conn, table, column)
+        if present and introduced > version:
             version = introduced
     return version
 

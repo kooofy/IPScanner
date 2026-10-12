@@ -11,6 +11,7 @@
 纯标准库 + sqlite3，无 PyQt 依赖，便于单元测试。
 """
 import contextlib
+import hashlib
 import ipaddress
 import json
 import os
@@ -21,6 +22,7 @@ from app_paths import data_dir
 from app_logging import get_logger
 
 import db_util
+import device_fingerprint
 
 _log = get_logger(__name__)
 
@@ -198,17 +200,38 @@ _SQL_V4 = """
 #: 引入资产表的那一版迁移。`_init_db()` 靠它判断"要不要回填"。
 ASSETS_MIGRATION_VERSION = 4
 
+# ── v5：指纹降级身份（v2.0 §2.1）─────────────────────────────────────────
+#
+# 为什么两处都要加 `fingerprint` 列：
+#   * `assets.fingerprint` —— 记住「这台设备的指纹是什么」，下次换个随机 MAC
+#     再出现时靠它认回来。这是本项的关键：**没有这一列，降级身份无处落地**。
+#   * `devices.fingerprint` —— 观测维度也要留痕：否则 `assets` 认得回、
+#     `devices` 对不上，时间线（按 devices 读）会与资产表口径分裂。
+#
+# 两列都**可空**（老库/无指纹设备留空串），加列不重建表 —— SQLite 的
+# `ALTER TABLE ADD COLUMN` 是 O(1) 的元数据操作，不会重写百万行。
+_SQL_V5 = """
+        ALTER TABLE assets ADD COLUMN fingerprint TEXT DEFAULT '';
+        CREATE INDEX idx_assets_fingerprint ON assets(fingerprint);
+        ALTER TABLE devices ADD COLUMN fingerprint TEXT DEFAULT '';
+"""
+
 MIGRATIONS = [
     (1, _SQL_V1, "snapshots / devices + 三个索引"),
     (2, _SQL_V2, "switch_map / port_map + 三个索引"),
     (3, _SQL_V3, "security_findings + 两个索引"),
     (4, _SQL_V4, "assets + devices.identity_key（资产表）"),
+    (5, _SQL_V5, "assets/devices.fingerprint（指纹降级身份）"),
 ]
 
 #: 本程序支持的 schema 版本（= 迁移链最后一版）。
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 #: 识别"引入 user_version 之前建的库"：每张表属于引入它的那一版。
+#:
+#: 形态二选一：``(表名, 版本号)`` 或 ``(表名, 列名, 版本号)``。
+#: v5 **只加列不建表**，所以必须用列标记 —— 否则推断不出 v5，`ALTER TABLE`
+#: 会被重放而报 `duplicate column name`（详见 `db_util.infer_legacy_version`）。
 _LEGACY_TABLES = (
     ("snapshots", 1),
     ("devices", 1),
@@ -216,6 +239,7 @@ _LEGACY_TABLES = (
     ("port_map", 2),
     ("security_findings", 3),
     ("assets", 4),
+    ("assets", "fingerprint", 5),
 )
 
 
@@ -240,6 +264,66 @@ def identity_key(mac="", ip="") -> str:
     return ("ip:" + _ip) if _ip else ""
 
 
+# ── 指纹降级身份（v2.0 §2.1）────────────────────────────────────────────
+#
+# 问题：`identity_key()` 只认 MAC。现代手机/Windows 默认开「私有 Wi-Fi 地址」，
+# 同一台设备每次接入换一个**随机 MAC**（LAA）—— 只按 MAC 认设备的台账会把
+# 它反复报成「新设备」，资产只增不减、变更告警全是假阳性。
+#
+# 做法：**只对 LAA（疑似随机）MAC 启用指纹降级**，非 LAA 的普通 MAC 走原路径
+# （行为与本项落地前逐字节一致 —— 这是老用户零影响的保证）。
+#
+# 三步：
+#   1. LAA MAC 且指纹够强 → 在已有 `assets` 里按指纹找；找到就**复用它的键**
+#      （不新增资产），找不到才新建并把这个指纹登记上去；
+#   2. 非 LAA MAC → 照旧 `identity_key()`（MAC 优先）；
+#   3. 指纹信号不足（只有 vendor= 之类）→ **不给指纹**，退回 MAC 身份
+#      （宁可漏认，不可错认 —— 见 device_fingerprint 模块 docstring）。
+#
+# ⚠ 指纹键用 `fp:<hash>` 而不是指纹原文：指纹可能很长（主机名 + 厂商 + 型号 +
+#   序列号），塞进主键会让索引膨胀；且序列号属敏感信息，不该以明文进主键列。
+_FP_PREFIX = "fp:"
+
+
+def fingerprint_key(dev) -> str:
+    """由设备指纹算出**指纹身份键**（``fp:<sha1>``）。
+
+    信号不足时返回 ``""`` —— 表示「不给指纹身份」，调用方应退回 `identity_key()`。
+
+    ⚠ **只有含身份锚点的指纹才发键**：`vendor=` 单独存在时 `same_device()`
+    永远不认（同厂商设备太多），若仍按它发键，两台苹果设备会得到同一个
+    ``fp:`` 键 —— 那是**错认**，比漏认严重。所以这里的门槛与 `same_device()`
+    的判定规则**对齐**：必须有 ``host=`` / ``serial=``（强），或 ``model=``
+    且 ≥2 个 token（中）。
+    """
+    tokens = device_fingerprint.fingerprint_tokens(dev)
+    if not tokens:
+        return ""
+    if not _fingerprint_is_anchor(tokens):
+        return ""
+    canonical = "|".join(sorted(tokens))
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+    return _FP_PREFIX + digest
+
+
+def _fingerprint_is_anchor(tokens) -> bool:
+    """这组 token 是否**足以充当身份锚点**（与 `same_device()` 的判据一致）。
+
+    抽出来单独一个函数，是为了让「能不能发指纹键」和「两台算不算同一台」
+    这两处判断**不会各写一套**而漂移 —— 它们必须是同一个门槛。
+    """
+    if any(t.startswith(("host=", "serial=")) for t in tokens):
+        return True
+    if any(t.startswith("model=") for t in tokens) and len(tokens) >= 2:
+        return True
+    return False
+
+
+def is_fingerprint_key(key: str) -> bool:
+    """该身份键是不是指纹降级键（而不是 MAC / ``ip:`` 键）。"""
+    return bool(key) and key.startswith(_FP_PREFIX)
+
+
 #: `assets` 里"随观测刷新"的属性列（身份键与时间列不在此列）。
 _ASSET_COLS = (
     "mac", "ip", "status", "hostname", "vendor", "device_class", "os_guess",
@@ -254,25 +338,45 @@ _ASSET_COLS = (
 # 扫到的值"，非常难查。
 #
 # ⚠ MIN/MAX 用的是 SQLite 的**标量** min/max（两个参数的那一个），不是聚合函数。
+#
+# `fingerprint`（v5）不放进 `_ASSET_COLS`：它不是「随观测刷新的展示属性」，
+# 而是**身份线索**，语义与 `identity_key` 同类。但它同样需要「非空才覆盖」——
+# 一次无指纹的观测不该把已记住的指纹抹掉（否则下次换 MAC 就认不回来了）。
 _ASSET_UPSERT = (
-    "INSERT INTO assets (identity_key, " + ", ".join(_ASSET_COLS) +
+    "INSERT INTO assets (identity_key, fingerprint, " + ", ".join(_ASSET_COLS) +
     ", first_seen, last_seen, seen_count) "
-    "VALUES (?, " + ", ".join("?" * len(_ASSET_COLS)) + ", ?, ?, 1) "
+    "VALUES (?, ?, " + ", ".join("?" * len(_ASSET_COLS)) + ", ?, ?, 1) "
     "ON CONFLICT(identity_key) DO UPDATE SET " +
     ", ".join("%s = CASE WHEN excluded.%s <> '' THEN excluded.%s ELSE assets.%s END"
               % (c, c, c, c) for c in _ASSET_COLS) +
+    ", fingerprint = CASE WHEN excluded.fingerprint <> '' "
+    "THEN excluded.fingerprint ELSE assets.fingerprint END"
     ", first_seen = MIN(assets.first_seen, excluded.first_seen)"
     ", last_seen  = MAX(assets.last_seen, excluded.last_seen)"
     ", seen_count = assets.seen_count + 1"
 )
 
 _UPDATE_IDENTITY_SQL = "UPDATE devices SET identity_key=? WHERE id=?"
+_UPDATE_FINGERPRINT_SQL = "UPDATE devices SET fingerprint=? WHERE id=?"
+
+#: 按指纹在 `assets` 里找**已有**资产键。降级身份的核心查询。
+#: 只认非空指纹；命中多条时取 `last_seen` 最新的一条（理论上同指纹只该有一条，
+#: 但历史数据或人工编辑可能造出重复 —— 取最新比报错更符合"尽量认回来"的意图）。
+_FIND_ASSET_BY_FINGERPRINT_SQL = (
+    "SELECT identity_key FROM assets WHERE fingerprint = ? "
+    "ORDER BY last_seen DESC LIMIT 1"
+)
 
 #: 回填时一次攒多少行再提交。太小则往返多，太大则事务日志膨胀。
 _BACKFILL_BATCH = 2000
 
 #: 回填取数：按快照时间**升序**，这样"非空即覆盖"自然等价于「最近一次出现且非空」
 #: —— 与 `query_history()` 里那段注释是同一个道理。
+#:
+#: ⚠ 只取得到 `hostname` / `vendor`（`devices` 表就这两列与指纹有关）——
+#:   所以回填期的指纹**天然弱于在线写入**（在线有 wmi_model/序列号等）。
+#:   这是可接受的：回填是「把老快照补成资产表」的一次性动作，弱指纹只会让
+#:   少数设备退回 MAC 身份（诚实降级），不会错认。
 _BACKFILL_SQL = (
     "SELECT d.id AS id, d.mac AS mac, d.ip AS ip, d.status AS status, "
     "d.hostname AS hostname, d.vendor AS vendor, "
@@ -290,6 +394,62 @@ _HAS_IDENTIFIABLE_SQL = (
 )
 
 
+def resolve_identity(conn, dev, pending=None) -> "tuple[str, str]":
+    """算出一台设备的 **(身份键, 指纹)** —— 指纹降级身份的**唯一**决策点。
+
+    `dev` 可以是 `ScanResult`（属性）或 dict（键）；两条写路径（`save_snapshot()`
+    与 `_backfill_assets()`）都调这里，所以在线写入与回填**不可能漂移**。
+
+    规则（**默认键仍是 MAC**，这是「老库零影响」的保证）：
+
+    1. 有 MAC 且**非 LAA**（OUI 可查的真实 MAC）→ 键 = MAC，**原样不变**。
+       指纹照样登记（普通设备也可能换网卡，登记无害）。
+    2. 有 MAC 且**是 LAA**（随机 MAC）→ 先按指纹找**已有**资产：
+       a. **找到** → **复用它的键**（那个键通常是这台设备上次的 MAC）；
+          ← 这是本项的核心：换了随机 MAC 仍然只算一台设备。
+       b. **找不到** → 这是台**没见过**的设备，键 = 本次的 MAC（与旧行为一致），
+          并把指纹登记上去，供它下次换 MAC 时被认回。
+    3. 无 MAC（或 MAC 形状不对）→ 退回 `identity_key()` 的 `ip:` 兜底。
+
+    ⚠ **为什么不在第 2 步直接用 `fp:` 键**：键必须在设备生命周期内**稳定**。
+       若首见就发 `fp:` 键，那么「指纹那天拿不到」（NetBIOS 关着、mDNS 没响）
+       时同一台设备会落到 MAC 键上 —— 同一个东西两个键 = 台账凭空多一台。
+       反之键锚在 MAC 上、指纹只用来**找回**，则新旧观测永远收敛到同一个键。
+
+    Args:
+        conn:    当前连接（读 `assets` 用）。
+        dev:     设备（dict 或对象）。
+        pending: 可选的 ``{fingerprint: identity_key}`` 字典 —— **本次事务内
+                 尚未落库**的指纹。`save_snapshot()` 把资产写入批量攒起来最后
+                 一次 UPSERT，所以同一份快照里后出现的行读 DB 看不到前一行。
+                 把这个挂在批处理循环里传进来，就能让「同一份快照内同一台设备
+                 的两个随机 MAC」也收敛成一台（否则会短暂多出一台）。
+
+    Returns:
+        ``(identity_key, fingerprint)``；指纹可以为空串（表示"没有可用指纹"）。
+    """
+    mac = dev.get("mac", "") if isinstance(dev, dict) else getattr(dev, "mac", "")
+    mac = (mac or "").strip()
+    ip = dev.get("ip", "") if isinstance(dev, dict) else getattr(dev, "ip", "")
+    ip = (ip or "").strip()
+    fp = fingerprint_key(dev)
+
+    # 规则 1 / 3：有真实 MAC（非 LAA）→ 键不变；或压根没 MAC → 走 ip: 兜底。
+    if not device_fingerprint.is_randomized_mac(mac):
+        return identity_key(mac, ip), fp
+
+    # 规则 2：LAA 随机 MAC —— 先认旧的（本批次内登记的优先于 DB）。
+    if fp:
+        if pending is not None and fp in pending:
+            return pending[fp], fp
+        row = conn.execute(_FIND_ASSET_BY_FINGERPRINT_SQL, (fp,)).fetchone()
+        if row is not None and row["identity_key"]:
+            return row["identity_key"], fp
+
+    # 没见过（或指纹不足）：用本次 MAC 建键 —— 与旧行为一致，不引入新键形态。
+    return identity_key(mac, ip), fp
+
+
 def _backfill_assets(conn) -> int:
     """把已有快照一次性折进 `assets`（迁移 v4 的**第二步**）。
 
@@ -304,24 +464,39 @@ def _backfill_assets(conn) -> int:
         折进去的观测行数（devices 行数，不是资产数）。
     """
     keys = []      # [(identity_key, devices.id), ...]
+    fps = []       # [(fingerprint, devices.id), ...]
     assets = []    # [_ASSET_UPSERT 的参数元组, ...]
     total = 0
+    # 回填是**按快照时间升序**逐行处理、每 _BACKFILL_BATCH 行才 flush 一次，
+    # 所以同一批次内后出现的行同样读不到前一行 —— 用 pending 补上（与
+    # `save_snapshot()` 同一个手法）。flush 后清空即可：那批已真的落库了。
+    pending_fp = {}
 
     def _flush():
         if not keys:
             return
         conn.executemany(_UPDATE_IDENTITY_SQL, keys)
+        conn.executemany(_UPDATE_FINGERPRINT_SQL, fps)
         conn.executemany(_ASSET_UPSERT, assets)
         keys.clear()
+        fps.clear()
         assets.clear()
+        pending_fp.clear()
 
     for r in conn.execute(_BACKFILL_SQL):
-        key = identity_key(r["mac"], r["ip"])
+        # 回填也走 resolve_identity()：与在线写入同一决策点，口径不可能漂移。
+        # 传 dict 而不是行对象 —— `resolve_identity()` 只认 dict/属性两种形态。
+        dev = {"mac": r["mac"], "ip": r["ip"],
+               "hostname": r["hostname"], "vendor": r["vendor"]}
+        key, fp = resolve_identity(conn, dev, pending=pending_fp)
         if not key:
             continue
+        if fp and fp not in pending_fp:
+            pending_fp[fp] = key
         keys.append((key, r["id"]))
+        fps.append((fp, r["id"]))
         assets.append((
-            key, r["mac"], r["ip"], r["status"], r["hostname"], r["vendor"],
+            key, fp, r["mac"], r["ip"], r["status"], r["hostname"], r["vendor"],
             r["device_class"], r["os_guess"], r["open_ports"],
             "",  # services：历史快照从来没存过，无从回填
             r["location"], r["user"], r["remark"],
@@ -441,21 +616,28 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
             raise RuntimeError("快照 INSERT 未返回 rowid，拒绝继续写入 devices")
         sec_rows = []
         asset_rows = []
+        # 本次事务内**尚未落库**的指纹 → 键。资产写入在上面被攒成一批、循环结束
+        # 才 UPSERT，所以同一份快照里后出现的行读 DB 看不到前一行；靠这个字典
+        # 让「同一次扫描里同一台设备的两个随机 MAC」也收敛成一台。
+        pending_fp = {}
         for d in devices:
-            key = identity_key(d.get("mac", ""), d.get("ip", ""))
+            # v2.0 §2.1：身份键由 resolve_identity() 决定（LAA 随机 MAC 走指纹降级）。
+            key, fp = resolve_identity(conn, d, pending=pending_fp)
+            if fp and fp not in pending_fp:
+                pending_fp[fp] = key
             conn.execute(
                 "INSERT INTO devices "
                 "(snapshot_id, ip, status, mac, hostname, vendor, "
                 "device_class, os_guess, open_ports, location, user, remark, "
-                "identity_key) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "identity_key, fingerprint) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     sid,
                     d.get("ip", ""), d.get("status", ""), d.get("mac", ""),
                     d.get("hostname", ""), d.get("vendor", ""), d.get("device_class", ""),
                     d.get("os_guess", ""), d.get("open_ports", ""), d.get("location", ""),
                     d.get("user", ""), d.get("remark", ""),
-                    key,
+                    key, fp,
                 ),
             )
             # 双写：devices 是"这一份快照里的设备"，assets 是"这台设备"。
@@ -463,7 +645,7 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
             # 只写后者则快照比对 / 时间线这些"按份看"的功能没有数据。
             if key:
                 asset_rows.append((
-                    key,
+                    key, fp,
                     d.get("mac", ""), d.get("ip", ""), d.get("status", ""),
                     d.get("hostname", ""), d.get("vendor", ""),
                     d.get("device_class", ""), d.get("os_guess", ""),
@@ -1400,21 +1582,29 @@ def _read_assets(device_class=None, network=None, first_seen_after=None,
         where.append("first_seen <= ?")
         params.append(first_seen_before)
 
-    sql = ("SELECT identity_key, " + ", ".join(_ASSET_COLS) +
-           ", first_seen, last_seen, seen_count FROM assets")
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    # last_seen DESC 之外再补 identity_key DESC：identity_key 是主键，保证排序
-    # 完全确定（翻页可复现），不再依赖 SQLite 的隐式顺序。
-    sql += " ORDER BY last_seen DESC, identity_key DESC"
+    base_cols = ["identity_key", "fingerprint"] + list(_ASSET_COLS)
+
+    def _select_sql(has_fp):
+        cols = base_cols if has_fp else (["identity_key"] + list(_ASSET_COLS))
+        sql = ("SELECT " + ", ".join(cols) +
+               ", first_seen, last_seen, seen_count FROM assets")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        # last_seen DESC 之外再补 identity_key DESC：identity_key 是主键，保证排序
+        # 完全确定（翻页可复现），不再依赖 SQLite 的隐式顺序。
+        return sql + " ORDER BY last_seen DESC, identity_key DESC"
 
     with _conn(db_path) as conn:
         if not _table_has_assets(conn):
             return []
+        has_fp = db_util._column_exists(conn, "assets", "fingerprint")
         rows = []
-        for r in conn.execute(sql, params):
+        for r in conn.execute(_select_sql(has_fp), params):
             rec = {
                 "identity_key": r["identity_key"],
+                # 「这台设备的身份是不是靠指纹认回来的」必须可解释（v2.0 §2.1）——
+                # 否则用户看到 MAC 变了却还是同一行会以为是 bug。
+                "fingerprint": (r["fingerprint"] or "") if has_fp else "",
                 "first_seen": r["first_seen"],
                 "last_seen": r["last_seen"],
                 "seen_count": r["seen_count"],
@@ -1486,8 +1676,10 @@ def get_asset(identity_key, db_path=None) -> dict | None:
     with _conn(db_path) as conn:
         if not _table_has_assets(conn):
             return None
+        has_fp = db_util._column_exists(conn, "assets", "fingerprint")
+        cols = ["identity_key"] + (["fingerprint"] if has_fp else []) + list(_ASSET_COLS)
         row = conn.execute(
-            "SELECT identity_key, " + ", ".join(_ASSET_COLS) +
+            "SELECT " + ", ".join(cols) +
             ", first_seen, last_seen, seen_count FROM assets WHERE identity_key = ?",
             (key,),
         ).fetchone()
@@ -1495,6 +1687,8 @@ def get_asset(identity_key, db_path=None) -> dict | None:
         return None
     rec = {
         "identity_key": row["identity_key"],
+        # 同 `_read_assets()`：身份来源可解释（空串 = 按 MAC/IP 认的，非指纹）。
+        "fingerprint": (row["fingerprint"] or "") if has_fp else "",
         "first_seen": row["first_seen"],
         "last_seen": row["last_seen"],
         "seen_count": row["seen_count"],

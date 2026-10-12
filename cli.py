@@ -94,6 +94,18 @@ _ASSET_COLUMNS = (
     "location", "user", "remark", "first_seen", "last_seen", "seen_count",
 )
 
+#: 表格视图在 `_ASSET_COLUMNS` 之外**多一列**「身份来源」—— 让人一眼看出这台
+#: 是靠 MAC 还是靠指纹认回来的（v2.0 §2.1：降级身份必须可解释）。
+#: CSV 与 JSON **不加**这列：它们是给脚本/表格软件吃的，要规范字段，
+#: 不要翻译后的展示串（JSON 里本来就有原始 `fingerprint` 字段）。
+_ASSET_TABLE_COLUMNS = _ASSET_COLUMNS + ("identity_source",)
+
+#: assets 表格的中文表头。CLI 输出**不随语言切换**（本工具的定位是「脚本可解析」，
+#: 表头就是给人看的固定中文；要机器可读请用 `-f json`）。
+_ASSET_TABLE_HEADERS = ("身份键", "IP", "状态", "MAC", "主机名", "厂商",
+                        "设备类型", "操作系统", "开放端口", "服务", "位置",
+                        "使用者", "备注", "首见", "末见", "次数", "身份来源")
+
 
 # ────────────────────────────── 输出工具 ──────────────────────────────
 
@@ -995,6 +1007,25 @@ def cmd_locate(args) -> int:
 
 # ────────────────────────────── 资产表 ──────────────────────────────
 
+def _fingerprint_identified(row) -> bool:
+    """这台资产的**身份键是不是只能靠指纹得到**（而非 MAC/IP 直接算得出）。
+
+    判据：把该行记录的 MAC/IP 丢回 `identity_key()`，若得到的键与
+    `assets.identity_key` 相同，说明它就是靠 MAC/IP 认的（指纹只是顺手登记的
+    线索而已）；不同则说明身份是**跨随机 MAC 认回来的**。
+
+    没有 `identity_key()` 可用（不该发生）时退回 False —— 宁可少标，不误导。
+    """
+    import history_store
+    key = (row.get("identity_key") or "").strip()
+    if not key:
+        return False
+    if history_store.is_fingerprint_key(key):
+        return True
+    direct = history_store.identity_key(row.get("mac", ""), row.get("ip", ""))
+    return bool(direct) and direct != key
+
+
 def cmd_assets(args) -> int:
     """列举资产表（一行一台设备，按 MAC 身份键去重合并后的当前状态）。
 
@@ -1035,12 +1066,20 @@ def cmd_assets(args) -> int:
     for r in rows:
         r["first_seen"] = _fmt_time(r.get("first_seen"))
         r["last_seen"] = _fmt_time(r.get("last_seen"))
+        # 身份来源（展示用，**不改** r["fingerprint"]）—— JSON 仍拿原始哈希，
+        # 人看的 table 用这一列说清「这台是靠 MAC 还是靠指纹认的」。
+        #
+        # ⚠ 判据不是「有没有指纹」（几乎每台有主机名的设备都会登记指纹），
+        #   而是「**这把键是不是只能靠指纹得到**」 —— 即键与该行 MAC 直接算出的
+        #   键不同。否则会给一台老老实实用 MAC 的 PC 错标成「指纹」。
+        r["identity_source"] = ("指纹" if _fingerprint_identified(r) else "MAC/IP")
     if args.format == "json":
         emit(render_json(rows), args.output)
     elif args.format == "csv":
         emit(render_csv(rows, _ASSET_COLUMNS), args.output)
     else:
-        emit(render_table(rows, _ASSET_COLUMNS), args.output)
+        emit(render_table(rows, _ASSET_TABLE_COLUMNS, _ASSET_TABLE_HEADERS),
+             args.output)
     return EXIT_OK
 
 

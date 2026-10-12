@@ -577,16 +577,20 @@ class SchemaMigrationTest(unittest.TestCase):
                          history_store.MIGRATIONS[-1][0])
 
     def test_every_migration_can_be_inferred_from_a_table(self):
-        """每一版都至少有一张"属于它"的表。
+        """每一版都至少有一张"属于它"的表（或"属于它"的列）。
 
-        否则老库推断出的版本会**偏低**，于是已经建过的表被重复建 —— 现在恰好无害
-        （全是 `IF NOT EXISTS`），但第 4 版起就会出问题。这条守的是那个前提。
+        否则老库推断出的版本会**偏低**，于是已经建过的迁移被重复执行 —— 建表
+        （`IF NOT EXISTS`）恰好无害，但**只加列的迁移重放会报 `duplicate column
+        name`**，库直接打不开。这条守的就是那个前提。
+
+        标记有两种形态：``(表名, 版本)`` 与 ``(表名, 列名, 版本)``（后者给只加列
+        的迁移用，见 `db_util.infer_legacy_version`）。
         """
-        introduced = {v for _t, v in history_store._LEGACY_TABLES}
+        introduced = {m[-1] for m in history_store._LEGACY_TABLES}
         self.assertEqual(
             introduced,
             {v for v, _sql, _desc in history_store.MIGRATIONS},
-            "每一版迁移都要在 _LEGACY_TABLES 里有对应的表，否则推断不出这个版本")
+            "每一版迁移都要在 _LEGACY_TABLES 里有对应的表或列，否则推断不出这个版本")
 
     def test_every_migration_description_is_present(self):
         """说明会进日志 —— 迁移跑起来时日志是唯一能看出"升了什么"的地方。"""
@@ -1223,6 +1227,239 @@ class AssetReadPathTest(unittest.TestCase):
                                           db_path=self.db)
         self.assertIsInstance(loc, dict)
         self.assertIn("mac", loc)
+
+
+class FingerprintIdentityTest(unittest.TestCase):
+    """v2.0 §2.1：指纹降级身份 —— 换随机 MAC 的设备仍只算一台。
+
+    背景：iOS/Android/Windows 默认开「私有 Wi-Fi 地址」，同一台设备每次接入
+    换一个随机 MAC（LAA）。只按 MAC 认设备的台账会把它反复报成新设备。
+
+    本项**只对 LAA MAC 启用**指纹找回；非 LAA 的普通 MAC 行为与本项落地前
+    逐字节一致（老用户零影响）。
+
+    验收（对应 `docs/ROADMAP_V2.0.md` §3 2.1 的验收栏）：
+      * 换 LAA MAC、主机名不变 → 资产数不增、seen_count+1、first_seen 保持；
+      * 两台不同设备都 LAA、主机名不同 → 仍是两台（防错认）；
+      * 只有 vendor 相同 → 不算同一台；
+      * 非 LAA 普通 MAC → 行为不变；
+      * 老库升级能正常回填、不产生重复资产。
+    """
+
+    #: 两个 LAA（随机）MAC：第一字节 0x02 位置 1。
+    LAA_MAC_1 = "02:11:22:33:44:01"
+    LAA_MAC_2 = "02:AA:BB:CC:DD:02"
+    #: 一个普通（非 LAA）MAC。
+    REAL_MAC = "00:1A:2B:3C:4D:01"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "scan_history.db")
+
+    def tearDown(self):
+        import db_util
+        db_util.close_connection(self.db)
+
+    def _save(self, devs, ts):
+        history_store.save_snapshot(devs, ts=ts, db_path=self.db)
+
+    def _assets(self):
+        return history_store.list_assets(db_path=self.db)
+
+    # ── 核心断言 ──────────────────────────────────────────────────────
+
+    def test_randomized_mac_change_collapses_to_one_asset(self):
+        """**核心**：同一台设备换随机 MAC -> 资产数不增、时间与计数都正确。"""
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone", vendor="Apple")], ts=1000.0)
+        self._save([_dev("10.0.0.6", mac=self.LAA_MAC_2,
+                         hostname="alice-iphone", vendor="Apple")], ts=2000.0)
+        rows = self._assets()
+        self.assertEqual(len(rows), 1, "换了随机 MAC 仍应是同一台设备")
+        a = rows[0]
+        self.assertEqual(a["seen_count"], 2)
+        self.assertEqual(a["first_seen"], 1000.0, "首见时间不该被后一次观测顶掉")
+        self.assertEqual(a["last_seen"], 2000.0)
+
+    def test_key_stays_anchored_to_the_first_mac(self):
+        """键锚定在**首次**的 MAC 上 —— 不因指纹出现与否而漂移。
+
+        这条是「同一个东西不能有两个键」的守门测试：若首见就发 ``fp:`` 键，
+        那么指纹那天拿不到时同一台设备会落到 MAC 键上 → 台账凭空多一台。
+        """
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone")], ts=1000.0)
+        self._save([_dev("10.0.0.6", mac=self.LAA_MAC_2,
+                         hostname="alice-iphone")], ts=2000.0)
+        rows = self._assets()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["identity_key"],
+                         history_store.identity_key(self.LAA_MAC_1, ""))
+
+    def test_fingerprint_is_recorded_for_explainability(self):
+        """降级身份必须**可解释**：行上要看得出「靠指纹认回来的」。"""
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone")], ts=1000.0)
+        a = self._assets()[0]
+        self.assertTrue(a["fingerprint"], "指纹应被登记")
+        self.assertTrue(history_store.is_fingerprint_key(a["fingerprint"]))
+
+    def test_fingerprint_survives_an_observation_without_it(self):
+        """一次「没拿到指纹」的观测不该把已记住的指纹抹掉。
+
+        否则设备下次换 MAC 就再也认不回来了 —— 而瞬时拿不到指纹（NetBIOS 关着、
+        mDNS 没响应）是常态。
+        """
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone")], ts=1000.0)
+        before = self._assets()[0]["fingerprint"]
+        self.assertTrue(before)
+        # 同一台设备、同一 MAC，但这次没有任何指纹字段
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1)], ts=2000.0)
+        after = self._assets()[0]["fingerprint"]
+        self.assertEqual(after, before, "空指纹不该覆盖已记住的指纹")
+
+    # ── 防错认（比漏认严重得多）────────────────────────────────────────
+
+    def test_two_different_devices_stay_two(self):
+        """两台不同设备、都开 LAA、主机名不同 -> 仍是**两台**。"""
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone", vendor="Apple")], ts=1000.0)
+        self._save([_dev("10.0.0.6", mac=self.LAA_MAC_2,
+                         hostname="bob-pixel", vendor="Google")], ts=2000.0)
+        self.assertEqual(len(self._assets()), 2)
+
+    def test_vendor_only_match_is_not_the_same_device(self):
+        """只有「厂商相同」不算同一台（同厂商设备太多）。"""
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1, vendor="Apple")], ts=1000.0)
+        self._save([_dev("10.0.0.6", mac=self.LAA_MAC_2, vendor="Apple")], ts=2000.0)
+        self.assertEqual(len(self._assets()), 2)
+
+    def test_same_model_alone_is_not_enough(self):
+        """只有型号相同（1 个 token）不够 —— 门槛与 `same_device()` 一致。"""
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         device_model="DS920+")], ts=1000.0)
+        self._save([_dev("10.0.0.6", mac=self.LAA_MAC_2,
+                         device_model="DS920+")], ts=2000.0)
+        self.assertEqual(len(self._assets()), 2)
+
+    # ── 老行为零影响 ──────────────────────────────────────────────────
+
+    def test_non_laa_mac_behaviour_is_unchanged(self):
+        """非 LAA 的普通 MAC：换 MAC 就是**不同设备**（与落地前一致）。"""
+        self._save([_dev("10.0.0.5", mac=self.REAL_MAC, hostname="pc-1")], ts=1000.0)
+        self._save([_dev("10.0.0.5", mac="00:1A:2B:3C:4D:02",
+                         hostname="pc-1")], ts=2000.0)
+        rows = self._assets()
+        self.assertEqual(len(rows), 2, "普通 MAC 不应被指纹降级合并")
+        self.assertEqual({r["identity_key"] for r in rows},
+                         {"00:1a:2b:3c:4d:01", "00:1a:2b:3c:4d:02"})
+
+    def test_stable_laa_mac_keeps_the_mac_key(self):
+        """LAA MAC 但一直没变 -> 键就是那个 MAC（不因「有指纹」就改成 fp:）。"""
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone")], ts=1000.0)
+        self._save([_dev("10.0.0.5", mac=self.LAA_MAC_1,
+                         hostname="alice-iphone")], ts=2000.0)
+        rows = self._assets()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["identity_key"],
+                         history_store.identity_key(self.LAA_MAC_1, ""))
+        self.assertEqual(rows[0]["seen_count"], 2)
+
+    def test_no_mac_falls_back_to_ip_as_before(self):
+        """没 MAC -> 仍退回 ip: 键（本项不改这条兜底）。"""
+        self._save([_dev("10.0.0.5", hostname="nameless")], ts=1000.0)
+        rows = self._assets()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["identity_key"], "ip:10.0.0.5")
+
+    def test_snapshot_batch_finds_the_device_within_one_snapshot(self):
+        """**同一份快照内**两次出现（两个随机 MAC、同一指纹）→ 认成一台。
+
+        同一次扫描同时从 ARP 与 mDNS 看到同一台手机时，MAC 可能不同 ——
+        先登记指纹的那行会成为后一行的锚点。
+        """
+        self._save([
+            _dev("10.0.0.5", mac=self.LAA_MAC_1, hostname="alice-iphone"),
+            _dev("10.0.0.6", mac=self.LAA_MAC_2, hostname="alice-iphone"),
+        ], ts=1000.0)
+        rows = self._assets()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["seen_count"], 2)
+
+    # ── 迁移 v5：老库升级 ─────────────────────────────────────────────
+
+    def test_legacy_v4_database_upgrades_and_backfills(self):
+        """**老库（v4 形态、有 assets 无 fingerprint）** 升级到 v5 不报错、能回填。
+
+        这是本项最危险的路径：`ALTER TABLE ADD COLUMN` 若被重放会直接
+        `duplicate column name` 把库搞到打不开。
+        """
+        import sqlite3
+        # 手工造一个 v4 形态的库（有 assets 表、但没有 fingerprint 列）
+        c = sqlite3.connect(self.db)
+        c.executescript(history_store._SQL_V1 + history_store._SQL_V2
+                        + history_store._SQL_V3 + history_store._SQL_V4)
+        c.execute("INSERT INTO snapshots (id, time, device_count) "
+                  "VALUES (1, 1000.0, 1)")
+        c.execute("INSERT INTO devices (snapshot_id, ip, status, mac, hostname) "
+                  "VALUES (1, '1.1.1.1', 'online', 'AA:BB:CC:DD:EE:01', 'pc')")
+        c.execute("PRAGMA user_version = 4")
+        c.commit()
+        c.close()
+
+        # 打开 → 自动升到 v5 并回填
+        rows = history_store.list_assets(db_path=self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["identity_key"], "aa:bb:cc:dd:ee:01")
+        # 回填也带上了 fingerprint 字段（可能为空 —— 老 devices 只有 hostname）
+        self.assertIn("fingerprint", rows[0])
+
+    def test_schema_version_is_five(self):
+        self.assertEqual(history_store.SCHEMA_VERSION, 5)
+        self.assertEqual([v for v, _s, _d in history_store.MIGRATIONS],
+                         [1, 2, 3, 4, 5])
+
+    def test_every_migration_has_a_legacy_marker(self):
+        """每版迁移都要有「能推断出它」的表或列标记（见 db_util 推断规则）。"""
+        introduced = {m[-1] for m in history_store._LEGACY_TABLES}
+        self.assertEqual(introduced, {v for v, _s, _d in history_store.MIGRATIONS})
+
+
+class FingerprintKeyUnitTest(unittest.TestCase):
+    """`fingerprint_key()` / `is_fingerprint_key()` 的纯函数行为。"""
+
+    def test_strong_anchor_gets_a_key(self):
+        self.assertTrue(history_store.fingerprint_key({"hostname": "alice-iphone"}))
+        self.assertTrue(history_store.fingerprint_key({"wmi_serial": "ABC123"}))
+
+    def test_weak_signal_gets_no_key(self):
+        """只有 vendor= 或只有 model= 不给键 —— 与 `same_device()` 门槛一致。"""
+        self.assertEqual(history_store.fingerprint_key({"vendor": "Apple"}), "")
+        self.assertEqual(history_store.fingerprint_key({"device_model": "DS920+"}), "")
+
+    def test_model_plus_vendor_is_enough(self):
+        self.assertTrue(history_store.fingerprint_key(
+            {"device_model": "DS920+", "vendor": "Synology"}))
+
+    def test_no_identity_fields_no_key(self):
+        self.assertEqual(history_store.fingerprint_key({}), "")
+
+    def test_same_tokens_same_key_regardless_of_order(self):
+        a = history_store.fingerprint_key({"hostname": "h", "vendor": "v"})
+        b = history_store.fingerprint_key({"vendor": "v", "hostname": "h"})
+        self.assertEqual(a, b)
+
+    def test_key_is_prefixed_and_not_plaintext(self):
+        """键必须带 `fp:` 前缀（与 MAC / ip: 命名空间分开），且不含明文序列号。"""
+        key = history_store.fingerprint_key({"wmi_serial": "SECRET-SERIAL"})
+        self.assertTrue(key.startswith("fp:"))
+        self.assertNotIn("SECRET", key)
+        self.assertTrue(history_store.is_fingerprint_key(key))
+        self.assertFalse(history_store.is_fingerprint_key("aa:bb:cc:dd:ee:ff"))
+        self.assertFalse(history_store.is_fingerprint_key("ip:1.2.3.4"))
+        self.assertFalse(history_store.is_fingerprint_key(""))
 
 
 if __name__ == "__main__":
