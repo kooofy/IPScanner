@@ -888,6 +888,15 @@
   "将丢弃所有钉住、隐藏与备注，确定吗？": "All pins, hidden items and notes will be discarded. Continue?",
   "节点备注": "Node note",
   "为 {name} 添加备注：": "Add a note for {name}:",
+  "导出 SVG": "Export SVG",
+  "把当前拓扑（含手工校正）导出为矢量图，可插进文档": "Export the current topology (including manual corrections) as a vector image for documents",
+  "导出拓扑为 SVG": "Export topology as SVG",
+  "SVG 文件 (*.svg)": "SVG file (*.svg)",
+  "画布上还没有可导出的内容。": "There is nothing to export on the canvas yet.",
+  "已导出 SVG 到 {path}": "Exported SVG to {path}",
+  "导出失败：{err}": "Export failed: {err}",
+  "网络拓扑视图": "Network topology view",
+  "含手工校正的网络拓扑图": "Network topology diagram with manual corrections",
 
   "已通过 SNMP 识别到 {n} 台网络设备，但它们没有上报 LLDP/CDP 邻居、转发表也不可用，因此无法还原实际连接": "SNMP identified {n} network device(s), but they reported no LLDP/CDP neighbors and their forwarding tables are unavailable, so the actual connections cannot be reconstructed",
 

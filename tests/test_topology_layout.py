@@ -488,5 +488,113 @@ class OverrideInteractionTest(_DialogCase):
         self.assertTrue(dlg._btn_save.isHidden())
 
 
+class SvgExportTest(_DialogCase):
+    """「导出 SVG」：把当前场景（含手工校正）落成矢量文件。
+
+    ⚠️ 这里能测的只有**产物结构**（是合法 SVG、含图元、比例正确）——
+    渲染出来的**观感**必须人工看图确认，无头环境给不了结论（本项目既有口径：
+    Qt 渲染产物不做像素级断言）。
+    """
+
+    def _topo(self):
+        """和 `OverrideInteractionTest._topo` 同构：网关 + 一台带 MAC 的交换机 + 终端。"""
+        from topology_discovery import TopoLink, TopoNode, Topology
+        topo = Topology()
+        topo.nodes = [
+            TopoNode(id="10.0.0.1", label="gw", ip="10.0.0.1",
+                     kind="gateway", is_switch=True, is_gateway=True),
+            TopoNode(id="10.0.0.2", label="sw", ip="10.0.0.2",
+                     mac="AA:BB:CC:DD:EE:02", kind="switch", is_switch=True),
+            TopoNode(id="10.0.0.9", label="pc", ip="10.0.0.9"),
+        ]
+        topo.links = [TopoLink("10.0.0.1", "10.0.0.2", "GE0/0", "", "LLDP"),
+                      TopoLink("10.0.0.2", "10.0.0.9", "Fa0/1", "", "FDB")]
+        return topo
+
+    def _dark_dialog(self):
+        from scanner.models import ScanResult
+        topo = self._topo()
+        results = [ScanResult(ip=n.ip, status="online") for n in topo.nodes]
+        dlg = ui_dialogs.TopologyDialog(results, "10.0.0.1", True,
+                                        topology=topo)
+        dlg.resize(1100, 760)
+        dlg.show()
+        self.addCleanup(dlg.deleteLater)
+        return dlg
+
+    def test_pack_scene_keeps_aspect_ratio(self):
+        """导出尺寸必须与图形自身比例一致 —— 否则导出图会被拉扁/拉长。
+
+        早先的实现把图硬塞进 A4 纵向框，纵向长条的分层树会被压到极小、
+        横向还留大片白。现在只定宽、高随比例跟随。
+        """
+        dlg = self._dark_dialog()
+        packed = dlg._pack_scene()
+        self.assertIsNotNone(packed)
+        w_px, h_px, src, scale = packed
+        self.assertAlmostEqual(w_px / h_px, src.width() / src.height(),
+                               places=2)
+        # 只缩不放：小图不该被撑成巨幅
+        self.assertLessEqual(scale, 2.0 * 1.0001)
+
+    def test_pack_scene_empty_returns_none(self):
+        dlg = ui_dialogs.TopologyDialog([], "10.0.0.1", False)
+        self.addCleanup(dlg.deleteLater)
+        # 空 results 时仍会画一个网关；构造一个真正空的场景来验空值分支
+        dlg.scene.clear()
+        self.assertIsNone(dlg._pack_scene())
+
+    def test_write_svg_produces_parseable_nonempty_file(self):
+        """产出的必须是**合法可解析**的 SVG，且含真实图元与文字。"""
+        import tempfile
+        import xml.etree.ElementTree as ET
+        dlg = self._dark_dialog()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "topo.svg")
+            self.assertTrue(dlg._write_svg(p, dlg._pack_scene()))
+            self.assertTrue(os.path.exists(p))
+            self.assertGreater(os.path.getsize(p), 500)
+            with open(p, encoding="utf-8") as f:
+                text = f.read()
+
+        root = ET.fromstring(text)          # 必须能解析
+        self.assertTrue(root.tag.endswith("svg"))
+        tags = {el.tag.split("}")[-1] for el in root.iter()}
+        self.assertIn("text", tags)
+        # 节点方块/主机圆点/链路都得在（直线会被 SVG 后端展开成 polyline）
+        self.assertIn("rect", tags)
+        self.assertIn("circle", tags)
+        self.assertIn("polyline", tags)
+        # 标签用节点 label（不是 IP），三个节点都应出现
+        for label in ("gw", "sw", "pc"):
+            self.assertIn(">%s</text>" % label, text)
+
+    def test_write_svg_includes_background(self):
+        """SVG 没有背景概念 → 必须显式刷底色，否则深色主题插进白纸文档变白字。"""
+        import tempfile
+        from theme_tokens import token
+        dlg = self._dark_dialog()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "topo.svg")
+            dlg._write_svg(p, dlg._pack_scene())
+            with open(p, encoding="utf-8") as f:
+                text = f.read()
+        self.assertIn(token("topo_bg", True).lower(), text.lower())
+
+    def test_write_svg_bad_path_returns_false(self):
+        """写不进去要返回 False（调用方据此弹窗），不能抛异常崩对话框。"""
+        dlg = self._dark_dialog()
+        bad = os.path.join(os.path.dirname(__file__), "no_such_dir_xyz",
+                           "deep", "topo.svg")
+        self.assertFalse(dlg._write_svg(bad, dlg._pack_scene()))
+
+    def test_export_button_enabled_only_when_canvas_has_content(self):
+        dlg = self._dark_dialog()
+        self.assertTrue(dlg._btn_export.isEnabled())
+        dlg.scene.clear()
+        dlg._update_tools_visible()
+        self.assertFalse(dlg._btn_export.isEnabled())
+
+
 if __name__ == "__main__":
     unittest.main()

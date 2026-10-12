@@ -5,11 +5,14 @@
 本文件只负责绘制 —— QGraphicsScene 自绘，QSS 覆盖不到，取色一律走 `_shared`。
 """
 import math
+from datetime import datetime
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPainter, QBrush, QPen, QColor, QPainterPath, QPainterPathStroker
+from PyQt5.QtCore import Qt, QSize, QRectF
+from PyQt5.QtGui import (QPainter, QBrush, QPen, QColor, QPainterPath,
+                         QPainterPathStroker)
+from PyQt5.QtSvg import QSvgGenerator
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
     QGraphicsRectItem, QGraphicsLineItem, QMenu, QInputDialog,
 )
@@ -194,8 +197,12 @@ class TopologyDialog(QDialog):
         self._btn_save = QPushButton(tr("保存校正"))
         self._btn_save.setToolTip(tr("把钉住/隐藏/备注写入 topology_overrides.json"))
         self._btn_save.clicked.connect(self._on_save_overrides)
+        self._btn_export = QPushButton(tr("导出 SVG"))
+        self._btn_export.setToolTip(tr("把当前拓扑（含手工校正）导出为矢量图，可插进文档"))
+        self._btn_export.clicked.connect(self._on_export_svg)
         self.tools.addWidget(self._btn_reload)
         self.tools.addWidget(self._btn_save)
+        self.tools.addWidget(self._btn_export)
         layout.addLayout(self.tools)
 
         self.setLayout(layout)
@@ -242,6 +249,10 @@ class TopologyDialog(QDialog):
         if usable and hasattr(self, "_btn_save"):
             self._btn_save.setEnabled(self._dirty)
             self._btn_save.setText(tr("保存校正") + (" *" if self._dirty else ""))
+        # 「导出 SVG」与校正无关：星型回退的图同样值得导（只是不能钉坐标），
+        # 所以它只有一个前提 —— 画布上真的有东西。
+        if hasattr(self, "_btn_export"):
+            self._btn_export.setEnabled(not self.scene.itemsBoundingRect().isEmpty())
 
     # ── 手工校正：拖拽 / 右键 / 保存 ──
 
@@ -424,6 +435,87 @@ class TopologyDialog(QDialog):
         else:
             ui_msg.msg_warn(self, tr("保存校正"),
                             tr("写入失败：{err}").format(err=err))
+
+    # ── 导出 SVG ──
+
+    #: 导出时的**目标宽度**（设备无关像素，@96dpi ≈ 190mm）。
+    #:
+    #: 刻意**不**固定成 A4：拓扑的外形由数据决定 —— 分层树是纵向长条、
+    #: 星型是横宽的方阵。硬塞进 A4 会在另一个方向上留下大片空白，而且在
+    #: 纵向长条上把图压得极小。这里只定宽，高按图形自身比例跟随，
+    #: 导出的图与屏幕上看到的是同一个构图。
+    _EXPORT_WIDTH = 1600.0
+    #: 导出像素密度。场景坐标本来就是像素级，2× 保证文字/细线不糊。
+    _EXPORT_SCALE = 2.0
+
+    def _pack_scene(self):
+        """算「把整张图按固定宽度导出」所需的尺寸、源矩形与缩放比。
+
+        返回 `(width_px, height_px, source_rect, scale)`；场景为空时 `None`。
+        单独拆出来是为了能**不开文件对话框**地测这段几何。
+        """
+        rect = self.scene.itemsBoundingRect()
+        if rect.isEmpty():
+            return None
+        margin = 24.0                                        # 图形四周留白
+        src = rect.adjusted(-margin, -margin, margin, margin)
+        # 只缩不放：三五个节点的小图不该被撑成一张巨幅
+        scale = min(1.0, self._EXPORT_WIDTH / src.width()) * self._EXPORT_SCALE
+        return (max(1, int(round(src.width() * scale))),
+                max(1, int(round(src.height() * scale))),
+                src, scale)
+
+    def _write_svg(self, path, packed) -> bool:
+        """真正写 SVG 文件。失败返回 False（调用方弹窗）。"""
+        width_px, height_px, src, scale = packed
+        gen = QSvgGenerator()
+        gen.setFileName(path)
+        gen.setSize(QSize(width_px, height_px))
+        gen.setViewBox(QRectF(0, 0, src.width() * scale, src.height() * scale))
+        gen.setTitle(tr("网络拓扑视图"))
+        gen.setDescription(tr("含手工校正的网络拓扑图"))
+        painter = QPainter()
+        try:
+            if not painter.begin(gen):
+                _log.warning("导出拓扑 SVG 失败：无法在 %s 上开始绘制", path)
+                return False
+            try:
+                # SVG 无背景概念：显式刷底色，否则深色主题插进白纸文档会「白字」
+                painter.fillRect(QRectF(0, 0, width_px, height_px),
+                                 QBrush(_theme_color("topo_bg", self.dark)))
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.save()
+                painter.scale(scale, scale)
+                self.scene.render(painter, QRectF(0, 0,
+                                                  src.width() * scale,
+                                                  src.height() * scale), src)
+                painter.restore()
+            finally:
+                # 无论中途出什么错都要收笔：没 `end()` 的 QPainter 会留下
+                # 未 flush 的 SVG（文件截断），而且析构时会给出一条 Qt 警告。
+                painter.end()
+            return True
+        except Exception as e:      # noqa: BLE001 - 写盘失败不该崩对话框
+            _log.warning("导出拓扑 SVG 失败 %s: %s", path, e)
+            return False
+
+    def _on_export_svg(self):
+        """把当前场景（含已应用的手工校正）导出成矢量 SVG。"""
+        packed = self._pack_scene()
+        if packed is None:
+            ui_msg.msg_info(self, tr("导出 SVG"), tr("画布上还没有可导出的内容。"))
+            return
+        default = "拓扑_%s.svg" % datetime.now().strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("导出拓扑为 SVG"), default, tr("SVG 文件 (*.svg)"))
+        if not path:
+            return
+        if self._write_svg(path, packed):
+            self._saved_hint = tr("已导出 SVG 到 {path}").format(path=path)
+            self._update_legend()
+        else:
+            ui_msg.msg_warn(self, tr("导出 SVG"),
+                            tr("导出失败：{err}").format(err=path))
 
     # ── 视口自适应 ──
 
