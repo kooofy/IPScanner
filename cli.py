@@ -1086,6 +1086,9 @@ def cmd_topology(args) -> int:
     `topology_discovery.render_topology_text` 渲染。纯文本、语言无关，
     不依赖图形坐标 —— 与建议书 §1.3「拓扑可读性包」一致。
 
+    手工校正（``topology_overrides.json``：钉住 / 隐藏 / 备注）在渲染前叠加，
+    与扫描结果解耦 —— 见 `topology_overrides` 模块。
+
     详见 `docs/ROADMAP_V1.9.md` §1.3。
     """
     from topology_discovery import discover_topology, render_topology_text
@@ -1109,6 +1112,20 @@ def cmd_topology(args) -> int:
         enable_snmp_probe=not getattr(args, "no_snmp", False),
         snmp_v3_user=snmp_v3_user,
     )
+
+    # ── 手工校正（钉住 / 隐藏 / 备注）：显式 --overrides 或数据目录默认文件 ──
+    import topology_overrides as tov
+    ov_path = getattr(args, "overrides", None)
+    if ov_path:
+        ovs = tov.load(ov_path)
+    elif not getattr(args, "no_overrides", False):
+        ovs = tov.load()          # 数据目录下的 topology_overrides.json（缺失=空）
+    else:
+        ovs = tov.TopologyOverrides()
+    if not ovs.is_empty():
+        topo, _pinned = tov.apply_overrides(topo, ovs)
+        log(f"已应用手工校正：{len(ovs.nodes)} 个节点 / {len(ovs.links)} 条链路")
+
     text = render_topology_text(topo, args.format, gateway)
     emit(text, args.output)
     if args.output:
@@ -1720,6 +1737,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="不做 SNMP 探测（更快，但交换机可能识别不全）")
     tp.add_argument("--format", "-f", choices=("tree", "markdown", "ascii"),
                     default="tree", help="文本格式（默认 tree）")
+    tp.add_argument("--overrides", metavar="文件",
+                    help="手工校正文件（钉住/隐藏/备注，JSON）；"
+                         "省略则用数据目录的 topology_overrides.json（若有）")
+    tp.add_argument("--no-overrides", action="store_true",
+                    help="忽略数据目录里的默认校正文件（只用手工校正层时用）")
     tp.add_argument("-o", "--output", metavar="文件", help="写入文件而非 stdout")
     tp.add_argument("-q", "--quiet", action="store_true", help="静默模式，不输出进度")
     tp.set_defaults(func=cmd_topology)

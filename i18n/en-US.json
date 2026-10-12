@@ -871,6 +871,7 @@
   "识别到 {n} 台网络设备": "{n} network device(s) identified",
   "读取转发表: {ip}": "Reading forwarding table: {ip}",
   "转发表": "FDB",
+  "已应用手工校正": "Manual corrections applied",
 
   "已通过 SNMP 识别到 {n} 台网络设备，但它们没有上报 LLDP/CDP 邻居、转发表也不可用，因此无法还原实际连接": "SNMP identified {n} network device(s), but they reported no LLDP/CDP neighbors and their forwarding tables are unavailable, so the actual connections cannot be reconstructed",
 

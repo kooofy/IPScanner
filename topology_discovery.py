@@ -1392,7 +1392,9 @@ _WRAP_GAP_Y = 40.0      # 折行后并列子树之间的纵向间隙
 
 
 def layout_real_topology(topo: "Topology",
-                         gateway_ip: str = "") -> Dict[str, Tuple[float, float]]:
+                         gateway_ip: str = "",
+                         pinned: Optional[Dict[str, Tuple[float, float]]] = None,
+                         ) -> Dict[str, Tuple[float, float]]:
     """给真实拓扑算坐标，返回 `{node_id: (x, y)}`。
 
     思路（两层）：
@@ -1403,6 +1405,11 @@ def layout_real_topology(topo: "Topology",
     2. **接入层**：每台网络设备直连的终端排成**紧凑网格**，居中放在该设备正下方
        （列数取 `ceil(sqrt(n))`，接近正方形）。几百台终端因此既不会把画布横向
        撑爆，也不会糊成一条线。
+
+    ``pinned``（v1.9 拓扑手工校正）：``{node_id: (x, y)}`` 的手工钉住坐标。
+    它**最后统一覆盖**自动算出的位置 —— 因此被钉住的节点既不会随折行平移、
+    也不会被接入层网格重排。钉住是"用户的意志高于算法"，所以放在收尾。
+    链路上没有的孤立节点若被钉住，同样保留在结果里（否则用户钉了却看不见）。
 
     为什么不用旧实现那种"交换机排一行、主机围成半圆"：那套布局里 `unassigned`
     存的是节点对象、比较用的却是 id 字符串，永远匹配不上，最后
@@ -1630,6 +1637,17 @@ def layout_real_topology(topo: "Topology",
             col, row = i % cols, i // cols
             positions[nid] = (cx + (col - (cols - 1) / 2.0) * _HOST_COL,
                               top + row * _HOST_ROW)
+
+    # ── 手工钉住坐标：用户的意志高于算法，最后统一覆盖 ──
+    if pinned:
+        for nid, xy in pinned.items():
+            if nid not in nodes:
+                continue          # 钉的节点这轮没扫到 → 悄悄忽略（不报错）
+            try:
+                positions[nid] = (float(xy[0]), float(xy[1]))
+            except (TypeError, ValueError, IndexError):
+                # 坏坐标不能让整张图崩：丢掉这一条，其余照画
+                _log.debug("忽略无效的钉住坐标 %s=%r", nid, xy)
     return positions
 
 

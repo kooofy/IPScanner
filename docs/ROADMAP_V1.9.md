@@ -496,6 +496,49 @@
 > 已落地的指纹机制**延伸**到 `assets` 主键的那一步（不在原 15 项内）。
 > 逐项对照见 §4。
 
+### 3.1 落地记录：拓扑手工校正（钉住 / 隐藏 / 备注）
+
+> **2026-10-12，v1.9 发布后第 1 项**（原表最后一行：`v1.8 #15 / adv #8`，
+> 排期「v1.9 之后，落选项里优先级最高」）。**最小可用版**，按建议书 §4.4 逐字落地。
+
+**交付物**
+
+- **新模块 `topology_overrides.py`**（**零 PyQt、零第三方依赖**，与 `notifier.py`
+  同口径：纯标准库 + `json` + `app_logging`）：
+  - 数据模型 `NodeOverride`（`pin` / `hidden` / `note`）与 `LinkOverride`
+    （`hidden` / `note`），容器 `TopologyOverrides`；
+  - `load()` / `save()` / `parse()`：默认路径 `app_paths.data_dir()/topology_overrides.json`；
+    **空文件 / 损坏文件 / 单条坏数据都只意味"这条校正不生效"，绝不抛异常**
+    （与 `notifier.load_config` 同一条"可选增强层"原则）；
+  - `normalize_mac()` 与 `topology_discovery._normalize_mac` 同口径
+    （有测试逐样本对拍，防止两处漂移导致"校正匹配不上"）。
+- **`apply_overrides(topo, overrides) -> (new_topo, pinned)`**（纯投影）：
+  隐藏节点（连带其链路）、隐藏链路（**方向无关**，两端无序匹配）、
+  备注并入、钉住坐标抽出；**不修改入参**（节点对象按需浅拷贝）。
+- **节点身份键**：`mac` → `ip` → `id` → `name` 优先级降序匹配。
+  MAC 最稳（换网段/换 IP 都不变）→ 校正**与扫描结果解耦**，下一轮扫描后依然生效。
+- **布局接入**：`layout_real_topology(topo, gateway_ip, pinned=None)` 新增
+  `pinned` 参数，**最后统一覆盖**自动坐标（钉住压过折行与接入网格重排）；
+  缺省不传 = 与旧调用逐字节一致（既有调用方零改动）。
+- **CLI**：`ipscanner topology` 新增 `--overrides <文件>` 与 `--no-overrides`；
+  省略时自动读数据目录默认文件（缺失 = 无校正）。
+- **GUI**：`TopologyDialog(..., overrides_path=None, no_overrides=False)`
+  在 `__init__` 里加载并投影；校正层故障只记 `debug`，绝不挡住看图。
+
+**测试**：新增 `tests/test_topology_overrides.py`（**PyQt 无关，27 项**）——
+MAC 归一对拍、JSON 往返、空/损坏/局部坏数据容错、隐藏节点连带链路、方向无关隐藏、
+按 MAC 钉住、备注并入不改 dataclass、被隐藏节点不进 `pinned`、**不改入参**、
+**解耦（换 IP 仍命中）**、`pinned` 覆盖自动坐标 / 不影响他人 / 容错坏坐标 /
+保住孤立节点 / 不传参向后兼容、以及 JSON→投影→布局整链。
+
+**验收（实测）**：`tests/test_topology_overrides.py` 27 项全绿；`ruff check` 通过；
+全量 `run_tests.py` **Ran 1322 tests，0 FAIL**（54 个 ERROR 全部是沙箱缺
+PyQt5/xlrd，非代码问题）。新增界面文案 `已应用手工校正` 已补 `i18n/en-US.json`。
+
+**未做（刻意）**：拖拽交互与右键菜单（"钉住/隐藏/备注"的鼠标操作）留在后续 ——
+本轮先交付**数据层 + 消费端**，把"校正在下一轮扫描后仍生效"这条不变量先钉死；
+GUI 拖拽是纯增量，不改变数据格式。
+
 ---
 
 ## 4. 与建议书的差异（我改了什么）
@@ -563,7 +606,10 @@ v1.9「让台账真的成为一个东西」
 └─ 1.4 质量门禁（per-file 覆盖率 / pyright / pip-audit）        P1  ← 安全网 ✅
 
 进度：四项全部 ✅（1.1 / 1.2 / 1.3 / 1.4）—— v1.9 功能范围已完成，可发版。
-      下一个 minor 主题：见 §3「移出 11 项」的去向 → v2.0 / 补丁轨道（§6）。
+      v1.9.0 已发布。
+      下一项已开工：**拓扑手工校正（钉住 / 隐藏 / 备注）** ✅ 最小可用版
+      （`topology_overrides.py` + `apply_overrides` + 布局 pinned + CLI/GUI 消费端，见 §3.1）。
+      再下一步：见 §3「移出 11 项」的去向 → v2.0 / 补丁轨道（§6）。
 
 前置：user_version 迁移链 ✅ 已在 1.8.0 之后落地（SCHEMA_VERSION = 4）
       质量门禁 ✅ 已就位（history_store.py ≥95% / db_util.py ≥90%，pyright 0 error）

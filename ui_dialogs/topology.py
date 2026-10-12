@@ -14,11 +14,14 @@ from PyQt5.QtWidgets import (
     QGraphicsRectItem,
 )
 
+from app_logging import get_logger
 from i18n import tr
 from scanner.constants import device_class_label
 from theme_tokens import token
 
 from ._shared import _ellipsize, _faded, _theme_color
+
+_log = get_logger(__name__)
 
 
 class TopologyDialog(QDialog):
@@ -41,7 +44,8 @@ class TopologyDialog(QDialog):
     #: 所以到一两百台时标 IP 仍然压不到字，再往上就没意义了（整图已被缩放）。
     _MAX_LABELLED_NODES = 150
 
-    def __init__(self, results, gateway_ip, dark, parent=None, topology=None):
+    def __init__(self, results, gateway_ip, dark, parent=None, topology=None,
+                 overrides_path=None, no_overrides=False):
         super().__init__(parent)
         self.setWindowTitle(tr("网络拓扑视图"))
         self.setMinimumSize(900, 680)
@@ -51,8 +55,24 @@ class TopologyDialog(QDialog):
         self.gateway_ip = gateway_ip
         self.dark = dark
         self.topology = topology  # Topology 对象，None = 回退星型
+        self.overrides_path = overrides_path  # 校正文件路径；None = 数据目录默认
+        self.no_overrides = no_overrides      # True = 忽略校正层
         self._topo_note = ""      # 图例尾部的一句补充（隐藏了多少台等）
         self._real_rendered = False   # 是否真的画出了真实拓扑（可能退化回星型）
+
+        # 手工校正（钉住 / 隐藏 / 备注）：与扫描结果解耦，可缺省。
+        # 读失败 = 没有校正，绝不让对话框崩（`topology_overrides.load` 自身容错）。
+        self._pinned = {}
+        if self.topology is not None and not self.no_overrides:
+            try:
+                import topology_overrides as tov
+                ovs = tov.load(self.overrides_path)
+                if not ovs.is_empty():
+                    self.topology, self._pinned = tov.apply_overrides(
+                        self.topology, ovs)
+                    self._topo_note = tr("已应用手工校正")
+            except Exception as e:      # noqa: BLE001 - 校正层故障不该挡住看图
+                _log.debug("拓扑手工校正加载失败: %s", e)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -227,7 +247,8 @@ class TopologyDialog(QDialog):
         from topology_discovery import layout_real_topology
 
         topo = self.topology
-        positions = layout_real_topology(topo, self.gateway_ip or "")
+        positions = layout_real_topology(topo, self.gateway_ip or "",
+                                         pinned=self._pinned)
         if not positions:
             # 布局退化（不该发生）→ 老老实实回退星型，别给用户一个空画布
             return
