@@ -16,7 +16,79 @@
 
 ## [Unreleased]
 
+---
+
+## [2.0.0] - 2026-10-12
+
+> **第一次升到大版号**。依据是 [`docs/ROADMAP_V2.0.md`](docs/ROADMAP_V2.0.md) 的
+> 四项全部落地（2.1 设备身份深化 / 2.2 报表引擎 / 2.3 凭据配置档 /
+> 2.4 IPv6 可见性）。v2.0 的主题是「**让台账认得出一台设备，并且让别人用得上**」。
+>
+> ⚠ 本次发布同时带上此前**只进了 `[Unreleased]`、从未随任何 tag 发出**的
+> 补丁轨道项（端口利用率、Nmap XML 读入、拓扑手工校正与 SVG 导出）—— 它们排在
+> `v1.9.0`（tag 打在 `921c292`）之后，本就该随这一版到达用户手上。
+
 ### 新增
+
+- **设备身份深化 —— v2.0 路线图 2.1**（指纹接进 `assets` 主键，详见
+  [`docs/ROADMAP_V2.0.md`](docs/ROADMAP_V2.0.md) §2.1）。
+  此前 `identity_key` 只认 MAC 与 IP：一台开了**隐私 MAC**（LAA 随机地址）的手机
+  每次换地址都会被当成一台新设备，资产表被撑爆且首见/末见全是假的。
+  现在 `identity_key()` 在 LAA MAC 上**降级到设备指纹**（主机名 / 厂商等稳定特征，
+  `device_fingerprint.py`），随机 MAC 的设备也能收敛成**一行**。
+  - 数据库迁移 **v5**：`assets` / `devices` 加 `fingerprint` 列（升级前自动备份）。
+  - `resolve_identity(conn, d, pending=...)` 是唯一身份生成点；同一次扫描里同一台
+    设备的两个随机 MAC 靠 `pending` 字典**在同一事务内**收敛，不必等落库回读。
+  - CLI 新增「身份来源」列（`mac` / `ip` / `fingerprint`），看得出这台设备是靠什么认出来的。
+
+- **报表引擎 —— v2.0 路线图 2.2**（模板可编辑 + 定时投递，详见
+  [`docs/ROADMAP_V2.0.md`](docs/ROADMAP_V2.0.md) §2.2）。
+  此前 `excel_handler.export_html()` 存在但**模板是硬编码的**，用户改不了版式。
+  现在模板抽出来可编辑（`report_engine.py`），并接上定时投递：
+  CLI `report` 子命令 + `scan` / `schedule` 的 `--report` 选项，
+  让「扫描 → 出报表 → 定点投递」成为一条无人值守的流水线。
+
+- **凭据配置档 —— v2.0 路线图 2.3**（按网段 / 组选只读账户，详见
+  [`docs/ROADMAP_V2.0.md`](docs/ROADMAP_V2.0.md) §2.3）。
+  SNMP 团体字 / WMI 账户此前是**全局单个值**，多网段环境里只能二选一。
+  现在 `credentials.py` 引入**按目标选凭据**：一档 = 一组 CIDR 作用域 + 协议 + 凭据，
+  `select_for_target()` 做**最长前缀匹配**。
+  - 🔴 **选不到就不发请求**，绝不回落 `public` —— 回落 = 用猜的团体字却让人以为扫过了。
+  - 与现有全局凭据（`scanner/cred_store.py` 的 DPAPI 加密凭据）**并存、档册优先**；
+    没有档册时行为**逐字节不变**。
+  - 配置 `data_dir()/credentials.json`；口令支持 `env:VAR` 间接引用（复用
+    `notifier.resolve_secret()`），**明文绝不落盘**；CLI `credentials` 子命令
+    **绝不回显明文**（只显示引用名与是否解析成功）。
+
+- **IPv6 可见性 —— v2.0 路线图 2.4**（只做 NDP + `ff02::1` 挂靠，不扫 IPv6，详见
+  [`docs/ROADMAP_V2.0.md`](docs/ROADMAP_V2.0.md) §2.4）。
+  现代网络里设备普遍带 IPv6，只看 IPv4 会漏掉「只有 IPv6 的设备」。但**完整的 IPv6
+  资产盘点在语义上不成立**（一个 /64 有 2⁶⁴ 个地址），所以本项**只做可见性**：
+  - 读本机 **NDP / IPv6 邻居缓存**整表（Windows `netsh interface ipv6 show neighbors` /
+    Linux `ip -6 neigh` / macOS `ndp -an`，**零发包**），`scanner/ndp.py`；
+  - 把 IPv6 地址**按 MAC 挂到已有 IPv4 设备上**（`ScanResult.ipv6_addresses`），
+    **不新建**「IPv6-only 资产」；MAC 对不上的纯 IPv6 设备**如实丢弃**；
+  - `watch --ipv6` 开启（默认关）；`--ipv6-probe` 会向 `ff02::1` 发**一次**
+    ICMPv6 echo（**唯一会发包的一步**，需管理员 / root，默认关）—— 与 mDNS 的
+    `--mdns-active` 同口径，**不破**「watch 默认零发包」的承诺。
+  - ⚠ 产出的是「**可见性**」，不是「**IPv6 资产清单**」。
+  - IPv6 **扫描**仍然**刻意拒绝**（下游 ARP / NetBIOS / WMI / SNMP 全假设 IPv4，见
+    `scanner/range.py`）—— 本项不推翻它。
+
+- **质量门禁**（含覆盖率 / 类型 / 依赖审计三个 CI job，见上文「v1.9 路线图 1.4」）。
+  v2.0 期间门禁新增两个受管文件：`credentials.py`（≥95%）与 `scanner/ndp.py`（≥85%）。
+
+- **补丁轨道（本次一并发出，此前从未单独发版）**：
+  - **端口利用率 / 空闲口视图 + CLI `ports`**（`port_utilization()`）：🔴 真问题不是统计
+    而是「数据从哪来」—— 采集转发表要显式 `scan --switch-map`（默认关），
+    空表会让人得出与事实相反的结论，所以**必须返回 `reason`** 并给出下一步命令；
+    **不编造「利用率 %」**，只报下限 `used_port_count`。
+  - **Nmap XML 读入 + CLI `import` 子命令**：把外部 Nmap 扫描结果并进台账
+    （互操作导出的反向能力）。
+  - **拓扑手工校正**（钉住 / 隐藏 / 备注）+ 鼠标交互（拖拽 / 右键 / 保存）。
+  - **拓扑视图导出 SVG**（含深色主题底色处理）。
+  - **项目文档**：新增 [`docs/ROADMAP_V2.0.md`](docs/ROADMAP_V2.0.md)。
+
 - **资产表 —— v1.9 路线图 1.1 的第 ①② 刀**（迁移 v4 + 回填 + 双写，详见
   [`docs/ROADMAP_V1.9.md`](docs/ROADMAP_V1.9.md) §1.1）。
   此前「台账」不是一个**东西**，而是「最后一份快照」的别名 —— 首见/末见时间要靠
@@ -520,7 +592,9 @@ v1.8 路线图的四项全部落地（定位查询 / 被动发现 / 历史查询
 
 ---
 
-[Unreleased]: https://github.com/kooofy/IPScanner/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/kooofy/IPScanner/compare/v1.9.0...v2.0.0
+[1.9.0]: https://github.com/kooofy/IPScanner/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/kooofy/IPScanner/compare/v1.7.7...v1.8.0
 [1.7.7]: https://github.com/kooofy/IPScanner/compare/v1.7.6...v1.7.7
 [1.7.6]: https://github.com/kooofy/IPScanner/compare/v1.7.5...v1.7.6
