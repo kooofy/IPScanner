@@ -7,21 +7,107 @@
 import math
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPainter, QBrush, QPen, QColor
+from PyQt5.QtGui import QPainter, QBrush, QPen, QColor, QPainterPath, QPainterPathStroker
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
-    QGraphicsRectItem,
+    QGraphicsRectItem, QGraphicsLineItem, QMenu, QInputDialog,
 )
 
 from app_logging import get_logger
 from i18n import tr
 from scanner.constants import device_class_label
 from theme_tokens import token
+import ui_msg
 
 from ._shared import _ellipsize, _faded, _theme_color
 
 _log = get_logger(__name__)
+
+#: 图元上挂"这是哪个节点"的键（`QVariant` 用 Python 对象即可）。
+#: 拖动结束/右键时要靠它倒推该改哪条校正，所以必须是**跨扫描稳定**的身份键
+#: （`topology_overrides.node_scene_key`），不能用场景坐标或图元索引。
+_NODE_ID_ROLE = Qt.UserRole + 1
+#: 链路的身份对（`(a, b)` 两个稳定键）挂在线上，供"隐藏此链路"用。
+_LINK_ID_ROLE = Qt.UserRole + 2
+
+
+def _localize_input_dialog(dlg: QInputDialog):
+    """Qt 内置按钮无中文翻译 → 构造后手工 `setText`。
+
+    与 `ui_msg.localize_buttons` 同一手法（见该函数注释）；`QInputDialog`
+    不走 `QMessageBox`，所以这里单独处理。
+    """
+    dlg.setOkButtonText(tr("确定"))
+    dlg.setCancelButtonText(tr("取消"))
+    return dlg
+
+
+class _DragMixin:
+    """给节点图元加"拖动 → 回报对话框"的行为。
+
+    用**混入**而不是继承某个具体图元类：网络设备画成方形（`QGraphicsRectItem`）、
+    终端画成圆形（`QGraphicsEllipseItem`），形状不同但拖动逻辑完全一样 ——
+    混入让两者共享同一段代码。真实继承链在下面按形状各拼一次。
+    """
+
+    #: 子类在 `__init__` 里设置
+    _dialog = None
+    _node_key = ""
+
+    def _drag_init(self, dialog, node_key):
+        self._dialog = dialog
+        self._node_key = node_key
+        self.setData(_NODE_ID_ROLE, node_key)
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
+        self.setAcceptHoverEvents(True)
+        self.setZValue(10)
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        self._press_pos = self.scenePos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        # 只有真的动了才记钉住：单击（选中）不该把节点钉在原地，
+        # 否则用户随手一点就把一个"自动排的"节点变成了"手工固定"。
+        if self._press_pos is not None and self._dialog is not None:
+            moved = (self.scenePos() - self._press_pos).manhattanLength()
+            if moved > 2:
+                self._dialog.on_node_dragged(self._node_key, self.scenePos())
+
+
+class _DraggableNodeItem(_DragMixin, QGraphicsRectItem):
+    """可拖动的**方形**节点（网络设备）。``(x, y, w, h)`` 为左上角坐标与尺寸。"""
+
+    def __init__(self, x, y, w, h, dialog, node_key):
+        super().__init__(x, y, w, h)
+        self._drag_init(dialog, node_key)
+
+
+class _DraggableDotItem(_DragMixin, QGraphicsEllipseItem):
+    """可拖动的**圆形**节点（终端设备）。"""
+
+    def __init__(self, x, y, w, h, dialog, node_key):
+        super().__init__(x, y, w, h)
+        self._drag_init(dialog, node_key)
+
+
+class _SelectableLinkItem(QGraphicsLineItem):
+    """可点选的链路。
+
+    `QGraphicsLineItem.shape()` 默认只算 0 宽笔迹，1px 虚线几乎点不中。
+    这里覆盖 `shape()` 把命中区域撑到笔宽 + 6px，右键"隐藏此链路"才点得到。
+    """
+
+    def shape(self):
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(self.pen().widthF(), 1.0) + 6.0)
+        path = QPainterPath(self.line().p1())
+        path.lineTo(self.line().p2())
+        return stroker.createStroke(path)
+
 
 
 class TopologyDialog(QDialog):
@@ -63,13 +149,19 @@ class TopologyDialog(QDialog):
         # 手工校正（钉住 / 隐藏 / 备注）：与扫描结果解耦，可缺省。
         # 读失败 = 没有校正，绝不让对话框崩（`topology_overrides.load` 自身容错）。
         self._pinned = {}
+        #: 落到场景里的**原始**拓扑（未经校正裁剪）—— 拖动/隐藏/恢复都以它为准，
+        #: 而 `self.topology` 是应用校正后的投影。两者分开，才能"恢复默认"。
+        self._base_topology = topology
+        self._ov = None            # TopologyOverrides（可变，编辑就地改它）
+        self._dirty = False        # 是否有未保存的校正改动
+        self._saved_hint = ""      # 最近一次保存的提示（非模态反馈）
         if self.topology is not None and not self.no_overrides:
             try:
                 import topology_overrides as tov
-                ovs = tov.load(self.overrides_path)
-                if not ovs.is_empty():
+                self._ov = tov.load(self.overrides_path)
+                if not self._ov.is_empty():
                     self.topology, self._pinned = tov.apply_overrides(
-                        self.topology, ovs)
+                        self.topology, self._ov)
                     self._topo_note = tr("已应用手工校正")
             except Exception as e:      # noqa: BLE001 - 校正层故障不该挡住看图
                 _log.debug("拓扑手工校正加载失败: %s", e)
@@ -85,13 +177,43 @@ class TopologyDialog(QDialog):
         self.scene = QGraphicsScene()
         self.scene.setBackgroundBrush(QBrush(_theme_color("topo_bg", dark)))
         self.view.setScene(self.scene)
+        # 右键菜单（隐藏/备注/恢复）只在真实拓扑下有意义
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self.view, 1)
 
+        # ── 底部：图例 + 校正操作按钮 ──
         self.legend = QLabel()
         layout.addWidget(self.legend)
 
+        self.tools = QHBoxLayout()
+        self.tools.addStretch(1)
+        self._btn_reload = QPushButton(tr("重新布局"))
+        self._btn_reload.setToolTip(tr("丢弃当前手工改动，按自动布局重画"))
+        self._btn_reload.clicked.connect(self._on_reload_layout)
+        self._btn_save = QPushButton(tr("保存校正"))
+        self._btn_save.setToolTip(tr("把钉住/隐藏/备注写入 topology_overrides.json"))
+        self._btn_save.clicked.connect(self._on_save_overrides)
+        self.tools.addWidget(self._btn_reload)
+        self.tools.addWidget(self._btn_save)
+        layout.addLayout(self.tools)
+
         self.setLayout(layout)
 
+        self._render()
+
+    # ── 渲染（可反复调用：拖拽/隐藏/恢复后重画）──
+
+    def _render(self):
+        """清空场景并按当前状态重画。
+
+        拖拽钉住、隐藏节点/链路、恢复默认之后都会调它 —— 与其"就地挪图元"，
+        不如整场重画：节点带着标签、旁边连着线，手工同步这些关联极易漏，
+        重画一次既简单又保证不错位（几十到几百个图元的重建开销可忽略）。
+        """
+        self.scene.clear()
+        self._real_rendered = False
+        self._topo_note = tr("已应用手工校正") if self._has_overrides() else ""
         if self.topology and self.topology.links:
             self._build_real_topology()
         if not self._real_rendered:
@@ -103,6 +225,205 @@ class TopologyDialog(QDialog):
                     p for p in (self._topo_note, self.topology.note) if p)
         # 图例放在构建**之后**：星型拓扑要往里补"已隐藏 N 台离线设备"。
         self._update_legend()
+        self._update_tools_visible()
+        self._fit_view()
+
+    def _has_overrides(self) -> bool:
+        return self._ov is not None and not self._ov.is_empty()
+
+    def _update_tools_visible(self):
+        """校正按钮只在**真实拓扑**下显示：星型回退没有可钉的坐标。"""
+        usable = self._ov is not None and (self._base_topology is not None
+                                           and bool(self._base_topology.links))
+        for btn in (getattr(self, "_btn_reload", None),
+                    getattr(self, "_btn_save", None)):
+            if btn is not None:
+                btn.setVisible(usable)
+        if usable and hasattr(self, "_btn_save"):
+            self._btn_save.setEnabled(self._dirty)
+            self._btn_save.setText(tr("保存校正") + (" *" if self._dirty else ""))
+
+    # ── 手工校正：拖拽 / 右键 / 保存 ──
+
+    def _require_overrides(self):
+        """确保 `self._ov` 是个可写的校正对象；不可用时返回 None。"""
+        if self._ov is not None:
+            return self._ov
+        if self.no_overrides or self._base_topology is None:
+            return None
+        try:
+            import topology_overrides as tov
+            self._ov = tov.TopologyOverrides()
+            return self._ov
+        except Exception as e:      # noqa: BLE001
+            _log.debug("无法创建校正对象: %s", e)
+            return None
+
+    def _reproject(self, defer: bool = True, mark_dirty: bool = True):
+        """把当前校正重新投影到拓扑上并重画（编辑动作的统一收尾）。
+
+        ⚠️ 默认**延迟到下一轮事件循环**：这些调用多半发生在图元的事件处理
+        之中（拖动松手、右键菜单动作），当场 `scene.clear()` 会在 Qt 仍持有
+        该图元时把它删掉 —— 悬垂指针，表现为随机崩溃。`defer=False` 仅供
+        非事件上下文的调用方（如"重新布局"按钮）使用。
+
+        ``mark_dirty=False``：本次投影来自"丢弃未保存改动"（重新布局），
+        不该把状态又标成"有改动"。
+        """
+        if defer:
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._reproject(defer=False,
+                                                         mark_dirty=mark_dirty))
+            return
+        import topology_overrides as tov
+        try:
+            self.topology, self._pinned = tov.apply_overrides(
+                self._base_topology, self._ov)
+        except Exception as e:      # noqa: BLE001
+            _log.warning("应用拓扑校正失败: %s", e)
+            return
+        if mark_dirty:
+            self._dirty = True
+            self._saved_hint = ""  # 又有新改动 → 上次"已保存"的提示不再成立
+        self._render()
+
+    def on_node_dragged(self, node_key, scene_pos):
+        """节点被拖到新位置 → 记成钉住坐标并重画。"""
+        ov = self._require_overrides()
+        if ov is None or not node_key:
+            return
+        ov.upsert_node(node_key, pin=(scene_pos.x(), scene_pos.y()))
+        self._reproject()
+
+    def _node_by_key(self, node_key):
+        if self._base_topology is None:
+            return None
+        for node in self._base_topology.nodes:
+            import topology_overrides as tov
+            if tov.node_scene_key(node) == node_key:
+                return node
+        return None
+
+    def _on_context_menu(self, pos):
+        """右键菜单：对点到的节点/链路做隐藏、备注、恢复。"""
+        if not self._real_rendered or self._require_overrides() is None:
+            return
+        item = self.view.itemAt(pos)
+        node_key = item.data(_NODE_ID_ROLE) if item is not None else None
+        link_key = item.data(_LINK_ID_ROLE) if item is not None else None
+        menu = QMenu(self)
+        if node_key:
+            menu.addAction(tr("钉住在此位置"),
+                           lambda: self._pin_here(node_key))
+            menu.addAction(tr("编辑备注…"), lambda: self._edit_note(node_key))
+            menu.addAction(tr("隐藏此节点"), lambda: self._hide_node(node_key))
+            menu.addAction(tr("恢复此节点"), lambda: self._restore_node(node_key))
+        elif link_key:
+            a, b = link_key
+            menu.addAction(tr("隐藏此链路"),
+                           lambda: self._hide_link(a, b))
+            menu.addAction(tr("恢复此链路"),
+                           lambda: self._restore_link(a, b))
+        else:
+            menu.addAction(tr("恢复全部手工校正"), self._restore_all)
+        if menu.isEmpty():
+            return
+        menu.exec_(self.view.mapToGlobal(pos))
+
+    def _pin_here(self, node_key):
+        """把节点钉在它**当前自动排出的位置**（用户只是想固定它，不想挪）。"""
+        node = self._node_by_key(node_key)
+        if node is None:
+            return
+        from topology_discovery import layout_real_topology
+        positions = layout_real_topology(self.topology, self.gateway_ip or "")
+        xy = positions.get(node.id)
+        if xy is None:
+            return
+        self._require_overrides().upsert_node(node_key, pin=xy)
+        self._reproject()
+
+    def _edit_note(self, node_key):
+        node = self._node_by_key(node_key)
+        current = ""
+        if self._ov is not None:
+            found = self._ov._find_node([node_key])
+            current = found.note if found is not None else ""
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle(tr("节点备注"))
+        dlg.setLabelText(tr("为 {name} 添加备注：").format(
+            name=(node.label or node.ip) if node is not None else node_key))
+        dlg.setTextValue(current)
+        _localize_input_dialog(dlg)
+        if dlg.exec_() == QInputDialog.Accepted:
+            self._require_overrides().upsert_node(
+                node_key, note=dlg.textValue().strip())
+            self._reproject()
+
+    def _hide_node(self, node_key):
+        self._require_overrides().upsert_node(node_key, hidden=True)
+        self._reproject()
+
+    def _restore_node(self, node_key):
+        ov = self._require_overrides()
+        ov.remove_node([node_key])
+        self._prune_and_reproject(ov)
+
+    def _hide_link(self, a, b):
+        self._require_overrides().upsert_link(a, b, hidden=True)
+        self._reproject()
+
+    def _restore_link(self, a, b):
+        ov = self._require_overrides()
+        ov.remove_link(a, b)
+        self._prune_and_reproject(ov)
+
+    def _restore_all(self):
+        if not ui_msg.msg_ask(self, tr("恢复全部手工校正"),
+                              tr("将丢弃所有钉住、隐藏与备注，确定吗？")):
+            return
+        import topology_overrides as tov
+        self._ov = tov.TopologyOverrides()
+        self._reproject()
+
+    def _prune_and_reproject(self, ov):
+        """删除后清掉空壳条目：界面里"恢复"一个只剩空键的条目不该留在文件里。"""
+        ov.prune()
+        self._reproject()
+
+    def _on_reload_layout(self):
+        """丢弃当前**未保存**的改动，回到磁盘上的校正 + 自动布局。"""
+        import topology_overrides as tov
+        try:
+            self._ov = tov.load(self.overrides_path)
+        except Exception as e:      # noqa: BLE001
+            _log.debug("重新载入校正失败: %s", e)
+            self._ov = tov.TopologyOverrides()
+        self._dirty = False
+        self._saved_hint = ""
+        self._reproject(mark_dirty=False)
+
+    def _on_save_overrides(self):
+        """写回 `topology_overrides.json`。
+
+        成功**不弹模态框**：用户往往要连续"拖一下、存一下"，每存一次弹一次
+        "已保存"是干扰；同时模态弹窗会让无头测试永久挂住（本项目的既有教训）。
+        反馈放在按钮文字与图例里；只有**失败**才弹窗（那需要用户知道）。
+        """
+        import topology_overrides as tov
+        ov = self._require_overrides()
+        if ov is None:
+            return
+        ov.prune()
+        path = self.overrides_path or tov.default_path()
+        ok, err = tov.save(ov, path)
+        if ok:
+            self._dirty = False
+            self._saved_hint = tr("已保存到 {path}").format(path=path)
+            self._render()
+        else:
+            ui_msg.msg_warn(self, tr("保存校正"),
+                            tr("写入失败：{err}").format(err=err))
 
     # ── 视口自适应 ──
 
@@ -156,6 +477,8 @@ class TopologyDialog(QDialog):
                 items.append(self.topology.note)
         elif self._topo_note:
             items.append(self._topo_note)
+        if self._saved_hint:
+            items.append(self._saved_hint)
         self.legend.setText("   ".join(items))
         self.legend.setStyleSheet("font-size: 12px; padding: 4px;")
 
@@ -263,7 +586,12 @@ class TopologyDialog(QDialog):
                 continue
             x1, y1 = positions[link.source_id]
             x2, y2 = positions[link.target_id]
-            self.scene.addLine(x1, y1, x2, y2, self._link_pen(link.protocol))
+            line = self._link_item(x1, y1, x2, y2, link.protocol,
+                                   self._scene_key_of(link.source_id),
+                                   self._scene_key_of(link.target_id))
+            # 线太细不好点中 → 加宽选中区域，让"隐藏此链路"能右键到
+            line.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
+            self.scene.addItem(line)
 
             # 端口标注只画在**骨干链路**（LLDP/CDP）上：那几条线又长又疏，
             # 标注落在各自的中点上很清楚。转发表的端口已经进了节点悬停提示，
@@ -294,6 +622,35 @@ class TopologyDialog(QDialog):
 
         self.scene.setSceneRect(
             self.scene.itemsBoundingRect().adjusted(-60, -60, 60, 60))
+
+    def _scene_key_of(self, node_id: str) -> str:
+        """拓扑节点 id → **场景稳定键**（与 `_DraggableNodeItem` 上挂的一致）。
+
+        链路两端也要挂这种键（而不是 id），才能和节点的身份键对上 ——
+        节点 id 可能是 IP，而节点的稳定键在有 MAC 时是 MAC。
+        """
+        for node in self.topology.nodes:
+            if node.id == node_id:
+                return self._scene_key(node)
+        return node_id
+
+    @staticmethod
+    def _scene_key(node) -> str:
+        import topology_overrides as tov
+        return tov.node_scene_key(node)
+
+    def _link_item(self, x1, y1, x2, y2, protocol, key_a, key_b):
+        """一条可点选的链路（QGraphicsLineItem + 身份对）。
+
+        Qt 的 `QGraphicsLineItem` 判定命中用的是 0 宽笔迹 —— 1px 的虚线几乎
+        点不中。所以这里用一个自定义子类把命中区域按画笔宽度放宽。
+        """
+        pen = self._link_pen(protocol)
+        item = _SelectableLinkItem(x1, y1, x2, y2)
+        item.setPen(pen)
+        item.setData(_LINK_ID_ROLE, (key_a, key_b))
+        item.setZValue(0)
+        return item
 
     def _link_pen(self, protocol: str):
         """链路画笔。
@@ -333,7 +690,8 @@ class TopologyDialog(QDialog):
             color = _theme_color("topo_link", self.dark)
             pen = QPen(QColor(255, 255, 255, 80), 1.5)
 
-        rect = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
+        rect = _DraggableNodeItem(x - w / 2, y - h / 2, w, h,
+                                  self, self._scene_key(node))
         rect.setBrush(QBrush(color))
         rect.setPen(pen)
         rect.setToolTip(self._topo_tooltip(node))
@@ -361,7 +719,8 @@ class TopologyDialog(QDialog):
                 online = r.status == "online"
                 break
         color = _theme_color("online" if online else "topo_offline", self.dark)
-        dot = QGraphicsEllipseItem(x - 10, y - 10, 20, 20)
+        dot = _DraggableDotItem(x - 10, y - 10, 20, 20,
+                                self, self._scene_key(node))
         dot.setBrush(QBrush(color))
         dot.setPen(QPen(QColor(0, 0, 0, 60), 1))
         dot.setToolTip(self._topo_tooltip(node))

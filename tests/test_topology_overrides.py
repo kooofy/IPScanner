@@ -343,5 +343,114 @@ class EndToEndProjectionTest(unittest.TestCase):
         self.assertEqual(positions[_SW], (400.0, 50.0))
 
 
+class EditableApiTest(unittest.TestCase):
+    """GUI 编辑用到的可变 API：upsert / remove / prune / 工厂。
+
+    这些是拖拽、右键"隐藏/备注/恢复"的底层 —— 交互层只是把鼠标动作翻译成
+    对这里的调用，所以把不变量钉在这一层，GUI 才能做薄。
+    """
+
+    def _node(self, **kw):
+        base = dict(id="10.0.0.2", label="sw", ip="10.0.0.2",
+                    mac="AA:BB:CC:DD:EE:02", kind=KIND_SWITCH, is_switch=True)
+        base.update(kw)
+        return TopoNode(**base)
+
+    def test_factory_fills_identity_keys_in_priority_order(self):
+        ov = tov.make_node_override(self._node())
+        keys = tov._override_keys(ov)
+        self.assertEqual(keys[0], "mac:aabbccddee02")
+        self.assertIn("ip:10.0.0.2", keys)
+        self.assertIn("name:sw", keys)
+
+    def test_factory_skips_name_when_label_equals_ip(self):
+        """标签与 IP 相同时 `name` 字段留空（不重复登记）。
+
+        注意 `key` 字段仍是节点 id（兜底标识），它有自己的一组键 —— 这里只
+        断言 `name` 字段本身为空，而不是"键列表里没有 name: 前缀"。
+        """
+        ov = tov.make_node_override(self._node(label="10.0.0.2"))
+        self.assertEqual(ov.name, "")
+
+    def test_upsert_pin_then_note_does_not_duplicate(self):
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node("mac:aabbccddee02", pin=(10, 20))
+        ovs.upsert_node(["mac:aabbccddee02", "ip:10.0.0.2"], note="机房 A")
+        self.assertEqual(len(ovs.nodes), 1)
+        self.assertEqual(ovs.nodes[0].pin, (10.0, 20.0))
+        self.assertEqual(ovs.nodes[0].note, "机房 A")
+
+    def test_upsert_node_none_means_leave_unchanged(self):
+        """`hidden=None` 是"别动"，不是"设为 False" —— 否则编辑备注会清掉隐藏。"""
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node("ip:10.0.0.9", hidden=True)
+        ovs.upsert_node("ip:10.0.0.9", note="x")
+        self.assertEqual(len(ovs.nodes), 1)
+        self.assertTrue(ovs.nodes[0].hidden)
+        self.assertEqual(ovs.nodes[0].note, "x")
+
+    def test_upsert_node_accepts_node_object(self):
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node(self._node(), pin=(1, 2))
+        self.assertEqual(tov._override_keys(ovs.nodes[0])[0], "mac:aabbccddee02")
+
+    def test_link_upsert_is_direction_and_form_agnostic(self):
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_link("AA:BB:CC:DD:EE:02", "10.0.0.1", hidden=True)
+        ovs.upsert_link("10.0.0.1", "aabbccddee02", note="直连")
+        self.assertEqual(len(ovs.links), 1)
+        self.assertTrue(ovs.links[0].hidden)
+        self.assertEqual(ovs.links[0].note, "直连")
+
+    def test_remove_node_and_link(self):
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node("ip:10.0.0.9", hidden=True)
+        ovs.upsert_link("10.0.0.1", "10.0.0.9", hidden=True)
+        self.assertTrue(ovs.remove_node(["ip:10.0.0.9"]))
+        self.assertTrue(ovs.remove_link("10.0.0.1", "10.0.0.9"))
+        self.assertTrue(ovs.is_empty())
+        # 再删一次返回 False（不抛）
+        self.assertFalse(ovs.remove_node(["ip:10.0.0.9"]))
+
+    def test_prune_drops_empty_entries(self):
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node("ip:10.0.0.9")          # 空白条目
+        ovs.upsert_node("ip:10.0.0.8", note="keep")
+        ovs.upsert_link("10.0.0.1", "10.0.0.2")  # 空白链路
+        ovs.prune()
+        self.assertEqual(len(ovs.nodes), 1)
+        self.assertEqual(ovs.nodes[0].ip, "10.0.0.8")
+        self.assertEqual(len(ovs.links), 0)
+
+    def test_upsert_bad_identity_does_not_crash(self):
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node("", pin=(1, 2))
+        ovs.upsert_link("", "", hidden=True)
+        # 空身份不该抛；产生的空壳由 prune 收掉
+        ovs.prune()
+        self.assertTrue(ovs.is_empty())
+
+    def test_node_scene_key_matches_first_identity_key(self):
+        node = self._node()
+        self.assertEqual(tov.node_scene_key(node),
+                         tov.node_identity_keys(node)[0])
+
+    def test_edited_overrides_roundtrip_to_json(self):
+        """编辑后的集合能存能读，且语义不变（GUI 保存路径的保证）。"""
+        ovs = tov.TopologyOverrides()
+        ovs.upsert_node("mac:aabbccddee02", pin=(300, 400), note="核心")
+        ovs.upsert_node("ip:10.0.0.9", hidden=True)
+        ovs.upsert_link("mac:aabbccddee02", "10.0.0.1", hidden=True)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ov.json")
+            ok, err = tov.save(ovs, p)
+            self.assertTrue(ok, err)
+            back = tov.load(p)
+        self.assertEqual(len(back.nodes), 2)
+        self.assertEqual(back.nodes[0].pin, (300.0, 400.0))
+        self.assertTrue(back.nodes[1].hidden)
+        self.assertTrue(back.links[0].hidden)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

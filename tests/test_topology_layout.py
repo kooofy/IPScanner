@@ -360,7 +360,132 @@ class RealTopologyViewTest(_DialogCase):
 # ── 画布宽高比验收（建议书 §6.2，v1.9 #9）已迁至纯函数测试 ──
 # 见 `tests/test_topology_layout_pure.py::AspectRatioAcceptanceTest`：
 # 该验收基于 `layout_real_topology` 纯函数，不依赖 PyQt，可在无头 / CI 环境跑。
-# `#9`「过宽折行」已落地，原 `@expectedFailure` 验收已转正为真正的回归守卫。
+# `#9`「过宽折行」已落地，原 `@expectedFailure` 转正为真正的回归守卫。
+
+
+class OverrideInteractionTest(_DialogCase):
+    """手工校正的**交互层**：拖拽钉住 / 隐藏 / 备注 / 保存 / 重载。
+
+    纯数据层的不变量已由 `tests/test_topology_overrides.py` 钉住；这里只验证
+    对话框把鼠标动作正确翻译成校正改动，并且图元上挂着**跨扫描稳定**的身份键
+    （否则下一轮扫描后校正就找不到目标了）。
+
+    ⚠️ 拖动/右键在真实运行时是事件驱动的（重建场景靠 `QTimer.singleShot` 延后，
+    免得在图元事件处理中途把它删掉）；测试里直接调回调 + `_reproject(defer=False)`,
+    绕开事件循环，既确定又不需要真的发鼠标事件。
+    """
+
+    def _topo(self):
+        from topology_discovery import TopoLink, TopoNode, Topology
+        topo = Topology()
+        topo.nodes = [
+            TopoNode(id="10.0.0.1", label="gw", ip="10.0.0.1",
+                     kind="gateway", is_switch=True, is_gateway=True),
+            TopoNode(id="10.0.0.2", label="sw", ip="10.0.0.2",
+                     mac="AA:BB:CC:DD:EE:02", kind="switch", is_switch=True),
+            TopoNode(id="10.0.0.9", label="pc", ip="10.0.0.9"),
+        ]
+        topo.links = [TopoLink("10.0.0.1", "10.0.0.2", "GE0/0", "", "LLDP")]
+        return topo
+
+    def _dialog(self, path=None):
+        from scanner.models import ScanResult
+        topo = self._topo()
+        results = [ScanResult(ip=n.ip, status="online") for n in topo.nodes]
+        dlg = ui_dialogs.TopologyDialog(results, "10.0.0.1", False,
+                                        topology=topo, overrides_path=path)
+        self.addCleanup(dlg.deleteLater)
+        return dlg
+
+    def test_node_items_carry_stable_identity_key(self):
+        """拖动/右键靠图元上的键定位 —— 必须是 MAC 优先的稳定键。"""
+        from ui_dialogs.topology import _NODE_ID_ROLE
+        dlg = self._dialog()
+        keys = {it.data(_NODE_ID_ROLE) for it in dlg.scene.items()
+                if it.data(_NODE_ID_ROLE)}
+        self.assertIn("mac:aabbccddee02", keys,
+                      "有 MAC 的节点应以 MAC 为稳定键（换 IP 仍命中）")
+
+    def test_drag_records_pin_and_marks_dirty(self):
+        from PyQt5.QtCore import QPointF
+        dlg = self._dialog()
+        dlg.on_node_dragged("mac:aabbccddee02", QPointF(300, 400))
+        dlg._reproject(defer=False)
+        self.assertEqual(dlg._pinned.get("10.0.0.2"), (300.0, 400.0))
+        self.assertTrue(dlg._dirty)
+
+    def test_hide_node_removes_it_and_its_links(self):
+        dlg = self._dialog()
+        dlg._hide_node("ip:10.0.0.9")
+        dlg._reproject(defer=False)
+        ids = {n.id for n in dlg.topology.nodes}
+        self.assertNotIn("10.0.0.9", ids)
+
+    def test_save_then_reload_keeps_corrections(self):
+        """保存到文件后重新打开，钉住与隐藏仍在 —— 「跨会话生效」的保证。"""
+        import os
+        import tempfile
+        from PyQt5.QtCore import QPointF
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ov.json")
+            dlg = self._dialog(path=p)
+            dlg.on_node_dragged("mac:aabbccddee02", QPointF(11, 22))
+            dlg._reproject(defer=False)
+            dlg._hide_node("ip:10.0.0.9")
+            dlg._reproject(defer=False)
+            dlg.overrides_path = p
+            dlg._on_save_overrides()
+            self.assertFalse(dlg._dirty)
+            self.assertTrue(os.path.exists(p))
+
+            dlg2 = self._dialog(path=p)
+            self.assertEqual(dlg2._pinned.get("10.0.0.2"), (11.0, 22.0))
+            self.assertNotIn("10.0.0.9", {n.id for n in dlg2.topology.nodes})
+
+    def test_reload_layout_discards_unsaved_changes(self):
+        from PyQt5.QtCore import QPointF
+        dlg = self._dialog()
+        dlg.on_node_dragged("mac:aabbccddee02", QPointF(99, 99))
+        dlg._reproject(defer=False)
+        self.assertTrue(dlg._dirty)
+        dlg._on_reload_layout()
+        # `_on_reload_layout` 内部的重算是延迟到事件循环的；测试里手动推进一步
+        dlg._reproject(defer=False, mark_dirty=False)
+        self.assertFalse(dlg._dirty)
+        self.assertEqual(dlg._pinned, {})
+
+    def test_restore_node_clears_its_entry(self):
+        dlg = self._dialog()
+        dlg._hide_node("ip:10.0.0.9")
+        dlg._reproject(defer=False)
+        dlg._restore_node("ip:10.0.0.9")
+        dlg._reproject(defer=False)
+        self.assertIn("10.0.0.9", {n.id for n in dlg.topology.nodes})
+
+    def test_labels_follow_when_node_is_pinned(self):
+        """钉住后节点方块的**场景位置**应落到钉住点 —— 标签/连线才会跟着重建。"""
+        from PyQt5.QtCore import QPointF
+        from PyQt5.QtWidgets import QGraphicsRectItem
+        dlg = self._dialog()
+        dlg.on_node_dragged("mac:aabbccddee02", QPointF(500, 600))
+        dlg._reproject(defer=False)
+        # 方形节点里，中心的 x/y 落在 (500,600) 的那个就是被钉住的
+        centers = [(it.sceneBoundingRect().center().x(),
+                    it.sceneBoundingRect().center().y())
+                   for it in dlg.scene.items()
+                   if isinstance(it, QGraphicsRectItem)]
+        self.assertTrue(any(abs(cx - 500) < 1 and abs(cy - 600) < 1
+                            for cx, cy in centers),
+                        "被钉住的节点没有出现在钉住坐标处")
+
+    def test_no_overrides_keeps_tools_hidden(self):
+        """星型回退 / 关闭校正时，保存按钮应隐藏（没有可保存的校正）。"""
+        from scanner.models import ScanResult
+        results = [ScanResult(ip="10.0.0.9", status="online")]
+        dlg = ui_dialogs.TopologyDialog(results, "10.0.0.1", False,
+                                        no_overrides=True)
+        self.addCleanup(dlg.deleteLater)
+        self.assertTrue(dlg._btn_save.isHidden())
 
 
 if __name__ == "__main__":

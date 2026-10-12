@@ -147,12 +147,112 @@ class LinkOverride:
 
 @dataclass
 class TopologyOverrides:
-    """一份手工校正集合。空实例 = "没有任何校正"，行为与不做校正完全一致。"""
+    """一份手工校正集合。空实例 = "没有任何校正"，行为与不做校正完全一致。
+
+    除容器外还提供一组**可变编辑 API**（`upsert_*` / `remove_*`），供 GUI 的
+    拖拽与右键菜单调用。这些方法只做"集合层面的增删改 + 去重"，不碰 Qt、
+    不需要拓扑对象，因此可被纯单元测试直接覆盖（沙箱无 PyQt5 也能跑）。
+    """
     nodes: List[NodeOverride] = field(default_factory=list)
     links: List[LinkOverride] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not self.nodes and not self.links
+
+    # ── 可变编辑（GUI 用）───────────────────────────────────────────
+
+    def _find_node(self, identity) -> Optional[NodeOverride]:
+        """按身份找到已存在的节点校正条目。
+
+        ``identity`` 可以是节点的候选键列表（`node_identity_keys` 的输出），
+        也可以是单个字符串。匹配用**键集合求交**，因此"同一个节点用不同键
+        反复编辑"不会堆出多条重复校正。
+        """
+        keys = _as_key_set(identity)
+        if not keys:
+            return None
+        for ov in self.nodes:
+            if keys & set(_override_keys(ov)):
+                return ov
+        return None
+
+    def upsert_node(self, identity, *, pin=None, hidden=None, note=None,
+                    _apply=None) -> NodeOverride:
+        """新增或更新一个节点校正条目，返回它。
+
+        ``pin`` / ``hidden`` / ``note`` 传 ``None`` 表示"这一项不动"
+        （区分"设为 False"与"不修改"）；``pin`` 传 ``(x, y)`` 覆盖。
+        身份键从 ``identity`` 提取（`make_node_override` 的产物通常直接传入）。
+        """
+        ov = self._find_node(identity)
+        if ov is None:
+            if isinstance(identity, NodeOverride):
+                ov = identity
+            elif isinstance(identity, str):
+                ov = _make_keyed_override(identity)
+            else:
+                ov = make_node_override(identity)
+            # 身份键全空的条目永远匹配不上任何节点，留在文件里只会误导 → 不入列
+            if _override_keys(ov):
+                self.nodes.append(ov)
+            else:
+                _log.debug("忽略身份为空的节点校正: %r", identity)
+                ov = NodeOverride()
+        if pin is not None:
+            ov.pin = (float(pin[0]), float(pin[1]))
+        if hidden is not None:
+            ov.hidden = bool(hidden)
+        if note is not None:
+            ov.note = _clean_str(note)
+        if _apply is not None:
+            _apply(ov)
+        return ov
+
+    def remove_node(self, identity) -> bool:
+        """删除一个节点校正条目（若删成"啥都没有"则整条移除，不留空壳）。"""
+        ov = self._find_node(identity)
+        if ov is None:
+            return False
+        self.nodes.remove(ov)
+        return True
+
+    def _find_link(self, a, b) -> Optional[LinkOverride]:
+        keys = _link_identity_pair(a, b)
+        if keys is None:
+            return None
+        for lo in self.links:
+            if _link_identity_pair(lo.source, lo.target) == keys:
+                return lo
+        return None
+
+    def upsert_link(self, a, b, *, hidden=None, note=None) -> LinkOverride:
+        """新增或更新一条链路校正条目。两端可写 MAC/IP/节点 id/名字。"""
+        lo = self._find_link(a, b)
+        if lo is None:
+            pair = _link_identity_pair(a, b)
+            if pair is None:
+                _log.debug("忽略端点为空/相同的链路校正: %r %r", a, b)
+                return LinkOverride()
+            lo = LinkOverride(source=pair[0], target=pair[1])
+            self.links.append(lo)
+        if hidden is not None:
+            lo.hidden = bool(hidden)
+        if note is not None:
+            lo.note = _clean_str(note)
+        return lo
+
+    def remove_link(self, a, b) -> bool:
+        lo = self._find_link(a, b)
+        if lo is None:
+            return False
+        self.links.remove(lo)
+        return True
+
+    def prune(self):
+        """丢掉"什么都没设"的空条目（界面反复编辑后可能留下残壳）。"""
+        self.nodes = [n for n in self.nodes
+                      if n.pin is not None or n.hidden or n.note]
+        self.links = [lo for lo in self.links if lo.hidden or lo.note]
 
     def to_dict(self) -> dict:
         return {
@@ -311,6 +411,92 @@ def _override_keys(ov: NodeOverride) -> List[str]:
     if ov.name:
         keys.append("name:" + ov.name)
     return keys
+
+
+def _as_key_set(identity) -> set:
+    """把"身份"规整成键的集合：支持 NodeOverride / 节点对象 / 键列表 / 单字符串。
+
+    GUI 侧拖拽时手上是节点对象或它的场景键字符串，`apply_overrides` 时手上是
+    键列表 —— 都归一到这里，编辑 API 才好复用同一套匹配逻辑。
+    """
+    if identity is None:
+        return set()
+    if isinstance(identity, NodeOverride):
+        return set(_override_keys(identity))
+    if isinstance(identity, str):
+        return set(_override_keys(_make_keyed_override(identity)))
+    # 拓扑节点对象：有 id/mac/ip/label 属性 → 用统一的身份键提取
+    if hasattr(identity, "id") and hasattr(identity, "ip"):
+        return set(node_identity_keys(identity))
+    keys = set()
+    for k in identity:
+        if isinstance(k, str) and k:
+            keys.add(k)
+    return keys
+
+
+def _make_keyed_override(text: str) -> NodeOverride:
+    """把一个裸标识字符串（mac / ip / id / 名字）包成一条校正条目。
+
+    有前缀（`mac:` 等）原样保留；像 MAC 的归一成 MAC 键；否则按 id + name
+    两种可能都登记（`_override_keys` 里会展开）。
+    """
+    text = _clean_str(text)
+    if not text:
+        return NodeOverride()
+    if text.startswith(("mac:", "ip:", "id:", "name:")):
+        prefix, _, rest = text.partition(":")
+        return NodeOverride(**{prefix: rest})
+    if normalize_mac(text):
+        return NodeOverride(mac=normalize_mac(text))
+    return NodeOverride(key=text)
+
+
+def make_node_override(node) -> NodeOverride:
+    """从拓扑节点造一条**空白**校正条目（身份键按 mac → ip → id → name 填）。
+
+    GUI 里"就地钉住/隐藏/备注"都要先有一条身份确定的条目 —— 这样它才能跨扫描
+    命中同一台设备。空白条目本身不影响任何显示（`pin=None, hidden=False,
+    note=""`），只有在被赋值后才写回文件。
+    """
+    ip = _clean_str(getattr(node, "ip", ""))
+    label = _clean_str(getattr(node, "label", ""))
+    # 标签与 IP 相同时不重复登记成 name 键（`node_identity_keys` 侧也一样，
+    # 否则一个设备会占两个 name: 键，`_find_node` 的键集合求交虽仍正确，
+    # 但写回文件时语义含糊）
+    name = label if label and label != ip else ""
+    return NodeOverride(
+        key=_clean_str(getattr(node, "id", "")),
+        mac=normalize_mac(getattr(node, "mac", "") or ""),
+        ip=ip,
+        name=name,
+    )
+
+
+def _link_identity_pair(a, b):
+    """把链路两端规整成**可比较的有序对**（排序后），用于链路条目的匹配。
+
+    两端各自归一：MAC → ``mac:<hex>``，否则原样当 id/名字。任一端为空返回
+    ``None``（无法构成链路）。
+    """
+    ends = []
+    for raw in (a, b):
+        text = _clean_str(raw)
+        if not text:
+            return None
+        mac = normalize_mac(text)
+        ends.append("mac:" + mac if mac else text)
+    return tuple(sorted(ends))
+
+
+def node_scene_key(node) -> str:
+    """给 GUI 用：一个节点在**场景里的稳定键**（用于 QGraphicsItem.setData）。
+
+    与 `node_identity_keys` 的第一个键同义 —— 图元上挂着它，右键/拖动时就能
+    倒推出该改哪条校正。
+    """
+    keys = node_identity_keys(node)
+    return keys[0] if keys else _clean_str(getattr(node, "id", ""))
 
 
 def _resolve_link_end(raw: str, key_to_id: Dict[str, str],
