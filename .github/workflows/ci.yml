@@ -50,7 +50,13 @@ jobs:
         run: python -m ruff check .
 
       - name: 单元测试
+        # 🔴 timeout-minutes 是硬约束：整套测试本机约 3.5~4 分钟，正常值远小于
+        # 此阈值。2026-10-12 实测过一次**挂死**（不是失败）—— 一个测试把共享池
+        # 换成 MagicMock，as_completed() 于是 event.wait() 等一个永不完事的
+        # future，进程永久阻塞。没有 timeout 时这种 bug 会把 job 挂满 GitHub
+        # 默认的 360 分钟才被杀，白烧 6 小时执行配额。
         run: python run_tests.py
+        timeout-minutes: 30
 
       - name: CLI 冒烟测试
         # 无头模式是本项目的对外自动化接口，必须保证「装完就能跑」：
@@ -104,7 +110,13 @@ jobs:
         run: python -m ruff check .
 
       - name: 单元测试
+        # 🔴 timeout-minutes 是硬约束：整套测试本机约 3.5~4 分钟，正常值远小于
+        # 此阈值。2026-10-12 实测过一次**挂死**（不是失败）—— 一个测试把共享池
+        # 换成 MagicMock，as_completed() 于是 event.wait() 等一个永不完事的
+        # future，进程永久阻塞。没有 timeout 时这种 bug 会把 job 挂满 GitHub
+        # 默认的 360 分钟才被杀，白烧 6 小时执行配额。
         run: python run_tests.py
+        timeout-minutes: 30
 
       - name: CLI 冒烟测试
         # 与 Windows 侧同三条链路：参数解析、引擎扫描、JSON 输出。
@@ -205,6 +217,7 @@ jobs:
 
       - name: 单元测试（带覆盖率）
         run: python -m coverage run run_tests.py
+        timeout-minutes: 30
 
       - name: 覆盖率总览（只出报告，**不**设门槛）
         # 全局数字不进门槛：它会被与本次改动无关的 0% 文件稀释

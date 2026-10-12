@@ -28,6 +28,8 @@ if ROOT not in sys.path:
 from scanner import async_ports
 from scanner import ports
 
+_WINDOWS = sys.platform == "win32"
+
 
 def _listen_socket():
     """起一个真实监听端口，返回 (socket, port)；调用方负责 close。"""
@@ -64,6 +66,7 @@ class _EngineStateMixin(unittest.TestCase):
 
 class CapabilityTest(_EngineStateMixin):
 
+    @unittest.skipUnless(_WINDOWS, "ProactorEventLoop 仅在 Windows 上存在")
     def test_proactor_available_on_this_env(self):
         ok, reason = async_ports.requires_proactor()
         # CI 是 Windows；能力探测应报可用且原因为空。
@@ -101,6 +104,7 @@ class CapabilityTest(_EngineStateMixin):
         self.assertIn("ProactorEventLoop", reason)
 
 
+@unittest.skipUnless(_WINDOWS, "异步 connect 引擎依赖 Windows 的 ProactorEventLoop(IOCP)")
 class ParityTest(_EngineStateMixin):
     """异步路径与线程池路径结果必须逐条一致。"""
 
@@ -149,6 +153,7 @@ class ParityTest(_EngineStateMixin):
             s2.close()
 
 
+@unittest.skipUnless(_WINDOWS, "异步 connect 引擎依赖 Windows 的 ProactorEventLoop(IOCP)")
 class RttCallbackTest(_EngineStateMixin):
 
     def test_rtt_only_for_open(self):
@@ -176,6 +181,7 @@ class RttCallbackTest(_EngineStateMixin):
             srv.close()
 
 
+@unittest.skipUnless(_WINDOWS, "异步 connect 引擎依赖 Windows 的 ProactorEventLoop(IOCP)")
 class ConcurrencyCapTest(_EngineStateMixin):
     """Semaphore 必须限制同时在飞的 connect 数。"""
 
@@ -224,7 +230,14 @@ class ConcurrencyCapTest(_EngineStateMixin):
 class EngineSelectionTest(_EngineStateMixin):
     """ports 层的引擎选择与回退。"""
 
+    def test_default_engine_matches_platform(self):
+        """默认引擎随平台能力：Windows=async，非 Windows=threaded（无 Proactor）。"""
+        expected = "async" if _WINDOWS else "threaded"
+        self.assertEqual(ports.tcp_engine(), expected)
+
     def test_default_is_async_on_windows(self):
+        if not _WINDOWS:
+            self.skipTest("非 Windows 无 ProactorEventLoop，默认即回退线程池")
         self.assertEqual(ports.tcp_engine(), "async")
 
     def test_env_threaded_forces_pool(self):
@@ -241,11 +254,15 @@ class EngineSelectionTest(_EngineStateMixin):
             srv.close()
 
     def test_env_async_forces_async(self):
+        if not _WINDOWS:
+            self.skipTest("非 Windows 无 ProactorEventLoop，强制 async 也会回退")
         os.environ[ports._ENGINE_ENV] = "async"
         self.assertEqual(ports.tcp_engine(), "async")
 
     def test_async_engine_failure_falls_back(self):
         """异步路径抛错 → 本次回退线程池并给出正确结果 + 置位回退标记。"""
+        if not _WINDOWS:
+            self.skipTest("非 Windows 本就不走异步路径，无从测回退")
         srv, openp = _listen_socket()
         try:
             with mock.patch.object(
@@ -260,6 +277,8 @@ class EngineSelectionTest(_EngineStateMixin):
             srv.close()
 
     def test_reset_restores_async(self):
+        if not _WINDOWS:
+            self.skipTest("非 Windows 无异步引擎可恢复")
         ports._async_engine_failed.set()
         self.assertEqual(ports.tcp_engine(), "threaded")
         ports.reset_async_engine_state()
@@ -286,6 +305,7 @@ class EngineSelectionTest(_EngineStateMixin):
                 async_ports.probe_ports_async("127.0.0.1", [80])
 
 
+@unittest.skipUnless(_WINDOWS, "异步 connect 引擎依赖 Windows 的 ProactorEventLoop(IOCP)")
 class LoopLifecycleTest(_EngineStateMixin):
 
     def test_loop_reused_across_calls(self):
@@ -314,6 +334,7 @@ class LoopLifecycleTest(_EngineStateMixin):
             async_ports.shutdown_loop()  # 不应抛
 
 
+@unittest.skipUnless(_WINDOWS, "异步 connect 引擎依赖 Windows 的 ProactorEventLoop(IOCP)")
 class ProbeOneDegradationTest(_EngineStateMixin):
     """单端口探测的各种异常都按"关闭"处理，不升级成扫描失败。"""
 

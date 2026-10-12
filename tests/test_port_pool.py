@@ -29,6 +29,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+_WINDOWS = sys.platform == "win32"
+
 from scanner import ports
 
 
@@ -75,10 +77,17 @@ class SharedPoolUsageTest(unittest.TestCase):
         # _syn_failed 是跨模块共享状态；若被其它测试置位，_scan_ports_udp
         # 会直接返回 [] 而不碰线程池，导致"是否复用共享池"的断言失真。
         ports._C._syn_failed.clear()
+        # 🔴 异步引擎失败标记同样是跨模块共享状态。若被别的测试置位，
+        # connect 会静默改走线程池路径 —— 于是
+        # test_scan_ports_connect_bypasses_pool_when_async 拿到的池是 MagicMock，
+        # 而 as_completed() 会永远等一个永不完事的 future（**真挂死**，
+        # 不是失败）。v2.1 §2.1 在 macOS/Linux CI 上烧掉 6 小时就是这一条。
+        ports.reset_async_engine_state()
 
     def tearDown(self):
         ports.shutdown_port_pool()
         ports._C._syn_failed.clear()
+        ports.reset_async_engine_state()
 
     def test_scan_ports_connect_uses_shared_pool_when_threaded(self):
         """强制回退线程池时，connect 仍复用共享池（回退路径的旧契约）。"""
@@ -89,8 +98,19 @@ class SharedPoolUsageTest(unittest.TestCase):
             ports.scan_ports("127.0.0.1", ports=[80, 81], timeout=0.1)
         spy.assert_called()
 
+    @unittest.skipUnless(_WINDOWS, "异步默认引擎仅 Windows（ProactorEventLoop）")
     def test_scan_ports_connect_bypasses_pool_when_async(self):
-        """默认（异步）引擎下，connect **不**走线程池（v2.1 §2.1 新契约）。"""
+        """默认（异步）引擎下，connect **不**走线程池（v2.1 §2.1 新契约）。
+
+        🔴 本测试把 `_get_port_pool` 换成裸 MagicMock —— 那意味着**任何**
+        走到线程池路径的情况都是致命的：`as_completed()` 会 `event.wait()`
+        等一个永不完事的 future，**进程真挂死**（不是断言失败）。
+        所以除了依赖 `skipUnless(_WINDOWS)`，还必须断言前置引擎确实是异步，
+        且 mock 的池**绝不能**被调用（这两件事互为保险）。
+        """
+        engine = ports.tcp_engine()
+        if engine != "async":
+            self.skipTest(f"当前 connect 引擎为 {engine}，本测试只对异步引擎有意义")
         with mock.patch.object(ports, "_get_port_pool") as spy, \
              mock.patch("scanner.async_ports.probe_ports_async",
                         return_value=[80]) as aspy:

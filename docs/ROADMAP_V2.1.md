@@ -159,6 +159,28 @@ pool  : 1.299s   →  ratio ≈ 0.50（2× 提速）
 另：`writer.close()` 抛错会被外层兜底成"关闭"，而**只有 `wait_closed()` 抛错**才走
 "连接已成功、忽略关闭失败"那条分支 —— 测哪个分支要对准。
 
+**⚠️ 追加教训（2026-10-13，CI 挂了 6 小时）**：上面新增的
+`test_scan_ports_connect_bypasses_pool_when_async` 把 `_get_port_pool` 换成**裸
+`MagicMock`**（没给 `return_value=real`）。**这在 Windows 上永远发现不了** —— 默认异步路径
+根本不碰池，断言全绿；但 macOS/Linux 没有 `ProactorEventLoop`，引擎静默回退线程池，
+于是 `as_completed()` 里 `event.wait()` 等一个**永不完事的 future**，进程永久挂死。
+表现为：日志最后一行是测试名，然后 `##[error]The operation was canceled.`。
+
+修法三条（缺一不可）：
+
+1. 该测试加 `@unittest.skipUnless(_WINDOWS, …)`，并**在测试内先断言
+   `ports.tcp_engine() == "async"`**，不是异步就 `skipTest`（后者防的是"失败标记泄漏
+   导致悄悄换路径"，比前者更本质）；
+2. `SharedPoolUsageTest.setUp/tearDown` 调 `ports.reset_async_engine_state()` ——
+   `_async_engine_failed` 是跨模块共享状态，泄漏会让后续所有 connect 测试换路径；
+3. CI 的 `单元测试` 步骤加 `timeout-minutes: 30`（全套正常 ~4 分钟；没有它这种 bug
+   要烧满 GitHub 默认 360 分钟才被杀）。
+
+**本地复现手段**（不必等 CI）：起一个 wrapper 在 import 任何项目模块前把
+`sys.platform` 改成 `"linux"`、`platform.system` 改成返回 `"Linux"`，再 `discover` 跑全套。
+判据：**0 error**、约 3 个假失败（`test_native_ping` 的 `ping` 二进制差异、
+`test_app_paths` 的不可写目录），其余必须全绿。**2033 tests / 0 error / 3 假失败** 即为正常。
+
 ---
 
 ### 2.2 无线切片（Native Wi-Fi API：信道拥塞 / 漫游日志 / SSID↔BSSID↔子网）
