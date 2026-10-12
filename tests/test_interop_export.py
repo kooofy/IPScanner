@@ -194,3 +194,158 @@ def test_export_interop_roundtrip(tmp_path):
         ix.export_interop(fmt, SAMPLE_ROWS, str(p))
         with open(p, "rb") as f:
             assert f.read() == ix.build_interop(fmt, SAMPLE_ROWS)
+
+
+# ── Nmap XML **读入**（§1.2 拆分；ROADMAP §3「读入的风险在语义」）───────────────
+
+
+def test_nmap_roundtrip_against_golden():
+    """读入我们自己产出的 golden 文件 → 可比较字段与样本行逐个相同。
+
+    这是「产出/读入同构」的守卫：改了产出格式而忘了读入，这里立刻红。
+    """
+    with open(os.path.join(_FIX, "nmap.xml"), encoding="utf-8") as f:
+        rows = ix.parse_nmap_xml(f.read())
+    assert len(rows) == len(SAMPLE_ROWS)
+    for orig, got in zip(SAMPLE_ROWS, rows):
+        for key in ("ip", "mac", "hostname", "status", "open_ports"):
+            assert got[key] == orig.get(key, ""), key
+        assert got["source"] == "nmap"
+
+
+def test_nmap_roundtrip_render_then_parse():
+    """render → parse 往返：所有可比较字段不变（含空主机名 / 空端口的 down 主机）。"""
+    rows = ix.parse_nmap_xml(ix.render_nmap_xml(SAMPLE_ROWS))
+    for orig, got in zip(SAMPLE_ROWS, rows):
+        for key in ("ip", "mac", "hostname", "status", "open_ports"):
+            assert got[key] == orig.get(key, ""), key
+
+
+def test_nmap_state_is_preserved_separately():
+    """🔴 Nmap 的 host 状态机与本项目 `status` **不等价**，来源必须能分开。
+
+    只留 `status` 会让「Nmap 说 up」和「我们的探测说 online」永远混为一谈；
+    `nmap_state` 保留原样值，`source` 标明来源。
+    """
+    rows = ix.parse_nmap_xml(ix.render_nmap_xml(SAMPLE_ROWS))
+    assert [r["nmap_state"] for r in rows] == ["up", "down"]
+    assert [r["status"] for r in rows] == ["online", "offline"]
+
+
+def test_nmap_unknown_state_does_not_become_offline():
+    """`unknown` 必须落空串（未知），**绝不**猜成 offline。
+
+    把「没探测到」谎报成「确认离线」，正是 ROADMAP §3 点名的语义风险。
+    """
+    assert ix.nmap_state_to_status("unknown") == ""
+    assert ix.nmap_state_to_status("") == ""
+    assert ix.nmap_state_to_status("something-else") == ""
+    assert ix.nmap_state_to_status(None) == ""
+    assert ix.nmap_state_to_status("UP") == "online"      # 大小写不敏感
+    assert ix.nmap_state_to_status("Down") == "offline"
+
+
+def test_nmap_parser_ignores_non_open_ports():
+    """closed / filtered 不该进「开放端口」；只收 open。"""
+    xml = (
+        '<nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.5" addrtype="ipv4"/><ports>'
+        '<port portid="22"><state state="open"/><service name="ssh"/></port>'
+        '<port portid="80"><state state="closed"/><service name="http"/></port>'
+        '<port portid="443"><state state="filtered"/><service name="https"/></port>'
+        '</ports></host></nmaprun>'
+    )
+    row = ix.parse_nmap_xml(xml)[0]
+    assert row["open_ports"] == "22"
+    assert json.loads(row["services"]) == ["ssh"]
+
+
+def test_nmap_parser_handles_real_world_output():
+    """真实 `nmap -oX` 输出：xmlns / DOCTYPE / runstats / 多个 host / IPv6 回退。
+
+    ⚠ 带 `xmlns` 时真实 tag 是 `{ns}host`，字面量 `findall("host")` 会**静默
+    返回空** —— 曾整份解析成 []，看起来像「文件是空的」。这里钉住。
+    """
+    real = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE nmaprun>\n'
+        '<nmaprun scanner="nmap" version="7.94" xmlns="http://nmap.org/x">'
+        '<host><status state="up" reason="syn-ack"/>'
+        '<address addr="10.0.0.5" addrtype="ipv4"/>'
+        '<address addr="AA:BB:CC:00:11:22" addrtype="mac"/>'
+        '<hostnames><hostname name="sw5.lan" type="PTR"/></hostnames>'
+        '<ports><port portid="22"><state state="open"/>'
+        '<service name="ssh" product="OpenSSH"/></port></ports>'
+        '<os><osmatch name="Linux 5.4 - 5.15" accuracy="98"/></os></host>'
+        '<host><status state="unknown"/><address addr="fe80::1" addrtype="ipv6"/>'
+        '<hostnames/><ports/></host>'
+        '<runstats><finished time="3"/><hosts up="1" down="0" total="2"/></runstats>'
+        '</nmaprun>'
+    )
+    rows = ix.parse_nmap_xml(real)
+    assert len(rows) == 2, "带命名空间时不能解析成空"
+    assert rows[0]["ip"] == "10.0.0.5"
+    assert rows[0]["mac"] == "AA:BB:CC:00:11:22"
+    assert rows[0]["hostname"] == "sw5.lan"
+    assert rows[0]["status"] == "online"
+    assert rows[0]["os_guess"] == "Linux 5.4 - 5.15"
+    # 无 ipv4 时回退 ipv6
+    assert rows[1]["ip"] == "fe80::1"
+    assert rows[1]["status"] == ""
+    assert rows[1]["nmap_state"] == "unknown"
+
+
+def test_nmap_parser_tolerates_malformed_input():
+    """任何畸形/空输入返回 []，**绝不抛异常**（导入不该崩应用）。"""
+    for bad in ("", None, b"", "hello world", "not xml <<<>>>",
+                "<nmaprun><host><status state='up'",   # 截断
+                "<nmaprun></nmaprun>",                 # 合法但无 host
+                "<nmaprun><host/></nmaprun>",          # host 无任何子元素
+                "\ufeff<nmaprun></nmaprun>"):          # 带 BOM
+        assert ix.parse_nmap_xml(bad) == [], repr(bad)
+
+
+def test_nmap_parser_accepts_single_host_root():
+    """以单个 `<host>` 为根的片段也认（有人手工摘一段出来）。"""
+    xml = ('<host><status state="up"/>'
+           '<address addr="1.1.1.1" addrtype="ipv4"/></host>')
+    rows = ix.parse_nmap_xml(xml)
+    assert len(rows) == 1 and rows[0]["ip"] == "1.1.1.1"
+
+
+def test_nmap_parser_defaults_addrtype_to_ipv4():
+    """老版本 Nmap 不写 addrtype → 按惯例当 ipv4。"""
+    xml = '<nmaprun><host><status state="up"/><address addr="9.9.9.9"/></host></nmaprun>'
+    assert ix.parse_nmap_xml(xml)[0]["ip"] == "9.9.9.9"
+
+
+def test_nmap_parser_never_invents_os():
+    """没有 `<os>` 段就必须是空串 —— 读入同样不能编造（诚实降级）。"""
+    xml = ('<nmaprun><host><status state="up"/>'
+           '<address addr="1.2.3.4" addrtype="ipv4"/></host></nmaprun>')
+    assert ix.parse_nmap_xml(xml)[0]["os_guess"] == ""
+
+
+def test_nmap_parse_is_language_independent():
+    """读入结果不含任何 `tr()` 展示串 —— 语言切换下完全一致。"""
+    xml = ix.render_nmap_xml(SAMPLE_ROWS)
+    i18n.init("en-US")
+    try:
+        en = ix.parse_nmap_xml(xml)
+    finally:
+        i18n.init("zh-CN")
+    assert en == ix.parse_nmap_xml(xml)
+
+
+def test_nmap_parser_skips_hosts_without_any_address():
+    """没有任何地址的 `<host>` 跳过 —— 标识不了设备的记录进台账只是噪声。"""
+    xml = ('<nmaprun>'
+           '<host><status state="up"/></host>'                 # 无地址 → 跳过
+           '<host><hostnames><hostname name="x"/></hostnames></host>'
+           '<host><status state="up"/>'
+           '<address addr="1.1.1.1" addrtype="ipv4"/></host>'   # 有 IP → 保留
+           '<host><address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/></host>'
+           '</nmaprun>')                                        # 只有 MAC → 保留
+    rows = ix.parse_nmap_xml(xml)
+    assert len(rows) == 2
+    assert rows[0]["ip"] == "1.1.1.1"
+    assert rows[1]["mac"] == "AA:BB:CC:DD:EE:FF" and rows[1]["ip"] == ""

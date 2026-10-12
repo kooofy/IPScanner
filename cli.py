@@ -1076,6 +1076,85 @@ def cmd_export(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── Nmap XML 读入 ──────────────────────────
+
+def cmd_import(args) -> int:
+    """读入外部 Nmap XML（``nmap -oX``）并入资产表。
+
+    🔴 **语义警告（ROADMAP §3 点名的风险）**：Nmap 的 host 状态机与本项目的
+    ``status`` **不是一回事** —— Nmap ``up`` = 「至少一个探针有回应」，
+    ``down`` = 「所有探针无回应（也可能只是被屏蔽）」。本命令按字面映射
+    （`up`→online / `down`→offline / 其它→未知），并在结果里保留原样的
+    ``nmap_state`` 与 ``source=nmap``，使「谁说的」永远可追。
+
+    默认只**预演**（``--dry-run``），确认无误后加 ``--save`` 才写库 ——
+    导入是**批量写**，不能一敲回车就改台账。
+
+    详见 `docs/ROADMAP_V1.9.md` §6（补丁轨道）。
+    """
+    import interop_export
+    import history_store
+
+    try:
+        with open(args.input, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        log(f"错误: 无法读取 {args.input}: {e}")
+        return EXIT_ENV
+
+    rows = interop_export.parse_nmap_xml(raw)
+    if not rows:
+        log(f"未从 {args.input} 解析出任何主机（文件为空或不是 Nmap XML）")
+        return EXIT_ERROR
+
+    up = sum(1 for r in rows if r["status"] == "online")
+    down = sum(1 for r in rows if r["status"] == "offline")
+    unknown = len(rows) - up - down
+    log(f"解析到 {len(rows)} 台主机：up {up} / down {down} / 未知 {unknown}")
+
+    if args.format == "json":
+        emit(json.dumps({"data": rows}, ensure_ascii=False, indent=2),
+             args.output)
+    elif args.format == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["ip", "mac", "hostname", "status", "nmap_state",
+                    "open_ports", "services", "os_guess"])
+        for r in rows:
+            w.writerow([r["ip"], r["mac"], r["hostname"], r["status"],
+                        r["nmap_state"], r["open_ports"], r["services"],
+                        r["os_guess"]])
+        emit(buf.getvalue(), args.output)
+    else:
+        # table：人看的预览。两列状态都列出来，避免把 Nmap 的判定
+        # 误读成我们的扫描结论（这正是本命令最容易出错的地方）。
+        head = ("IP", "MAC", "主机名", "状态", "Nmap 状态", "端口")
+        body = [(r["ip"] or "—", r["mac"] or "—", r["hostname"] or "—",
+                 r["status"] or "未知", r["nmap_state"] or "—",
+                 r["open_ports"] or "—") for r in rows]
+        widths = [max(len(str(x)) for x in col)
+                  for col in zip(head, *body)] if body else [len(h) for h in head]
+        lines = ["  ".join(h.ljust(w) for h, w in zip(head, widths))]
+        lines.append("  ".join("-" * w for w in widths))
+        for row in body:
+            lines.append("  ".join(str(c).ljust(w)
+                                   for c, w in zip(row, widths)))
+        emit("\n".join(lines) + "\n", args.output)
+
+    if not args.save:
+        log("以上为预演（未写库）。确认无误后加 --save 写入资产表。")
+        return EXIT_OK
+
+    payload = [{"ip": r["ip"], "mac": r["mac"], "hostname": r["hostname"],
+                "status": r["status"], "open_ports": r["open_ports"],
+                "services": r["services"], "os_guess": r["os_guess"]}
+               for r in rows]
+    sid = history_store.save_snapshot(
+        payload, note=f"Nmap XML 导入：{args.input}", db_path=_db_path(args))
+    log(f"已写入快照 #{sid}：{len(payload)} 台设备")
+    return EXIT_OK
+
+
 # ────────────────────────── 拓扑文本导出 ──────────────────────────
 
 def cmd_topology(args) -> int:
@@ -1639,6 +1718,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多导出 N 条（按末见时间降序截取）")
     xp.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
     xp.set_defaults(func=cmd_export)
+
+    # ── import ──
+    ip_ = sub.add_parser("import", help="读入外部 Nmap XML 并入资产表",
+                         parents=[common],
+                         description="解析 `nmap -oX` 产出的 XML，把主机并入资产表。"
+                                     "⚠ Nmap 的 up/down 与本项目 status 语义不同："
+                                     "up 只表示「有探针回应」、down 可能是被屏蔽；"
+                                     "结果里保留原样的 nmap_state 与 source=nmap。"
+                                     "默认只预演，加 --save 才写库。")
+    ip_.add_argument("input", metavar="文件", help="Nmap XML 文件路径（nmap -oX 的产物）")
+    ip_.add_argument("--save", action="store_true",
+                     help="真正写入资产表（省略则只预览，不改台账）")
+    ip_.add_argument("-f", "--format", choices=("table", "json", "csv"),
+                     default="table", help="预览输出格式（默认 table）")
+    ip_.add_argument("-o", "--output", metavar="文件",
+                     help="把解析结果写到文件（省略则写 stdout）")
+    ip_.set_defaults(func=cmd_import)
 
     # ── watch ──
     wp = sub.add_parser("watch", help="被动发现：不发包地看最近谁在网络上出现过",

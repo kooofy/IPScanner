@@ -323,7 +323,30 @@ python cli.py history --query --device-class 打印机 --format json
 # 列出 / 导出历史快照
 python cli.py history --list
 python cli.py history --show 12 --format csv -o snapshot12.csv
+
+# 资产表：按 MAC 身份键去重后的设备清单（换过 IP 的设备只算一台）
+python cli.py assets --count
+python cli.py assets --device-class 交换机 --format json
+
+# 导出资产表为互操作格式（供别的系统解析；纯文件、语言无关）
+python cli.py export -f nmap     -o nmap.xml        # Nmap XML
+python cli.py export -f zabbix   -o zabbix_lld.json # Zabbix LLD
+python cli.py export -f netbox   -o netbox.csv      # NetBox 设备 CSV
+python cli.py export -f oxidized -o router.db       # Oxidized router.db
+
+# 读入外部 Nmap XML（nmap -oX 的产物）并入资产表
+python cli.py import nmap_scan.xml                 # 默认只预演，不改台账
+python cli.py import nmap_scan.xml -f json         # 预览为 JSON
+python cli.py import nmap_scan.xml --save          # 确认无误后写库
+
+# 拓扑导出为可读文本（tree / markdown / ascii，语言无关）
+python cli.py topology -r 192.168.1.0/24 -f tree -o topo.txt
 ```
+
+> ⚠ **`import` 的两个语义提醒**：① Nmap 的 `up` 只表示「至少一个探针有回应」、
+> `down` 可能是被屏蔽 —— 它与本工具的 `status` **不等价**，因此解析结果里
+> 保留了原样的 `nmap_state` 与 `source=nmap` 供溯源；② 默认**只预演**
+> （打印 up/down/未知 计数与表格），确认无误再加 `--save` 写库。
 
 **退出码**
 

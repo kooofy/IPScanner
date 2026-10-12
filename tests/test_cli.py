@@ -25,6 +25,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import cli
+import db_util
 import history_store
 import i18n
 from scanner.models import ScanResult
@@ -1076,3 +1077,100 @@ class NotifyPolicyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImportCommandTest(unittest.TestCase):
+    """`import` 子命令：读入 Nmap XML 入资产表。
+
+    🔴 本命令最容易错的地方是**把 Nmap 的判定当成本项目的扫描结论** ——
+    Nmap `up` 只表示「有探针回应」、`down` 可能是被屏蔽。测试钉住：
+    原样的 `nmap_state` 与 `source=nmap` 必须一路带到输出与落库。
+    """
+
+    _XML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "interop", "nmap.xml")
+
+    def _run(self, argv):
+        """跑一次 main()，返回 `(退出码, stdout, stderr)`。
+
+        ⚠ `log()` 写的是 **stderr**，不是 stdout —— 只收 stdout 会看不到
+        「已写入快照 #N」「无法读取 …」这类状态消息。
+        """
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_dry_run_does_not_touch_db(self):
+        """默认只预演：不写库，且明确告诉用户怎么真写。"""
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            rc, out, err = self._run(["--db", db, "import", self._XML])
+            self.assertEqual(rc, cli.EXIT_OK)
+            self.assertIn("预演", err)
+            self.assertIn("--save", err)
+            self.assertFalse(os.path.exists(db),
+                             "预演不该创建数据库文件")
+
+    def test_save_writes_assets_with_identity_keys(self):
+        """--save 后资产表按 MAC 身份键落库，端口/服务一并带上。"""
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "h.db")
+            try:
+                rc, out, err = self._run(
+                    ["--db", db, "import", self._XML, "--save"])
+                self.assertEqual(rc, cli.EXIT_OK)
+                self.assertIn("已写入快照", err)
+                rows = history_store.list_assets(db_path=db)
+            finally:
+                # Windows 下未关闭的 sqlite 连接会让 TemporaryDirectory 删不掉
+                db_util.close_connection(db)
+            self.assertEqual(len(rows), 2)
+            by_ip = {r["ip"]: r for r in rows}
+            self.assertEqual(by_ip["10.0.0.1"]["identity_key"],
+                             "aa:bb:cc:dd:ee:ff")
+            self.assertEqual(by_ip["10.0.0.1"]["status"], "online")
+            self.assertEqual(by_ip["10.0.0.1"]["open_ports"], "80,443,22,161")
+            self.assertEqual(by_ip["10.0.0.9"]["status"], "offline")
+
+    def test_json_preview_keeps_nmap_state_and_source(self):
+        """预览 JSON 必须同时给出 status 与 nmap_state —— 来源可追。"""
+        rc, out, err = self._run(["import", self._XML, "-f", "json"])
+        self.assertEqual(rc, cli.EXIT_OK)
+        data = json.loads(out)["data"]
+        self.assertEqual(len(data), 2)
+        self.assertEqual([d["nmap_state"] for d in data], ["up", "down"])
+        self.assertEqual([d["source"] for d in data], ["nmap", "nmap"])
+
+    def test_csv_preview_has_both_status_columns(self):
+        rc, out, err = self._run(["import", self._XML, "-f", "csv"])
+        self.assertEqual(rc, cli.EXIT_OK)
+        lines = [ln for ln in out.splitlines() if ln]
+        self.assertIn("nmap_state", lines[0])
+        self.assertEqual(len(lines), 3)          # 表头 + 2 台
+
+    def test_empty_or_invalid_file_is_error(self):
+        """解析不出主机时返回错误码，且不写库。"""
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "bad.xml")
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write("this is not xml at all")
+            db = os.path.join(d, "h.db")
+            rc, out, err = self._run(["--db", db, "import", bad, "--save"])
+            self.assertEqual(rc, cli.EXIT_ERROR)
+            self.assertIn("解析出任何主机", err)
+            self.assertFalse(os.path.exists(db), "解析失败不该建库")
+            db_util.close_connection(db)
+
+    def test_missing_file_is_env_error(self):
+        rc, out, err = self._run(["import", os.path.join("no", "such", "x.xml")])
+        self.assertEqual(rc, cli.EXIT_ENV)
+        self.assertIn("无法读取", err)
+
+    def test_parser_accepts_import(self):
+        p = cli.build_parser()
+        args = p.parse_args(["import", "a.xml", "--save", "-f", "json"])
+        self.assertEqual(args.input, "a.xml")
+        self.assertTrue(args.save)
+        self.assertEqual(args.format, "json")
+        self.assertIs(args.func, cli.cmd_import)

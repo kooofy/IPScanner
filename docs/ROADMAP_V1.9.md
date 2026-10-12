@@ -658,6 +658,40 @@ PyQt5/xlrd，非代码问题）。新增界面文案 `已应用手工校正` 已
 > ⚠ **能测的只有产物结构**（合法 SVG、含 rect/circle/polyline/text、比例正确）——
 > 渲染**观感**仍须人工看图，无头环境给不出结论（既有口径：Qt 渲染不做像素断言）。
 
+### 6.2 落地记录：Nmap XML 读入（v1.8 #7 半）✅
+
+`interop_export.parse_nmap_xml(text) -> [row]`：标准库 `xml.etree` 解析，产出与
+`render_nmap_xml` 的输入**同构**的行（ip / mac / hostname / status / open_ports /
+services / os_guess），因此「产出 → 读入」可往返（`test_nmap_roundtrip_*` 钉住）。
+
+**语义问题是本项的核心**（§3 早已点名：「读入的风险不在 XML 解析，而在语义」）：
+
+- Nmap `up` = 「至少一个探针有回应」、`down` = 「所有探针无回应」——**都不等于**
+  本项目的 `status`（`down` 可能只是被屏蔽）。因此：
+  - `nmap_state_to_status()` 只做**字面映射**（up→online / down→offline），
+    且 **`unknown` 落空串**，绝不猜成 offline —— 把「没探测到」谎报成
+    「确认离线」正是要避免的错（`test_nmap_unknown_state_does_not_become_offline`）；
+  - 每行额外带 `source="nmap"` 与 `nmap_state`（原样值）。**来源丢了，
+    「Nmap 说 up」和「我们的探测说 online」就永远分不开** —— 这是留给界面/台账
+    的溯源字段。
+- 只收 `state="open"` 的端口；`closed`/`filtered` 不进「开放端口」。
+- 没有**任何地址**的 `<host>`（如 `<host/>`）跳过：标识不了设备的记录进台账只是噪声。
+- `addrtype` 缺省按 ipv4（老版 Nmap 不写）；无 ipv4 时回退 ipv6。
+- OS 段**只有就带上、没有就空**，同样不编造（诚实降级，与产出侧对称）。
+
+**CLI**：新增 `ipscanner import <文件> [--save] [-f table|json|csv] [-o 文件]`。
+🔴 **默认只预演**（`--dry-run` 语义）—— 导入是批量写，不能一敲回车就改台账。
+预演与落库都打印 `up/down/未知` 计数，且表格**同时列出 `状态` 与 `Nmap 状态`**
+两列，避免把 Nmap 的判定误读成我们的扫描结论。`--save` 走 `history_store.save_snapshot`，
+与 GUI 落库**同一条写路径**（自动带上 assets 表与身份键）。
+
+**踩到的坑**：带 `xmlns` 的 nmaprun 里真实 tag 是 `{ns}host`，字面量
+`root.findall("host")` **静默返回空** → 整份解析成 `[]`，看起来像「文件是空的」。
+改用忽略命名空间的本地名匹配（`_local_name` / `_find` / `_findall`），
+`test_nmap_parser_handles_real_world_output` 钉住。
+
+新增 12 个纯测试（`test_interop_export.py`）+ 7 个 CLI 测试（`ImportCommandTest`）。
+
 ---
 
 ## 7. 一页速览
@@ -673,13 +707,14 @@ v1.9「让台账真的成为一个东西」
       v1.9.0 已发布。
       下一项已开工：**拓扑手工校正（钉住 / 隐藏 / 备注）** ✅ 完整交付
       （① 数据层 + 消费端见 §3.1；② GUI 拖拽 / 右键 / 保存见 §3.2）。
-      补丁轨道进展：**拓扑导出 SVG（adv #5b）✅**（见 §6.1）。
-      再下一步：Nmap XML 读入 → 端口利用率视图（见 §6 表）。
+      补丁轨道进展：**拓扑导出 SVG（adv #5b）✅**（见 §6.1）、
+                    **Nmap XML 读入（v1.8 #7 半）✅**（见 §6.2）。
+      再下一步：端口利用率视图（adv #5a，见 §6 表）。
       §3「移出 11 项」的去向 → v2.0 / 补丁轨道（§6）。
 
 前置：user_version 迁移链 ✅ 已在 1.8.0 之后落地（SCHEMA_VERSION = 4）
       质量门禁 ✅ 已就位（history_store.py ≥95% / db_util.py ≥90%，pyright 0 error）
-移出 11 项 → v1.9 之后 / v2.0 / 补丁轨道（§3）    补丁轨道：SVG 导出 ✅，余 2 项待承接（§6）
+移出 11 项 → v1.9 之后 / v2.0 / 补丁轨道（§3）    补丁轨道：SVG 导出 ✅、Nmap 读入 ✅，余 1 项（§6）
 
 工时：16–24 人天 ≈ 3.5–5 周（建议书原文给的是 6–10 周 / 9 项）
 ```

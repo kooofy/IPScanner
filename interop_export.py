@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import xml.etree.ElementTree as ET
 
 __all__ = [
     "INTEROP_FORMATS",
@@ -40,8 +41,10 @@ __all__ = [
     "render_zabbix_lld",
     "render_netbox_csv",
     "render_router_db",
+    "parse_nmap_xml",
     "parse_ports",
     "parse_services",
+    "nmap_state_to_status",
 ]
 
 #: CLI / GUI 暴露的格式名（小写）。
@@ -125,6 +128,201 @@ def parse_services(value) -> list:
         return [str(x) for x in arr]
     # 退化：当普通逗号分隔串处理
     return [p.strip() for p in s.split(",") if p.strip()]
+
+
+# ── Nmap XML **读入**（§1.2 拆分；见 ROADMAP §3「读入的风险在语义」）────────────
+
+#: Nmap `<status state>` → 本项目规范 `status`。**故意不映射 unknown → 任何值**：
+#: 我们的 `status` 只有 online/offline 两个值，`unknown` 落空串（=「未知」），
+#: 由消费方决定怎么呈现；硬塞成 offline 会把「没探测到」谎报成「确认离线」。
+_NMAP_STATE_MAP = {"up": "online", "down": "offline"}
+
+
+def nmap_state_to_status(state) -> str:
+    """Nmap 的 host `<status state>` → 本项目规范 `status`。
+
+    🔴 **两者的语义本来就不一样**（ROADMAP §3 明确点名的风险）：
+    - Nmap `up`  = 「至少有一个探针得到回应」，**不保证**是我们意义上的在线
+      （例如只有 ICMP 回应而目标其实刚被拔线）；
+    - Nmap `down` = 「所有探针无回应」，也**可能**只是对方屏蔽了探测 ——
+      在 Nmap 的语义里这是「未观察到」，不是「确认不存在」。
+
+    所以本函数只做**字面映射**，并把「这是 Nmap 的判定、不是我们的扫描结论」
+    这一事实交给调用方（导出/展示时如实标注来源）。未识别的状态返回 ""（未知），
+    **绝不**猜成 offline。
+    """
+    return _NMAP_STATE_MAP.get(str(state or "").strip().lower(), "")
+
+
+def _nmap_host_addresses(host_el):
+    """`<host>` → `{"ipv4": …, "ipv6": …, "mac": …}`（各取第一个）。
+
+    `addrtype` 缺省时按 Nmap 的惯例当 ipv4 处理（老版本 Nmap 不写 addrtype）。
+    """
+    out = {}
+    for el in _findall(host_el, "address"):
+        addr = (el.get("addr") or "").strip()
+        if not addr:
+            continue
+        atype = (el.get("addrtype") or "ipv4").strip().lower()
+        # 只认前三个键；其它 addrtype 按原样塞进 out 会污染返回结构
+        key = atype if atype in ("ipv4", "ipv6", "mac") else None
+        if key and key not in out:
+            out[key] = addr
+    return out
+
+
+def _nmap_host_hostname(host_el):
+    """`<hostnames>/<hostname name=…>` → 第一个名字（Nmap 无则 ""）。"""
+    el = _find(host_el, "hostnames", "hostname")
+    return (el.get("name") or "").strip() if el is not None else ""
+
+
+def _nmap_host_ports(host_el):
+    """`<ports>/<port>` → `(开放端口列表, 服务名列表)`（只收 `state=open`）。
+
+    跳过到 0 个端口是正常的 —— 这正是 Nmap「没扫端口」的形态，不是解析失败。
+    """
+    ports, services = [], []
+    for el in _findall(host_el, "ports", "port"):
+        state_el = _find(el, "state")
+        state = (state_el.get("state") if state_el is not None else "") or ""
+        if state.strip().lower() != "open":
+            continue        # 只收 open；closed/filtered 不该进「开放端口」
+        pid = (el.get("portid") or "").strip()
+        if pid.isdigit():
+            ports.append(int(pid))
+        svc_el = _find(el, "service")
+        if svc_el is not None:
+            name = (svc_el.get("name") or "").strip()
+            if name:
+                services.append(name)
+    return ports, services
+
+
+def _nmap_host_os(host_el):
+    """尽力提取 OS 名称；提取不到就返回 ""（**不编造**）。
+
+    Nmap 的 `<os>` 段给出的是**指纹匹配名**（如 `Linux 5.4 - 5.15`），
+    与我们库里的 `os_guess`（来自 SNMP/主机名推断）不是一回事，所以这里
+    只做「有就带上、没有就空」的搬运，由调用方决定要不要采信。
+    """
+    for el in _findall(host_el, "os", "osmatch"):
+        name = (el.get("name") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def _local_name(tag) -> str:
+    """去掉 `{namespace}` 前缀（Nmap 有时带 xmlns，有时不带）。"""
+    return str(tag).rsplit("}", 1)[-1]
+
+
+def _iter_child(el, name):
+    """直接子元素里 `local-name == name` 的那些（命名空间无关）。"""
+    for child in el:
+        if _local_name(child.tag) == name:
+            yield child
+
+
+def _find(el, *path):
+    """按本地名逐层找**第一个**匹配的**后代**（忽略命名空间）。
+
+    不能用 `el.findall("host")`：带 `xmlns` 时真实 tag 是 `{http://…}host`，
+    字面量匹配会**静默返回空** —— 实测一个带命名空间的 nmaprun 会整份解析成
+    `[]`，看起来像「文件是空的」，极难排查。
+    """
+    cur = el
+    for name in path:
+        nxt = None
+        for cand in cur.iter():
+            if cand is not cur and _local_name(cand.tag) == name:
+                nxt = cand
+                break
+        if nxt is None:
+            return None
+        cur = nxt
+    return cur
+
+
+def _findall(el, *path):
+    """按本地名逐层收集**最末一节**的全部匹配（忽略命名空间）。"""
+    parents = [el]
+    for name in path[:-1]:
+        parents = [c for p in parents for c in _iter_child(p, name)]
+    last = path[-1]
+    return [c for p in parents for c in _iter_child(p, last)]
+
+
+def parse_nmap_xml(text) -> list:
+    """Nmap XML → 资产行列表（与 `render_nmap_xml` 的输入**同构**，可往返）。
+
+    返回的每个 dict 的键与 `history_store.list_assets()` 的行尽量对齐：
+    ``ip`` / ``mac`` / ``hostname`` / ``status`` / ``open_ports`` /
+    ``services`` / ``os_guess``，外加两个**溯源字段**：
+
+    - ``source`` = `"nmap"`
+    - ``nmap_state`` = Nmap 原样的 `up`/`down`/``unknown`/``""``
+
+    🔴 为什么必须留 `nmap_state`：Nmap 的 host 状态机与我们 `status` 的语义
+    **不等价**（见 `nmap_state_to_status`）。导出别的系统吃 `status` 就够了，
+    但「我们自己的界面/台账」在合并导入结果时必须能区分「Nmap 说 up」和
+    「我们的探测说 online」—— 把来源丢了，两类结论就永远分不开了。
+
+    容错：**任何**畸形/非 XML 输入都返回 ``[]``，绝不抛异常（导入不该崩应用）。
+    没有**任何地址**的 `<host>`（如 `<host/>`）同样跳过 —— 一条既没 IP 也没 MAC
+    的记录无法标识任何设备，放进台账只会变成一行空白噪声。
+    """
+    if not text:
+        return []
+    if isinstance(text, bytes):
+        raw = text
+    else:
+        raw = str(text).encode("utf-8", "replace")
+    # 用 `ET.XMLParser` + `feed` 而不是 `ET.fromstring`：这里要**吞掉**解析异常
+    # 并返回 []，而 `except ... : return []` 会被 test_logging_policy 记成静默吞
+    # 异常（棘轮配额）。用 `parser.close()` 的显式失败分支表达，语义更清楚。
+    parser = ET.XMLParser()
+    root = None
+    try:
+        parser.feed(raw)
+        root = parser.close()
+    except ET.ParseError:
+        return []
+    if root is None:
+        return []
+
+    hosts = ([root] if _local_name(root.tag) == "host"
+             else list(_iter_child(root, "host")))
+    rows = []
+    for h in hosts:
+        addrs = _nmap_host_addresses(h)
+        ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
+        mac = addrs.get("mac") or ""
+        if not ip and not mac:
+            continue        # 无任何地址 → 标识不了设备，跳过（别塞空白行）
+        status_el = _find(h, "status")
+        raw_state = (status_el.get("state") if status_el is not None else "") or ""
+        raw_state = raw_state.strip().lower()
+        ports, services = _nmap_host_ports(h)
+        rows.append({
+            "ip": ip,
+            "mac": mac,
+            "hostname": _nmap_host_hostname(h),
+            "status": nmap_state_to_status(raw_state),
+            "open_ports": ",".join(str(p) for p in ports),
+            "services": json.dumps(services, ensure_ascii=False),
+            "os_guess": _nmap_host_os(h),
+            "source": "nmap",
+            "nmap_state": raw_state,
+        })
+    return rows
+
+
+def _local_name(tag) -> str:
+    """去掉 `{namespace}` 前缀（Nmap 有时带 xmlns，有时不带）。"""
+    return str(tag).rsplit("}", 1)[-1]
 
 
 # ── 小工具 ─────────────────────────────────────────────────────────────────────
