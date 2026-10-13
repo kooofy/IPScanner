@@ -48,10 +48,10 @@ v1.9/v2.0 的四分法是「结构 / 出口 / 显示 / 安全网」。v2.1 沿�
 | 2.1 | **结构** | 异步 connect 扫描（`asyncio` + IOCP，无 Npcap 提速） ✅ | **P0（主题项）** | 5–7 天 | `ROADMAP_V2.0.md` §2 `adv #2` |
 | 2.2 | **可见性** | 无线切片（Native Wi-Fi API：信道拥塞 / 漫游日志 / SSID↔BSSID↔子网） | **P1** | 6–8 天 | §2 `adv #4` |
 | 2.3 | **安全网** | 离线 CVE + KEV/EPSS 排序（**先立数据快照维护模型，再编码**） | **P1** | 6–9 天 | §2 `adv #9` |
-| 2.4 | **出口** | 扫描节流与礼貌模式（并发上限 + 顺序随机化 + 包速率上限，且档位进导出/审计） | **P1** | 3–5 天 | `PRODUCT_ADVISORY.md` §4.1 |
+| 2.4 | **出口** | 扫描节流与礼貌模式（并发上限 + 顺序随机化 + 包速率上限，且档位进导出/审计） ✅ | **P1** | 3–5 天 | `PRODUCT_ADVISORY.md` §4.1 |
 
 **合计 20–29 人天 ≈ 5–6 周**（与 v2.0 的 18–27 / 4–6 周同量级）。
-**进度：1/4**（2.1 ✅ 已落地，见 §2.1 落地记录）。
+**进度：2/4**（2.1 ✅ / 2.4 ✅ 已落地；2.2 无线切片未开工，卡在本机取不到「已连接」样本，见 §2.2）。
 
 > **为什么 2.1 是主题项**：它是**唯一动扫描引擎核心**的改动，是「不加依赖就提升体感」
 > 的最大单点（建议书 §4.1 原话）。它一落地，**所有**扫描（GUI 单次 / `watch` / CLI）
@@ -287,41 +287,47 @@ grep -rni "cve|kev|epss" --include=*.py .   → 仅 venv/ 第三方命中，项�
 - **不出网**：FastAPI 无——断言无 `urllib`/`requests`/`socket` 调用；
 - 覆盖率闸门：`scanner/exposure.py ≥ 85`、`scanner/cve_snapshot.py ≥ 90`。
 
----
+#### 落地记录（2.4）
 
-### 2.4 扫描节流与礼貌模式（并发上限 + 顺序随机化 + 包速率上限）
+**交付**（2026-10-13）：
 
-**依据**：`PRODUCT_ADVISORY.md` §4.1（「扫描节流与礼貌模式」行）。
-建议书原话：企业网里全速 SYN 会被 IDS 判定为扫描攻击；给一个「并发上限 + 随机化顺序 +
-每分钟包数上限」的礼貌档，并在导出/审计里记录该档位。
+- `scanner/throttle.py`（474 行，**零 PyQt / 零第三方 / 零网络**）：
+  - `ThrottlePolicy`（`name` / `max_concurrency` / `shuffle` / `packets_per_minute`）
+    + 三档预设 **`fast`（默认）/ `balanced` / `polite`** —— 数值取"能讲出理由"的
+    量级：`polite` = 16 并发 + 600 包/分（≈ 每秒 10 个探测，单 /24 约 10 分钟），
+    多数 IDS 的告警阈值在「每秒数十 SYN / 每分数百包」附近，10/s 留足余量；
+  - `concurrency_for()` / `shuffle_for()` / `prepare_targets()` / `throttle_gate()`
+    / `active_policy()` / `reset_throttle()`（测试隔离）六个体面小入口；
+  - 令牌桶 `TokenBucket`：`clock` / `sleep` 可注入 ⇒ **假时钟单测，不真 sleep**；
+    浮点容差 `_TOL` + `_MIN_WAIT` 两处护栏（没有它们，"补满却差 4e-16"会让
+    防挂死逻辑误报，实测过）；
+  - 独立 `random.Random` 而不是模块级 `random.shuffle` —— 后者会动全局随机状态，
+    让别的模块的随机行为静默改变。
+- 接线（**默认零行为变化**是硬约束）：
+  - `scanner/ports.py`：连接池探测前 `throttle_gate()`、投递前 `shuffle_for(ports)`；
+  - `scanner/async_ports.py`：异步路径同样两个点，并发上限由
+    `concurrency_for(DEFAULT_CONCURRENCY)` 推导（§2.1 的 `Semaphore` 就是挂在这）；
+  - `scanner/engine.py`：`all_ips` 解析后过 `_prepare_targets()` —— 目标的
+    投递顺序也按档位随机化；
+  - `cli.py`：`scan` / `diff` / `watch` 增 `--throttle`，`_resolve_throttle()`
+    **在扫描前**校验档名（库调用方绕过 argparse `choices` 时也要早失败），
+    `_audit_throttle()` 把档位落审计库。
+- `tests/test_throttle.py`（58 测试）+ `tests/test_engine_scan_pipeline.py`
+  新增 `ThrottleOrderTest`（4 用例：fast 原序 / 无激活档=fast / polite 改序 /
+  `prepare_targets` 收到的是解析后的目标）。
 
-**现状实测**（基线 `15ce6e6`）：
+**接线时抓到的真 bug**：`prepare_targets()` 的 `policy=None` 原本取
+**默认档**（`resolve_policy()`）而不是**当前激活档**（`current_policy()`）。
+`engine.scan()` 不显式传档、靠外面那层 `active_policy()`，于是“礼貌模式已开”
+会**悄悄变成 no-op** —— 单元测试全绿（它们显式传档或直接测函数），
+只有把引擎接上才看得见。修法 + `engine` 侧 4 个可观测用例钉住。
 
-- 当前并发由 `ports.py._get_port_pool()` 的 `min(64, len(ports))` 与扫描器
-  `max_workers` 决定（**硬编码档位**，无用户可调的上限 / 随机化 / 包速率概念）；
-- 审计/导出里**没有**「本次扫描用的礼貌档位」这一字段。
-
-**做法**：
-
-1. 新增 `scanner/throttle.py`（**零 PyQt**）：`ThrottlePolicy` 数据类
-   （`max_concurrency` / `shuffle` / `packets_per_minute`）+ 一个**令牌桶**
-   节流器（纯标准库 `time` + `threading`/`asyncio`，同时服务 2.1 的异步路径与线程池路径）；
-2. 三档预设：`fast`（现状，兼容旧行为）/ `balanced` / `polite`；
-3. **顺序随机化**：目标/端口投递前 shuffle（用可注入 seed 以便单测）；
-4. **档位进审计**：`audit_log` 记录本次扫描用的策略名 + 关键参数
-   （照长期记忆：审计分类要用**语言无关**的规范值，**绝不**落 `tr()` 结果）；
-5. **接进 CLI**：`scan` / `watch` 增 `--throttle {fast,balanced,polite}`；
-6. **依赖 2.1**：并发上限挂到 2.1 的 `Semaphore` 上 —— 所以本项排在 2.1 之后。
-
-**可测验收**：
-
-- **上限生效**：断言任一时刻在途连接数 ≤ `max_concurrency`（用一个记账 fake）；
-- **随机化可测**：注入固定 seed → 投递顺序可复现且 ≠ 声明序（不是「看起来乱」）；
-- **令牌桶可测**：给定 `packets_per_minute`，断言单位时间内的投递数不超过上限
-  （用**假时钟**推进，不真 sleep）；
-- **档位落审计**：断言 `audit_log` 里记录的是**规范值**（语言无关），切语言不变；
-- **兼容旧行为**：`fast` 档结果与改造前逐条一致；
-- 覆盖率闸门：`scanner/throttle.py ≥ 90`。
+**验收对照**：上限生效 ✅（`InFlightCounterTest` 记账 fake + 引擎侧单线程投递顺序）；
+随机化可测 ✅（注入固定 seed → 可复现且 ≠ 声明序；引擎侧断言“按 `prepare_targets`
+的返回顺序投递”）；令牌桶可测 ✅（假时钟，无真 sleep）；档位落审计 ✅
+（`audit_detail()` 只有 int/bool/ascii，切语言逐字节相同）；兼容旧行为 ✅
+（`fast` 全 no-op：端口顺序、目标顺序、并发推导逐字节不变）；覆盖率 **99%**
+（闸门定 90%，缺的 1 行是 `seconds_until(n<=0)` 的早退分支）。
 
 ---
 
@@ -398,7 +404,7 @@ v2.1「看得更深 —— 扫得更快、看清无线归属、看清暴露面�
 ├─ 2.3 离线 CVE + KEV/EPSS（先立快照维护模型）          P1  ← 安全网（有产品门）
 └─ 2.4 扫描节流与礼貌模式（并发/随机化/包速率 + 审计）   P1  ← 出口（依赖 2.1）
 
-进度：1/4 完成（**2.1 ✅**；2.2/2.3/2.4 未开工；落地记录见 §2.1）
+进度：2/4 完成（**2.1 ✅ / 2.4 ✅**；2.2/2.3 未开工；落地记录见 §2.1 / §2.4）
 
 不做（明确）：HTTP API / Apprise / Prometheus 常驻 / SNMP trap /
              Npcap 捆绑 / monitor 模式站点勘测 —— 依旧因「开端口 / 加依赖 / 装 agent」出局

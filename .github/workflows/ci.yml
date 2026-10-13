@@ -248,6 +248,8 @@ jobs:
         #                          剩下 3 行是两处**防御性兜底**：loop.close() 抛错
         #                          的吞异常分支、socket.timeout 的第二超时分支
         #                          （主超时分支已测）。下界 90% 把这部分明账。）
+        #   scanner/throttle.py   90%（v2.1 §2.4 新增；2026-10-13 实测 99% ——
+        #                          缺的 1 行是 `seconds_until(n<=0)` 的早退分支。）
         # 🔴 `credentials.py` 的 include 必须写 `./credentials.py`（带 `./`）：
         #    coverage 的 --include 是**后缀匹配**，裸 `credentials.py` 会同时
         #    命中 `ui_dialogs/credentials.py`，于是 --fail-under 作用在**两文件
@@ -263,6 +265,7 @@ jobs:
           python -m coverage report --include="./credentials.py" --fail-under=95
           python -m coverage report --include="./scanner/ndp.py" --fail-under=85
           python -m coverage report --include="./scanner/async_ports.py" --fail-under=90
+          python -m coverage report --include="./scanner/throttle.py" --fail-under=90
 
   quality-types:
     name: 类型门禁（pyright）

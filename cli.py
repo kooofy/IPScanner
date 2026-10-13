@@ -54,6 +54,11 @@ import unicodedata
 # 否则与 GUI 关于对话框、spec 产物名会各说各话。
 from version import __version__
 
+# 礼貌模式（v2.1 §2.4）。放在顶层 import 而非函数内：`build_parser()` 在
+# 模块 import 期就要读 `throttle.POLICY_NAMES` / `DEFAULT_POLICY` 来拼
+# `--help`；而且 throttle 本身零 PyQt 零三方，import 成本可忽略。
+from scanner import throttle
+
 # 退出码
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -401,6 +406,41 @@ def _make_progress(enabled: bool):
     return _cb
 
 
+def _resolve_throttle(args):
+    """从 args 解析礼貌档；档名非法要**在扫描前**就失败。
+
+    放在这里而不是等 argparse 的 `choices`：库调用方（直接构造 args 命名空间）
+    可能绕过 choices。真正扫出去才发现档位写错，等于白扫一个网段。
+    """
+    from scanner import throttle
+    raw = getattr(args, "throttle", None)
+    try:
+        return throttle.resolve_policy(raw)
+    except ValueError as e:
+        raise ValueError(f"错误: {e}") from None
+
+
+def _audit_throttle(policy, args=None, db_path=None) -> None:
+    """把本次扫描用的礼貌档落审计库（v2.1 §2.4 验收项之一）。
+
+    🔴 `detail` 里只放**语言无关规范值**（`throttle.audit_detail()` 产出），
+    绝不落 `tr()` 结果 —— 否则切一次界面语言，历史审计的含义就变了。
+    写审计失败只告警：审计是旁路，不该让一次已经成功的扫描因此判失败。
+    """
+    if db_path is None and args is not None:
+        db_path = _db_path(args)
+    try:
+        import audit_log
+        from scanner import throttle
+        audit_log.log_event(
+            audit_log.CAT_SCAN, "扫描节流档位",
+            json.dumps(throttle.audit_detail(policy), sort_keys=True),
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        warn(f"记录礼貌档到审计日志失败（不影响本次扫描）: {e}")
+
+
 def _run_scan(args):
     """执行一次扫描，返回 (results, scanner)。
 
@@ -484,27 +524,40 @@ def _run_scan(args):
         port_label = f"{len(ports)} 个端口（{level_label}）"
     log(f"准备扫描 {total_ips} 个地址，{port_label}")
 
+    # 礼貌模式（v2.1 §2.4）：档位在整个扫描期间保持激活 ——
+    # `--threads` 之外，端口探测的顺序随机化与令牌桶限速都从这里取档。
+    # fast 档下三件事全是 no-op，因此不传 `--throttle` 与改造前逐字节等价。
+    policy = _resolve_throttle(args)
+    if policy.name != throttle.DEFAULT_POLICY:
+        log(f"礼貌模式：{policy.describe()}")
+
     scanner = NetworkScanner()
     t0 = time.monotonic()
-    try:
-        results = scanner.scan(
-            ip_ranges=list(args.ranges),
-            timeout_ms=getattr(args, "timeout", 1000),
-            max_threads=getattr(args, "threads", 100),
-            scan_ports_flag=ports is not None,
-            protocols=protocols,
-            tcp_scan_mode=getattr(args, "tcp_mode", "connect"),
-            mdns_discovery=not getattr(args, "no_mdns", False),
-            ports=ports,
-            progress_callback=_make_progress(not getattr(args, "quiet", False)),
-            library_lookup=_build_library_lookup(getattr(args, "library", False)),
-            snmp_v3_user=snmp_v3_user,
-            credential_book=credential_book,
-        )
-    except KeyboardInterrupt:
-        scanner.stop()
-        log("已中断")
-        return None, None
+    with throttle.active_policy(policy):
+        try:
+            results = scanner.scan(
+                ip_ranges=list(args.ranges),
+                timeout_ms=getattr(args, "timeout", 1000),
+                # ping 阶段是发包最密集的一环（每 IP 一个 ICMP/ARP），
+                # 所以礼貌档的并发上限夹在这里最有效。
+                max_threads=throttle.concurrency_for(
+                    getattr(args, "threads", 100)),
+                scan_ports_flag=ports is not None,
+                protocols=protocols,
+                tcp_scan_mode=getattr(args, "tcp_mode", "connect"),
+                mdns_discovery=not getattr(args, "no_mdns", False),
+                ports=ports,
+                progress_callback=_make_progress(not getattr(args, "quiet", False)),
+                library_lookup=_build_library_lookup(getattr(args, "library", False)),
+                snmp_v3_user=snmp_v3_user,
+                credential_book=credential_book,
+            )
+        except KeyboardInterrupt:
+            scanner.stop()
+            log("已中断")
+            return None, None
+
+    _audit_throttle(policy, args)
 
     for w in getattr(scanner, "warnings", []) or []:
         warn(w)
@@ -643,19 +696,6 @@ def cmd_scan(args) -> int:
     records = [result_to_record(r) for r in results]
     records.sort(key=lambda x: (x["status"] != "online",
                                 _ip_sort_key(x["ip"])))
-
-    if args.format == "json":
-        emit(render_json({
-            "version": __version__,
-            "scanned_at": time.time(),
-            "device_count": len(records),
-            "online_count": sum(1 for r in records if r["status"] == "online"),
-            "devices": records,
-        }), args.output)
-    elif args.format == "csv":
-        emit(render_csv(records, _RESULT_COLUMNS), args.output)
-    else:
-        emit(render_table(records, _RESULT_COLUMNS), args.output)
 
     if notifiers:
         _notify_changes(results, baseline_id, notifiers, args, notify_config)
@@ -1735,6 +1775,11 @@ def cmd_watch(args) -> int:
 
     watcher = PassiveWatcher(known_devices=_watch_baseline(args))
 
+    # 礼貌模式（v2.1 §2.4）：`--mdns-active` / `--ipv6-probe` 会发包，
+    # 所以 watch 也认这个档；纯只听模式下它是纯 no-op（fast 档本来就是）。
+    policy = _resolve_throttle(args)
+    policy_ctx = throttle.active_policy(policy)
+
     def _cycle():
         return watcher.poll(mdns=not args.no_mdns,
                             mdns_active=args.mdns_active,
@@ -1742,27 +1787,27 @@ def cmd_watch(args) -> int:
                             ipv6=getattr(args, "ipv6", False),
                             ipv6_probe=getattr(args, "ipv6_probe", False))
 
-    # ── 单次轮询（默认） ──
-    if not looping:
-        ledger, fresh = _cycle()
-        if args.save_snapshot:
-            _save_watch_snapshot(args, ledger)
-        if args.format == "json":
-            emit(render_json(_watch_payload(ledger, fresh)), args.output)
-        else:
-            body = _render_watch_text(ledger, fresh)
-            v6 = _render_ipv6_text(ledger)
-            if v6:
-                body = body + "\n" + v6
-            emit(body, args.output)
-        # `--fail-on-change` 与 diff 的语义保持一致：有新设备 → 退出码 2。
-        return EXIT_CHANGES if (args.fail_on_change and fresh) else EXIT_OK
-
-    # ── 持续轮询 ──
-    limit = getattr(args, "count", 0) or 0
-    rounds = 0
-    total_new = 0
     try:
+        # ── 单次轮询（默认） ──
+        if not looping:
+            ledger, fresh = _cycle()
+            if args.save_snapshot:
+                _save_watch_snapshot(args, ledger)
+            if args.format == "json":
+                emit(render_json(_watch_payload(ledger, fresh)), args.output)
+            else:
+                body = _render_watch_text(ledger, fresh)
+                v6 = _render_ipv6_text(ledger)
+                if v6:
+                    body = body + "\n" + v6
+                emit(body, args.output)
+            # `--fail-on-change` 与 diff 的语义保持一致：有新设备 → 退出码 2。
+            return EXIT_CHANGES if (args.fail_on_change and fresh) else EXIT_OK
+
+        # ── 持续轮询 ──
+        limit = getattr(args, "count", 0) or 0
+        rounds = 0
+        total_new = 0
         while True:
             rounds += 1
             ledger, fresh = _cycle()
@@ -1785,6 +1830,9 @@ def cmd_watch(args) -> int:
         # 这里不能写成 `pass`：tests/test_logging_policy.py 的棘轮按**计数**
         # 卡静默处理器，补注释也过不了计数那一关。
         log("收到中断信号，正在停止持续发现…")
+    finally:
+        # 礼貌档必须退出还原，否则限速桶会漏到进程里后续所有 watch 上。
+        policy_ctx.__exit__()
     log(f"持续发现已停止：共 {rounds} 轮，累计新出现 {total_new} 台设备。")
     return EXIT_OK
 
@@ -2074,8 +2122,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ping 超时毫秒（默认 1000）")
     sp.add_argument("--threads", type=int, default=100, metavar="N",
                     help="ping 并发线程数（默认 100）")
+    # 礼貌模式（v2.1 §2.4）。不放 choices 里的具体解释：档位定义在
+    # `scanner.throttle.POLICIES`，这里只做一项 —— 让 `--help` 自己列得出。
+    sp.add_argument("--throttle", metavar="档位",
+                    default=throttle.DEFAULT_POLICY,
+                    help=f"扫描礼貌档（{'/'.join(throttle.POLICY_NAMES)}，"
+                         f"默认 {throttle.DEFAULT_POLICY} = 不额外设限，"
+                         f"与改造前一致）")
     sp.add_argument("--online-only", action="store_true", help="只输出在线设备")
-    sp.add_argument("--library", action="store_true", help="启用地址库自动匹配（读 mac_library.db）")
     sp.add_argument("--save-snapshot", action="store_true", help="把本次结果存为历史快照")
     sp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")
     sp.add_argument("--switch-map", action="store_true",
@@ -2124,6 +2178,12 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--no-mdns", action="store_true")
     dp.add_argument("--timeout", type=int, default=1000, metavar="毫秒")
     dp.add_argument("--threads", type=int, default=100, metavar="N")
+    # diff 内部同样走一次扫描（`_run_scan`），所以礼貌档对它同样生效 ——
+    # 否则"对比两次扫描"里有一次是全速的，档位记录会自相矛盾。
+    dp.add_argument("--throttle", metavar="档位",
+                    default=throttle.DEFAULT_POLICY,
+                    help=f"扫描礼貌档（{'/'.join(throttle.POLICY_NAMES)}，"
+                         f"默认 {throttle.DEFAULT_POLICY}）")
     dp.add_argument("--library", action="store_true")
     dp.add_argument("--save-snapshot", action="store_true")
     dp.add_argument("--note", metavar="备注")
@@ -2315,6 +2375,13 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("--save-snapshot", action="store_true",
                     help="把台账存为一条快照（默认不存；只能配合单次轮询）")
     wp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")
+    # watch 默认只读（零发包），但只要给了 --mdns-active / --ipv6-probe
+    # 就同样该讲礼貌，所以这里也认这个档；纯只听模式下它是 no-op。
+    wp.add_argument("--throttle", metavar="档位",
+                    default=throttle.DEFAULT_POLICY,
+                    help=f"发包礼貌档（{'/'.join(throttle.POLICY_NAMES)}，"
+                         f"默认 {throttle.DEFAULT_POLICY}；只影响 --mdns-active / "
+                         f"--ipv6-probe 的发包节奏）")
     wp.add_argument("--fail-on-change", action="store_true",
                     help="本次有新设备时以退出码 2 结束（便于脚本判断）")
     wp.add_argument("-f", "--format", choices=("text", "json"), default="text")

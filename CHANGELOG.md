@@ -16,6 +16,18 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **扫描礼貌模式 —— v2.1 路线图 2.4**（详见
+  [`docs/ROADMAP_V2.1.md`](docs/ROADMAP_V2.1.md) §2.4）。
+  `--throttle {fast,balanced,polite}` 三档：并发上限 + 目标/端口投递顺序随机化
+  + 每分钟包数上限（令牌桶），档位落审计库。
+  - `scanner/throttle.py`：零 PyQt / 零第三方 / 零网络；`fast`（默认）全 no-op ——
+    不传 `--throttle` 时与改造前**逐字节等价**；
+  - `polite` = 16 并发 + 600 包/分（≈ 每秒 10 个探测）—— IDS 不会告警的量级；
+  - `scan` / `diff` / `watch` 均认这个档；档名在**扫描前**校验，
+    落审计的是语言无关规范值。
+
 ---
 
 ## [2.0.0] - 2026-10-12

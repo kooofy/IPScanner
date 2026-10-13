@@ -31,6 +31,7 @@ from .range import (parse_ip_range, count_ip_range, is_ipv6_range, RangeTooLarge
 from .smb import probe_smb
 from .snmp import snmp_get_system
 from .snmp_v3 import snmp_v3_get_system, ERR_NO_RESPONSE
+from .throttle import prepare_targets as _prepare_targets
 from app_logging import get_logger
 from i18n import tr
 from service_fingerprints import fingerprint_banner
@@ -823,6 +824,12 @@ class NetworkScanner:
         if not ok or not all_ips:
             self.is_scanning = False
             return []
+
+        # 礼貌模式（v2.1 §2.4）：投递顺序随机化。`fast` 档是原样返回 ——
+        # 不传 `--throttle` 时与改造前逐字节等价（验收项「兼容旧行为」）。
+        # 放在**解析之后**：先过规模保护（/0 会被这里挡掉），再洗牌，
+        # 否则一次拒绝的扫描也会白烧 CPU。
+        all_ips = _prepare_targets(all_ips)
 
         ctx = ScanContext(
             self, all_ips,

@@ -38,6 +38,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from app_logging import get_logger
 
+from . import throttle
+
 _log = get_logger(__name__)
 
 # 单次 asyncio 调度里同时在飞的 connect 上限。
@@ -156,10 +158,17 @@ async def _probe_all(ip: str, ports: List[int], concurrency: int,
     用 Semaphore 限流：同时飞的 connect 不超过 ``concurrency``。结果收集顺序
     与 ports 无关（as_completed 语义），由调用方负责排序。
     """
+    # 礼貌模式（v2.1 §2.4）：投递前按当前档打乱端口顺序，避免固定顺序
+    # 每次扫都是同一串规律性的 SYN（那是 IDS 最喜欢的特征）。fast 档下
+    # shuffle=False ⇒ 原样返回，行为与改造前逐字节一致。
+    ports = throttle.shuffle_for(ports)
     sem = asyncio.Semaphore(concurrency)
     results: Dict[int, Tuple[bool, float]] = {}
 
     async def _guarded(p: int) -> None:
+        # 令牌桶放行闸门在**进 Semaphore 之前**：等令牌的协程不该占着并发额度，
+        # 否则 polite 档下排队时间会把实际并发顶到上限之外。
+        throttle.throttle_gate()
         async with sem:
             results[p] = await _probe_one(ip, p, timeout)
 
@@ -169,10 +178,15 @@ async def _probe_all(ip: str, ports: List[int], concurrency: int,
     return results
 
 
-def probe_ports_async(ip: str, ports: List[int], *, concurrency: int = DEFAULT_CONCURRENCY,
+def probe_ports_async(ip: str, ports: List[int], *, concurrency: Optional[int] = None,
                       timeout: float = 0.5,
                       rtt_callback: Optional[Callable[[float], None]] = None) -> List[int]:
     """并发探测 ``ports``，返回**开放端口列表**（已排序），与 ``scan_ports`` 同契约。
+
+    ``concurrency``：同时在飞的 connect 上限。**不给（``None``）时按当前礼貌档
+    推导**（``throttle.concurrency_for(DEFAULT_CONCURRENCY)``）——
+    ``fast`` 档不设限 ⇒ 与改造前逐字节等价；显式传值则完全听调用方的
+    （调用方比本模块更清楚自己要多少）。
 
     ``rtt_callback``：仅在端口**开放**时回调其 connect 耗时（秒），与同步路径
     的语义完全一致 —— 供上层做 RTT 自适应超时。
@@ -187,6 +201,10 @@ def probe_ports_async(ip: str, ports: List[int], *, concurrency: int = DEFAULT_C
         raise RuntimeError(f"异步端口探测不可用：{reason}")
     if not ports:
         return []
+
+    if concurrency is None:
+        concurrency = throttle.concurrency_for(DEFAULT_CONCURRENCY)
+    concurrency = max(1, concurrency)
 
     loop = _get_loop()
     raw = loop.run_until_complete(

@@ -13,6 +13,7 @@ from typing import List, Tuple
 from app_logging import get_logger
 
 from . import constants as _C
+from . import throttle
 from .constants import COMMON_PORTS, _SYSTEM_SHARES
 from .util import _inet_checksum, _local_ip_for_dst, _run_cmd
 from i18n import tr
@@ -290,6 +291,9 @@ def _scan_ports_connect_threaded(ip: str, ports: List[int], timeout: float,
     executor = _get_port_pool()
 
     def _probe(p):
+        # 礼貌模式（v2.1 §2.4）：发包前过令牌桶闸门。fast 档下是 no-op
+        # （只有一次全局加载 + None 判断），只有 balanced/polite 才真正阻塞。
+        throttle.throttle_gate()
         # 必须用 perf_counter：Windows 上它一直是 QueryPerformanceCounter（~100ns），
         # 而 time.monotonic() 在 Python 3.12 及以前是 GetTickCount64，分辨率只有
         # 15.6ms（3.13 才改成 QPC）。局域网 connect 通常只要几百微秒，
@@ -299,7 +303,9 @@ def _scan_ports_connect_threaded(ip: str, ports: List[int], timeout: float,
         ok = scan_port(ip, p, timeout)
         return ok, (time.perf_counter() - t0) if ok else 0.0
 
-    futures = {executor.submit(_probe, p): p for p in ports}
+    # 礼貌模式：投递前按当前档打乱端口顺序（固定顺序扫同一网段是 IDS 的
+    # 经典特征）。fast 档 shuffle=False ⇒ 顺序与改造前完全一致。
+    futures = {executor.submit(_probe, p): p for p in throttle.shuffle_for(ports)}
     for future in concurrent.futures.as_completed(futures):
         port = futures[future]
         try:

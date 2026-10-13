@@ -480,5 +480,65 @@ class PhaseExtensionTest(_Base):
         self.assertEqual(ran, [2], "自定义阶段没有被编排执行")
 
 
+class ThrottleOrderTest(_Base):
+    """礼貌模式（v2.1 §2.4）：`scan()` 的**目标投递顺序**按档位随机化。
+
+    🔴 默认（`fast` / 没有激活档位）必须**原序** —— 不传 `--throttle` 时
+    与改造前逐字节等价（验收项「兼容旧行为」）；非 fast 档必须真的把顺序
+    交给 `prepare_targets()` 决定，否则"顺序随机化"只存在于单元测试里，
+    扫描根本没接上。这里刻意**不打真随机**：把 `shuffled` 换成确定性反转，
+    断言"引擎按它返回的顺序投递"——随机性本身由 `test_throttle` 覆盖。
+    """
+
+    def _delivery_order(self, **kwargs):
+        seen = []
+        patches = _patch_io()
+        # 🔴 `max_threads=1`：ping 阶段本身是并发池，完成顺序天然不固定；
+        # 单线程下「完成顺序 == 提交顺序」，才能观察随机化到底接没接上。
+        kwargs.setdefault("max_threads", 1)
+        self.scan(["10.0.0.1-10.0.0.8"], patches, mdns_discovery=False,
+                  progress_callback=lambda cur, total, ip: seen.append(ip),
+                  **kwargs)
+        return seen
+
+    def test_fast_policy_keeps_declared_order(self):
+        from scanner import throttle
+        declared = ["10.0.0.%d" % i for i in range(1, 9)]
+        with throttle.active_policy(throttle.resolve_policy("fast")):
+            self.assertEqual(self._delivery_order(), declared)
+
+    def test_no_active_policy_matches_fast(self):
+        """GUI 等不设档位的调用方：顺序必须与改造前一致。"""
+        declared = ["10.0.0.%d" % i for i in range(1, 9)]
+        self.assertEqual(self._delivery_order(), declared)
+
+    def test_polite_policy_reorders_delivery(self):
+        from scanner import throttle
+        declared = ["10.0.0.%d" % i for i in range(1, 9)]
+        reversed_order = list(reversed(declared))
+        with mock.patch.object(throttle, "shuffled",
+                               side_effect=lambda items, **kw:
+                               list(reversed(list(items)))):
+            with throttle.active_policy(throttle.resolve_policy("polite")):
+                order = self._delivery_order()
+        # 引擎按 prepare_targets() 的返回顺序投递（不是自己再排一遍）
+        self.assertEqual(order, reversed_order)
+
+    def test_prepare_targets_receives_the_parsed_targets(self):
+        seen = []
+
+        def _spy(seq, **kw):
+            seen.append(list(seq))
+            return list(seq)
+
+        patches = _patch_io()
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with mock.patch.object(E, "_prepare_targets", side_effect=_spy):
+            E.NetworkScanner().scan(["10.0.0.1-10.0.0.3"], mdns_discovery=False)
+        self.assertEqual(seen, [["10.0.0.1", "10.0.0.2", "10.0.0.3"]])
+
+
 if __name__ == "__main__":
     unittest.main()
