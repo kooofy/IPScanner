@@ -360,7 +360,25 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout / stderr 切到 UTF-8（与 `cli._force_utf8_stdio()` 同一理由）。
+
+    Windows 上 stdout 被重定向到管道时（CI、``> out.json``、被 subprocess
+    捕获），Python 用**系统 ANSI 代码页**编码且错误处理器是 ``strict`` ——
+    本脚本的输出全是中文，一写就 ``UnicodeEncodeError``、退出码 1。
+    CI 上实测过：`quality-cve-build` job 与 8 个 `test_cve_snapshot_build`
+    用例就是这样红的（本机控制台是 UTF-8 所以本地全绿，**只在 CI 复现**）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # 被替身替换（测试）或不支持改编码的流：跳过即可。
+            continue
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _force_utf8_stdio()
     args = _build_parser().parse_args(argv)
 
     def _say(msg: str) -> None:

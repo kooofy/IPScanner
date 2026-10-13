@@ -44,7 +44,25 @@ class BuildScriptTest(unittest.TestCase):
                "--epss-file", os.path.join(FIXTURES, "epss_sample.csv"),
                "--out", self.out,
                "--generated-at", "2026-10-01T00:00:00Z"] + list(extra)
+        # 🔴 显式 encoding="utf-8"：CI runner 的 locale 是 cp1252，
+        # `text=True` 默认按 locale 解码。子进程侧已 reconfigure 成 UTF-8
+        # （见 `tools/build_cve_snapshot.py::_force_utf8_stdio`），
+        # 两边不写死同一个编码就会得到乱码或断言失败。
         return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=180)
+
+    def _run_env(self, extra_env, *extra):
+        """同 `_run`，但给子进程额外注入环境变量（用来伪造 CI 的代码页）。"""
+        cmd = [sys.executable, TOOL,
+               "--nvd-file", os.path.join(FIXTURES, "nvd_sample.json"),
+               "--kev-file", os.path.join(FIXTURES, "kev_sample.json"),
+               "--epss-file", os.path.join(FIXTURES, "epss_sample.csv"),
+               "--out", self.out,
+               "--generated-at", "2026-10-01T00:00:00Z"] + list(extra)
+        env = dict(os.environ)
+        env.update(extra_env)
+        return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=env,
                               timeout=180)
 
     def test_build_and_self_check(self):
@@ -115,15 +133,30 @@ class BuildScriptTest(unittest.TestCase):
             [sys.executable, TOOL, "--nvd-file",
              os.path.join(FIXTURES, "does-not-exist.json"),
              "--out", self.out], cwd=ROOT, capture_output=True, text=True,
-            timeout=120)
+            encoding="utf-8", errors="replace", timeout=120)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("读输入失败", proc.stderr)
 
     def test_help_mentions_offline_only(self):
         proc = subprocess.run([sys.executable, TOOL, "--help"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=120)
         self.assertEqual(proc.returncode, 0)
         self.assertIn("不联网", proc.stdout)
+
+    def test_runs_when_stdout_code_page_is_cp1252(self):
+        """🔴 回归：stdout 被重定向到管道时，Windows 按 **ANSI 代码页**
+        （CI runner = cp1252）编码且 `strict` —— 本脚本输出全是中文，
+        不 `reconfigure` 就 `UnicodeEncodeError`、退出码 1。
+
+        2026-10-13 的 CI 上这样红过：8 个 `test_cve_snapshot_build` 用例 +
+        `quality-cve-build` job 全挂，而**本机控制台是 UTF-8 所以本地全绿**
+        （只在 CI 复现的经典形态）。用 `PYTHONIOENCODING` 伪造代码页钉住它。
+        """
+        proc = self._run_env({"PYTHONIOENCODING": "cp1252"}, "--check")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("自校验通过", proc.stdout)
+        self.assertIn("已写出", proc.stdout)
 
 
 if __name__ == "__main__":

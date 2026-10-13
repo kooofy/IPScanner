@@ -191,7 +191,12 @@ jobs:
           if ($html -notmatch "Asset inventory") {
             throw "报表模板未打进 CLI 产物（退回了兜底模板）"
           }
-          $cve = .\dist\IPScanner_cli.exe cve --status --format json
+          # 🔴 `| Out-String` 不能省：PowerShell 捕获**多行**原生输出时
+          #    `$cve` 是**字符串数组**，而 `-notmatch` 对数组是**过滤语义**
+          #    （返回不匹配的那些元素）—— 只要有一行不含该串，条件就为真，
+          #    于是**永远 throw**。`$html` 那边是 `Get-Content -Raw`（单字符串）
+          #    所以没这个坑；两处必须一个口径。
+          $cve = (.\dist\IPScanner_cli.exe cve --status --format json | Out-String)
           if ($cve -notmatch "ipscanner.cve_snapshot/1") {
             throw "内置 CVE 种子快照未打进 CLI 产物（cve --status 未报告 schema）"
           }
