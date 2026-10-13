@@ -303,6 +303,9 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         from scanner import constants as _sc
         from credentials import _PROTOCOL_TEXT
         from ui_msg import STANDARD_BUTTON_TEXT
+        from cve_status_mixin import (
+            _CVE_BADGE_TEXT, _CVE_HINT_TEXT, _CVE_SOURCE_TEXT,
+        )
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
@@ -333,6 +336,12 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             # ui_msg 的标准按钮表：值是**字面量**（模块顶层不能调 tr()，否则会被
             # 冻结成导入期语言），所以 AST 收集不到，必须在这里显式登记。
             "ui_msg.STANDARD_BUTTON_TEXT": list(STANDARD_BUTTON_TEXT.values()),
+            # cve_status_mixin 的三张表（CVE 徽标 / 现状+下一步 / 来源显示名）：
+            # 同上是**字面量表**，且它们由 `badge_text()` 等函数过 tr() 后再
+            # format —— 漏登记就会在英文界面显示中文徽标，且没有任何告警。
+            "cve_status_mixin._CVE_BADGE_TEXT": list(_CVE_BADGE_TEXT.values()),
+            "cve_status_mixin._CVE_HINT_TEXT": list(_CVE_HINT_TEXT.values()),
+            "cve_status_mixin._CVE_SOURCE_TEXT": list(_CVE_SOURCE_TEXT.values()),
         }
 
     def test_all_table_labels_are_translated(self):

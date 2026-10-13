@@ -105,8 +105,14 @@ show_missing = true
 #
 # 于是只列"本次改动要碰的文件"：加进来时就是 0 error，之后每碰一个文件就多钉一个。
 # 好处是不需要维护一份会随 pyright 版本漂移的"已知错误基线"。
+#
+# ⚠ 为什么 GUI 文件（main_window.py / scan_mixin.py / ui_threads.py）不在清单里：
+#   本环境 pyright **解析不了 PyQt5**（`Import "PyQt5.QtCore" could not be resolved`），
+#   任何 import PyQt5 的文件都必然带一条 error。`cve_status_mixin.py` 能进来是因为
+#   它**不 import PyQt5**（控件由宿主 MainWindow 建，混入只做 setText/setStyleSheet）。
+#   所以这份清单是"能钉住的"文件清单，不是"改过的"文件清单。
 [tool.pyright]
-include = ["history_store.py", "db_util.py", "report_engine.py", "credentials.py", "scanner/ndp.py", "scanner/async_ports.py", "scanner/throttle.py", "scanner/cve_snapshot.py", "scanner/exposure.py"]
+include = ["history_store.py", "db_util.py", "report_engine.py", "credentials.py", "scanner/ndp.py", "scanner/async_ports.py", "scanner/throttle.py", "scanner/cve_snapshot.py", "scanner/exposure.py", "cve_status_mixin.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
 

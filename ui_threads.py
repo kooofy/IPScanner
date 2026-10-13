@@ -11,7 +11,7 @@ import threading
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from bounded_pool import run_bounded
-from scanner import NetworkScanner, ScanResult
+from scanner import NetworkScanner, ScanResult, throttle
 from app_logging import get_logger
 from i18n import tr
 import history_store
@@ -29,7 +29,8 @@ class ScanThread(QThread):
 
     def __init__(self, ip_ranges, timeout_ms=1000, max_threads=100, scan_ports=False,
                  protocols=None, tcp_scan_mode="connect", mdns_discovery=True, ports=None,
-                 library=None, snmp_v3_user=None, switch_map=False, name_responder=False):
+                 library=None, snmp_v3_user=None, switch_map=False, name_responder=False,
+                 throttle_policy=None):
         super().__init__()
         self.ip_ranges = ip_ranges
         self.timeout_ms = timeout_ms
@@ -53,6 +54,10 @@ class ScanThread(QThread):
         # **默认关**：与「读取交换机转发表」不同，它会往网络里**发组播/广播包**，
         # 必须用户显式开启。红线：只发一个查询包，不应答、不注册名字、不投毒。
         self.name_responder = name_responder
+        # 扫描礼貌档（v2.1 §2.4 的 GUI 露出）：`throttle.POLICY_NAMES` 里的
+        # 规范名，`None` = 不显式设档（解析成当前进程档）。GUI 设置菜单落的值
+        # 经 MainWindow 透传到这里；不传则与改造前逐字节等价。
+        self.throttle_policy = throttle_policy
         self.scanner = NetworkScanner()
 
     def _build_library_lookup(self):
@@ -75,6 +80,16 @@ class ScanThread(QThread):
         return matcher.apply_to
 
     def run(self):
+        # 礼貌模式（v2.1 §2.4 GUI 露出）：整条扫描流水线跑在用户所选档位下。
+        # 🔴 装在**本线程内**而不是主线程：`active_policy()` 装的是进程级状态，
+        # 在主线程装的话 `with` 块根本找不到退出点，这份限速会漏到后续所有扫描
+        # （"悄悄把工具变慢"）；装在扫描线程里，扫描一结束就恢复上一层档。
+        # 装在 `scan()` 之前也必不可少：`prepare_targets()` /
+        # `concurrency_for()` / `throttle_gate()` 都是在扫描过程中读当前档。
+        with throttle.active_policy(throttle.resolve_policy(self.throttle_policy)):
+            self._run_scan()
+
+    def _run_scan(self):
         def on_progress(current, total, ip):
             self.progress.emit(current, total, ip)
 

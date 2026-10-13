@@ -347,3 +347,50 @@ tools/build_cve_snapshot.py # 可选、离线、不进打包、运行期不 impo
   - `cve_snapshot.py` 增加 `DEFAULT_SNAPSHOT_URL` 常量与手动放置路径提示；
   - `summary` 展示前 strip + 截断 200 字符。
 - **覆盖率门禁不变**：`scanner/cve_snapshot.py ≥ 90`、`scanner/exposure.py ≥ 85`。
+
+---
+
+## 10. 建公开数据仓：照着做就行（2026-10-13 补）
+
+> **先说清现状**：v2.1 §2.3 交付的是**只读消费 + 手动放置**，程序**不联网**——
+> `scanner/cve_snapshot.py` 刻意不 import `urllib` / `requests` / `socket`（§1 原则 1）。
+> 所以 `DEFAULT_SNAPSHOT_URL` 现在是个**惰性常量**：填了也不会有任何运行时行为，
+> 它是"下载路径将来接哪"的**决策留痕**。**不建仓不影响任何现有功能。**
+
+### 10.1 现在怎么更新数据（零 GitHub）
+
+1. 生成：`venv\Scripts\python.exe tools\build_cve_snapshot.py --out cve_snapshot.json --check`；
+2. 把 `cve_snapshot.json` 放进**数据目录**（程序里「设置 → CVE 数据快照...」直接
+   写着这个目录的绝对路径）——用户更新版优先于内置种子（§3.2）；
+3. 重启程序：状态栏徽标从「已过期 / 未安装」变成「就绪」。
+
+### 10.2 要建公开数据仓（将来做"一键更新"时的托管位）
+
+| 步 | 做什么 | 判定成功的标志 |
+|---|---|---|
+| 1 | 打开 <https://github.com/new>，仓库名填 `ipscanner-cve-data`，可见性选 **Public**，勾 Add a README | 仓库页可打开 |
+| 2 | 把生成好的 `cve_snapshot.json`（有摘要就一并传 `cve_snapshot.sha256`）用 **Add file → Upload files** 传上去，提交到 **`main`** 分支 | 文件出现在仓库根目录 |
+| 3 | 浏览器直接打开 `https://raw.githubusercontent.com/<用户名>/ipscanner-cve-data/main/cve_snapshot.json` | 看到 **JSON 文本**（不是 GitHub 的网页外壳） |
+| 4 | 把该链接填进 `scanner/cve_snapshot.py` 的 `DEFAULT_SNAPSHOT_URL`（**只此一处**） | `run_tests.py` 全绿 |
+
+**三个必须知道的坑**：
+
+1. **必须 Public**：私有仓的 raw 链接对匿名请求直接 **404**（不是 403），
+   而桌面应用**不该**为下载一个 JSON 持有 GitHub token（§9.4 否决理由）；
+2. **分支名必须是 `main`**：常量里写死的就是 `main`，用 `master` 会 404；
+3. **别把链接指向本仓库**：本仓库是私有的，同样 404；数据仓与代码仓**必须分离**
+   （也正因分离，数据可以每天更新而无需发版）。
+
+### 10.3 填了 URL 之后还差什么（**下一轮**才做）
+
+下载路径要落地，必须同时满足（否则宁可继续只支持手动放置）：
+
+1. 取回后**先验 SHA256 清单**（§3.4），不匹配 → 拒绝加载并保留旧数据；
+2. 下载失败（超时 / 404 / 限流 / 国内取不动）只 `warning` + 回退内置种子，
+   **绝不**升级成扫描失败（§3.1 / §3.3）；
+3. 落盘位置仍是 `data_dir()`（用户可写），且**只在用户显式点"更新"时**联网 ——
+   程序启动不自动联网，否则"数据不出网"这条身份边界就破了；
+4. 徽标要能显示「来源：在线下载」这一态（`SOURCE_*` 需扩一个规范值）。
+
+> 这四项**不在 v2.1 §2.3 的验收内**，属于"要做就单独开一轮"的追加项
+> （与 §2.5 的 GUI 露出同性质）。

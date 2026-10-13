@@ -237,6 +237,191 @@ class ScanThreadResponderTest(unittest.TestCase):
         self.assertEqual(results[0].name_responder, {"llmnr": "ipscanner-x"})
 
 
+class ThrottlePolicyOptionTest(unittest.TestCase):
+    """扫描礼貌档（v2.1 §2.4 GUI 露出）：默认 fast、接得到 ScanThread、存得住。
+
+    守的还是同一类静默失效，只是代价更高：档位选了却没传进 `ScanThread`，
+    界面一切正常、用户以为"已经在礼貌模式"，实际按全速扫 —— 在别人的生产
+    网里，这正是"说好的低影响巡检"变成告警风暴的那条路。
+
+    另一条同样重要：**默认必须是 fast**。改造前没有任何限速，默认档一变，
+    所有老用户的下一次扫描就会莫名变慢（且没有任何提示）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ipscanner_thr_")
+        self._orig = main_window.data_dir
+        main_window.data_dir = lambda: self.tmp
+        i18n.init("zh-CN")
+        self.mw = main_window.MainWindow()
+        self.mw.show()
+        QApplication.processEvents()
+
+    def tearDown(self):
+        self.mw.close()
+        main_window.data_dir = self._orig
+        i18n.init("zh-CN")
+
+    # ── 默认档 ──
+
+    def test_defaults_to_fast(self):
+        from scanner import throttle
+        self.assertEqual(self.mw.throttle_policy, throttle.DEFAULT_POLICY,
+                         "默认档必须是 fast —— 不额外设限才与改造前逐字节等价")
+
+    def test_menu_lists_every_policy_by_canonical_name(self):
+        """子菜单项的 `data()` 必须是**规范名**（存库/比较/透传都靠它）。"""
+        from scanner import throttle
+        datas = [a.data() for a in self.mw.throttle_group.actions()]
+        self.assertEqual(sorted(datas), sorted(throttle.POLICY_NAMES))
+        self.assertTrue(all(isinstance(d, str) and d.isascii() for d in datas),
+                        "档位不能拿显示文案当身份（换语言就找不到自己了）")
+
+    # ── 接得到 ScanThread ──
+
+    def test_policy_reaches_the_scan_thread(self):
+        from unittest import mock
+        import scan_mixin
+        from tests.test_scan_local_subnet import _FakeScanThread
+        self.mw._set_throttle_policy("polite")
+        self.mw.ip_range_items = ["10.0.0.0/30"]
+        captured = {}
+
+        class _Recorder(_FakeScanThread):
+            def __init__(self, ranges, **kwargs):
+                super().__init__(ranges, **kwargs)
+                captured.update(kwargs)
+
+        with mock.patch.object(scan_mixin, "ScanThread", _Recorder):
+            self.mw._start_scan()
+        self.assertEqual(captured.get("throttle_policy"), "polite",
+                         "档位没传给 ScanThread —— 礼貌模式永远不会生效")
+
+    def test_audit_records_non_fast_policy_only(self):
+        """非 fast 档必须进审计；fast 不记（记了就是每条历史一句废话）。
+
+        口径与 CLI 的 `_audit_throttle` 一致：出了事要能从审计里还原
+        "当时是什么档"。
+        """
+        from unittest import mock
+        import scan_mixin
+        from tests.test_scan_local_subnet import _FakeScanThread
+        self.mw.ip_range_items = ["10.0.0.0/30"]
+        seen = []
+        with mock.patch.object(type(self.mw), "_audit",
+                               side_effect=lambda *a, **k: seen.append(a)):
+            with mock.patch.object(scan_mixin, "ScanThread", _FakeScanThread):
+                self.mw._set_throttle_policy("fast")
+                self.mw._start_scan()
+                self.assertNotIn("polite", str(seen), "fast 档不该出现档位字样")
+                seen.clear()
+                self.mw._set_throttle_policy("polite")
+                self.mw._start_scan()
+        self.assertIn("polite", str(seen),
+                      "非 fast 档没进审计 —— 事后无法还原当时的发包策略")
+
+    # ── 存得住 ──
+
+    def test_switching_persists_and_syncs_the_menu(self):
+        self.mw._set_throttle_policy("balanced")
+        self.assertEqual(self.mw.throttle_policy, "balanced")
+        self.assertEqual(self.mw.settings.value("scan/throttle"), "balanced",
+                         "档位没落盘 —— 重启就回到 fast，用户会以为设置坏了")
+        checked = [a.data() for a in self.mw.throttle_group.actions()
+                   if a.isChecked()]
+        self.assertEqual(checked, ["balanced"], "菜单勾选态没跟着切换")
+
+    def test_saved_policy_survives_a_reload(self):
+        """重启后仍是用户选的档（读配置路径也要过一遍白名单）。"""
+        self.mw._set_throttle_policy("polite")
+        self.mw._load_settings()
+        self.assertEqual(self.mw.throttle_policy, "polite")
+
+    def test_invalid_stored_value_falls_back_to_fast(self):
+        """手工改坏的 ini 不许把扫描卡在未知档上。"""
+        from scanner import throttle
+        self.mw.settings.setValue("scan/throttle", "turbo")
+        self.mw.settings.sync()
+        self.mw._load_settings()
+        self.assertEqual(self.mw.throttle_policy, throttle.DEFAULT_POLICY)
+
+    def test_invalid_argument_is_ignored(self):
+        from scanner import throttle
+        self.mw._set_throttle_policy("turbo")
+        self.assertEqual(self.mw.throttle_policy, throttle.DEFAULT_POLICY)
+
+
+class ScanThreadThrottleTest(unittest.TestCase):
+    """`ScanThread` 真的把档装进进程，并且**扫描结束一定恢复**。
+
+    为什么必须测"恢复"：`throttle.active_policy()` 装的是**进程级**状态。
+    一次 polite 扫描结束后若不还原，后续所有扫描（含用户后来改回 fast 的）
+    都会带着限速桶跑 —— 那是"悄悄把工具变慢"，比崩溃更难查。
+    """
+
+    def setUp(self):
+        from scanner import throttle
+        throttle.reset_throttle()
+
+    def tearDown(self):
+        from scanner import throttle
+        throttle.reset_throttle()
+
+    def _thread_with(self, policy, side_effect=None):
+        from unittest import mock
+        import ui_threads
+        thread = ui_threads.ScanThread(["10.0.0.0/30"],
+                                       throttle_policy=policy)
+        thread.scanner = mock.Mock()
+        thread.scanner.last_adaptive_timeout = None
+        if side_effect is None:
+            thread.scanner.scan.return_value = []
+        else:
+            thread.scanner.scan.side_effect = side_effect
+        return thread
+
+    def test_default_argument_is_none(self):
+        import inspect
+        import ui_threads
+        sig = inspect.signature(ui_threads.ScanThread.__init__)
+        self.assertIsNone(sig.parameters["throttle_policy"].default,
+                          "默认必须是 None（= 不显式设档），否则会覆盖调用方的档")
+
+    def test_policy_is_active_inside_the_scan(self):
+        from scanner import throttle
+        seen = {}
+        thread = self._thread_with("polite")
+        thread.scanner.scan.side_effect = lambda *a, **k: (
+            seen.update(policy=throttle.current_policy().name) or [])
+        thread.run()
+        self.assertEqual(seen.get("policy"), "polite",
+                         "扫描过程中当前档不是 polite —— 限速根本没生效")
+
+    def test_fast_is_the_default_when_unspecified(self):
+        from scanner import throttle
+        seen = {}
+        thread = self._thread_with(None)
+        thread.scanner.scan.side_effect = lambda *a, **k: (
+            seen.update(policy=throttle.current_policy().name) or [])
+        thread.run()
+        self.assertEqual(seen.get("policy"), throttle.DEFAULT_POLICY)
+
+    def test_policy_is_restored_after_the_scan(self):
+        from scanner import throttle
+        self._thread_with("polite").run()
+        self.assertEqual(throttle.current_policy().name, throttle.DEFAULT_POLICY,
+                         "扫描结束后档位没还原 —— 限速会漏到后续所有扫描")
+
+    def test_policy_is_restored_even_when_the_scan_explodes(self):
+        from scanner import throttle
+        thread = self._thread_with("polite",
+                                   side_effect=RuntimeError("boom"))
+        with self.assertRaises(RuntimeError):
+            thread.run()
+        self.assertEqual(throttle.current_policy().name, throttle.DEFAULT_POLICY,
+                         "扫描抛异常后档位没还原（漏得更隐蔽）")
+
+
 class _Result:
     """够用的 ScanResult 替身（`run()` 只用到 status / ip / name_responder）。"""
 

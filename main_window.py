@@ -16,6 +16,7 @@ from scanner import (
     scan_level_label, service_label, get_ports_for_level,
     count_ip_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
 )
+from scanner import throttle
 from mac_library import MacLibrary
 import history_store
 
@@ -48,6 +49,7 @@ from history_mixin import HistoryMixin
 from library_mixin import LibraryMixin
 from network_tool_mixin import NetworkToolMixin
 from oui_mixin import OuiMixin
+from cve_status_mixin import CveStatusMixin
 from watch_mixin import WatchMixin
 
 #: 列索引 → 规范中文名（顺序即表格列序，勿改）。
@@ -172,7 +174,9 @@ def _vsep() -> QFrame:
     return sep
 
 
-class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, NetworkToolMixin, OuiMixin, WatchMixin, QMainWindow):
+class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
+                 NetworkToolMixin, OuiMixin, CveStatusMixin, WatchMixin,
+                 QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(tr("局域网终端扫描工具 — IP Scanner"))
@@ -185,6 +189,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.selected_protocols = list(PROTOCOL_PORTS.keys())  # HTTP, HTTPS, FTP, RDP 默认开启
         self.tcp_scan_mode = "connect"  # 端口探测方式: connect / syn / udp
         self.scan_level = "quick"  # 扫描级别: quick / standard / all（默认快速，向后兼容）
+        # 扫描礼貌档（v2.1 §2.4 GUI 露出）：`throttle.POLICY_NAMES` 里的规范名。
+        # 默认 fast = 不额外设限，与改造前逐字节等价；由 scan/throttle 持久化。
+        self.throttle_policy = throttle.DEFAULT_POLICY
         self.mdns_discovery = True      # 扫描末尾做 mDNS 组播发现
         self.mdns_thread = None
         self.scan_thread = None
@@ -250,6 +257,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self._auto_detect_subnet()
         # 载入地址库计数
         self._refresh_library_label()
+        # CVE 快照状态徽标（v2.1 §2.3 GUI 露出）：启动时读一次快照健康度。
+        # 放在 `_load_settings()` 之后 —— 主题已解析，徽标取色才对得上。
+        self._refresh_cve_badge()
 
         # 启动提示（合并为一条状态栏消息）：
         # 1) 数据目录回退 —— exe 目录不可写（如装在 Program Files）时数据改存用户目录
@@ -593,6 +603,13 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.excel_label.setObjectName("libraryLabel")
         self.status_bar.addPermanentWidget(self.excel_label)
 
+        # CVE 快照状态徽标（v2.1 §2.3 GUI 露出）：永久区最右一格。
+        # 文案与取色都在 `CveStatusMixin._refresh_cve_badge()`（QSS 只兜字体），
+        # 换主题时随 `_apply_theme` 一起刷新，深色下不会漏白。
+        self.cve_label = QLabel("")
+        self.cve_label.setObjectName("cveLabel")
+        self.status_bar.addPermanentWidget(self.cve_label)
+
     def _init_menu(self):
         menubar = self.menuBar()
         menubar.setStyleSheet("")
@@ -861,6 +878,29 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
             )
             level_sub.addAction(_a)
 
+        # 扫描礼貌档（v2.1 §2.4 GUI 露出）：与「扫描级别」并列 ——
+        # 一个管「扫多深」，一个管「对网络多客气」。勾选存的是**规范名**
+        # （fast/balanced/polite，语言无关，见 scanner.throttle），
+        # 显示名在这里运行时 tr()（字面量表放模块级会被冻成中文）。
+        self.throttle_group = QActionGroup(self)
+        self.throttle_group.setExclusive(True)
+        polite_sub = settings_menu.addMenu(tr("扫描礼貌档"))
+        polite_sub.setStyleSheet("")
+        polite_sub.setIcon(_mi(QStyle.SP_MediaSeekForward))
+        polite_sub.setToolTip(
+            tr("控制发包速率、并发上限与投递顺序随机化（默认快速 = 不额外设限）"))
+        for _tp, _tl in ((throttle.POLICY_FAST, tr("快速（不额外设限）")),
+                         (throttle.POLICY_BALANCED, tr("均衡（温和限速）")),
+                         (throttle.POLICY_POLITE, tr("礼貌（低速低并发）"))):
+            _a = QAction(_tl, self, checkable=True)
+            _a.setData(_tp)
+            _a.setActionGroup(self.throttle_group)
+            _a.setChecked(self.throttle_policy == _tp)
+            _a.triggered.connect(
+                lambda _checked, _pp=_tp: self._set_throttle_policy(_pp)
+            )
+            polite_sub.addAction(_a)
+
         scan_settings_sub = settings_menu.addMenu(tr("扫描设置"))
         scan_settings_sub.setStyleSheet("")
         scan_settings_sub.setIcon(_mi(QStyle.SP_FileDialogListView))
@@ -878,6 +918,14 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
                 lambda _checked, _p=_proto: self._toggle_protocol(_p, _checked)
             )
             scan_settings_sub.addAction(_act)
+
+        # CVE 快照详情（v2.1 §2.3 GUI 露出）：状态栏徽标的展开入口。
+        # 挨着「扫描设置」放 —— 两者都是「采集/数据面」的系统信息。
+        act_cve_status = QAction(tr("CVE 数据快照..."), self)
+        act_cve_status.setIcon(_mi(QStyle.SP_FileDialogInfoView))
+        act_cve_status.setToolTip(tr("查看离线 CVE 数据快照的状态、来源与下一步"))
+        act_cve_status.triggered.connect(self._show_cve_status)
+        settings_menu.addAction(act_cve_status)
 
         settings_menu.addSeparator()
 
@@ -1101,6 +1149,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         # IP 列前景、状态列前景与预渲染图标、收藏星标
         if hasattr(self, "_ip_item_map"):
             self._refresh_theme_marks()
+        # CVE 徽标的颜色同样由 Python 按主题取（theme_tokens 语义色）——
+        # 不跟着刷的话，切到深色还是浅色主题下那只绿灯/红灯不换。
+        if hasattr(self, "cve_label"):
+            self._refresh_cve_badge()
 
     def _should_be_dark_now(self) -> bool:
         """按时间判断当前是否应为深色：18:00–次日 06:00 视为深色时段。"""
@@ -1469,6 +1521,11 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         self.tcp_scan_mode = s.value("scan/tcp_mode", "connect", type=str)
         if self.tcp_scan_mode not in ("connect", "syn", "udp"):
             self.tcp_scan_mode = "connect"
+        # 扫描礼貌档（v2.1 §2.4）：规范名。旧配置没这个键 → fast，
+        # 与改造前逐字节等价（验收项「兼容旧行为」）。
+        _tp = s.value("scan/throttle", throttle.DEFAULT_POLICY, type=str)
+        self.throttle_policy = (_tp if _tp in throttle.POLICY_NAMES
+                                else throttle.DEFAULT_POLICY)
         self.scan_level = s.value("scan/level", "quick", type=str)
         if self.scan_level not in ("quick", "standard", "all"):
             self.scan_level = "quick"
@@ -1579,6 +1636,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin, 
         s.setValue("scan/watch", self.watch_check.isChecked())
         s.setValue("scan/name_responder", self.responder_check.isChecked())
         s.setValue("scan/tcp_mode", self.tcp_scan_mode)
+        # 存**当前值**而不是字面量 fast：写成字面量会把用户选的档位每次启动
+        # 重置掉（列布局那次就是这么静默重置的）。
+        s.setValue("scan/throttle",
+                   getattr(self, "throttle_policy", throttle.DEFAULT_POLICY))
         s.setValue("scan/level", self.scan_level)
         s.setValue("scan/protocols", self.selected_protocols)
         s.setValue("scan/ip_ranges", self.ip_range_items)

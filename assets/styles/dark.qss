@@ -549,6 +549,13 @@ QLabel#libraryLabel {
     font-size: 11px;
     color: #9AA0A6;
 }
+/* CVE 快照徽标（v2.1 §2.3 GUI 露出）：颜色由 Python 按状态+主题内联设
+   （theme_tokens 语义色，见 cve_status_mixin），这里只兜字体与未刷新时的底色。 */
+QLabel#cveLabel {
+    font-family: "Microsoft YaHei", "Segoe UI";
+    font-size: 11px;
+    color: #9AA0A6;
+}
 QFrame#hSep {
     background-color: #3F3F46;
     border: none;

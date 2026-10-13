@@ -13,6 +13,7 @@ from scanner import (
     scan_level_label, SVC_MDNS, merge_wmi, merge_netbios,
     count_ip_range, is_valid_range, is_ipv6_range, MAX_IPS_PER_RANGE, MAX_IPS_TOTAL,
     windows_ipconfig_subnets, parse_ip_range,
+    throttle,
 )
 import audit_log
 import ui_logic
@@ -53,6 +54,18 @@ class ScanMixin:
             {v: k for k, v in _mode_map.items()}.get(self.tcp_scan_mode, tr("TCP 全连接"))
         )
         _layout.addRow(tr("端口探测方式:"), _mode)
+        # 扫描礼貌档（v2.1 §2.4 GUI 露出）：与菜单子菜单同一组规范值。
+        # 存/取的都是 `throttle.POLICY_NAMES` 里的规范名，**不是**显示文案。
+        _tp = QComboBox()
+        _tp_labels = {
+            throttle.POLICY_FAST: tr("快速（不额外设限）"),
+            throttle.POLICY_BALANCED: tr("均衡（温和限速）"),
+            throttle.POLICY_POLITE: tr("礼貌（低速低并发）"),
+        }
+        _tp.addItems([_tp_labels[p] for p in throttle.POLICY_NAMES])
+        _tp.setCurrentText(
+            _tp_labels.get(self.throttle_policy, _tp_labels[throttle.POLICY_FAST]))
+        _layout.addRow(tr("扫描礼貌档:"), _tp)
         _btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         localize_buttons(_btns)
         _btns.accepted.connect(dlg.accept)
@@ -62,10 +75,16 @@ class ScanMixin:
             _old_to = self.timeout_spin.value()
             _old_th = self.threads_spin.value()
             _old_mode = self.tcp_scan_mode
+            _old_tp = self.throttle_policy
             self.timeout_spin.setValue(_to.value())
             self.threads_spin.setValue(_th.value())
             self.tcp_scan_mode = _mode_map[_mode.currentText()]
+            # 显示文案 → 规范名的反查表（与上面的 `_tp_labels` 同一处定义）
+            _tp_inv = {v: k for k, v in _tp_labels.items()}
+            self.throttle_policy = _tp_inv.get(
+                _tp.currentText(), throttle.POLICY_FAST)
             self._sync_tcp_mode_menu()
+            self._sync_throttle_menu()
             self._save_settings()
             # 审计：记录设置变更
             _changes = []
@@ -75,6 +94,8 @@ class ScanMixin:
                 _changes.append(f"线程 {_old_th}→{_th.value()}")
             if _old_mode != self.tcp_scan_mode:
                 _changes.append(f"探测方式 {_old_mode}→{self.tcp_scan_mode}")
+            if _old_tp != self.throttle_policy:
+                _changes.append(f"礼貌档 {_old_tp}→{self.throttle_policy}")
             self._audit(
                 audit_log.CAT_SYSTEM, tr("修改扫描设置"),
                 " · ".join(_changes) if _changes else tr("无变化"),
@@ -456,6 +477,7 @@ class ScanMixin:
             snmp_v3_user=self.snmp_v3_creds.to_user() if self.snmp_v3_creds.has_creds() else None,
             switch_map=self.switch_map_check.isChecked(),
             name_responder=self.responder_check.isChecked(),
+            throttle_policy=self.throttle_policy,
         )
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()
@@ -465,12 +487,19 @@ class ScanMixin:
         self.scan_thread.finished_signal.connect(self._on_scan_finished, Qt.QueuedConnection)
         self.scan_thread.log_signal.connect(lambda msg: self.status_bar.showMessage(msg), Qt.QueuedConnection)
         # 审计：记录扫描开始
+        # 礼貌档只在**非 fast** 时落审计：fast 是"改造前原样"，记了等于
+        # 每条历史都多一句废话；非 fast 档会真实改变发包行为（限速/随机化），
+        # 出了事要能从审计里还原"当时是什么档"（与 CLI 的 _audit_throttle 同口径）。
+        _throttle_note = ""
+        if self.throttle_policy != throttle.DEFAULT_POLICY:
+            _throttle_note = tr(" · 礼貌档 ") + self.throttle_policy
         self._audit(
             audit_log.CAT_SCAN, tr("开始扫描"),
             f"范围: {', '.join(self.ip_range_items)} ({total_ips} 个IP) | "
             f"超时 {self.timeout_spin.value()}ms · 线程 {self.threads_spin.value()} · "
             f"端口扫描 {'开' if self.port_scan_check.isChecked() else '关'}"
-            f"{tr(' · 级别 ') + scan_level_label(self.scan_level) if self.port_scan_check.isChecked() else ''}",
+            f"{tr(' · 级别 ') + scan_level_label(self.scan_level) if self.port_scan_check.isChecked() else ''}"
+            f"{_throttle_note}",
         )
         self.scan_thread.start()
 
@@ -524,6 +553,32 @@ class ScanMixin:
         """同步"扫描级别"子菜单的勾选态到当前 scan_level。"""
         for _a in self.scan_level_group.actions():
             _a.setChecked(_a.data() == self.scan_level)
+
+    def _set_throttle_policy(self, policy: str):
+        """切换扫描礼貌档（v2.1 §2.4 GUI 露出）并持久化。
+
+        这里**只动配置**，不碰进程态：档位在每次开扫时由 `ScanThread.run()`
+        装进进程（`throttle.active_policy`），扫描一结束就恢复上一层档。
+        要是顺手在这里装上，限速桶会漏到后续所有扫描上 —— 那正是
+        `_PolicyContext` 注释里说的"悄悄把工具变慢"。
+        """
+        if policy not in throttle.POLICY_NAMES:
+            policy = throttle.DEFAULT_POLICY
+        self.throttle_policy = policy
+        self._sync_throttle_menu()
+        self._save_settings()
+        _d = throttle.resolve_policy(policy).audit_detail()
+        self.status_bar.showMessage(
+            tr("扫描礼貌档: {name} · 包速率 {rate} · 并发 {conc} · 顺序随机化 {shuf}")
+            .format(name=policy,
+                    rate=_d["packets_per_minute"] or tr("不限"),
+                    conc=_d["max_concurrency"] or tr("不限"),
+                    shuf=tr("开") if _d["shuffle"] else tr("关")))
+
+    def _sync_throttle_menu(self):
+        """同步"扫描礼貌档"子菜单的勾选态到当前 throttle_policy。"""
+        for _a in self.throttle_group.actions():
+            _a.setChecked(_a.data() == self.throttle_policy)
 
     def _on_scan_progress(self, current, total, ip):
         self.scan_status.set_progress(current, total)
