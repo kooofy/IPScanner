@@ -404,6 +404,32 @@ class SwitchMapThread(QThread):
         self.finished_signal.emit(info)
 
 
+class WifiSnapshotThread(QThread):
+    """后台取一次「无线切片」（v2.1 §2.2）。
+
+    为什么要线程：`netsh` 是子进程、`refresh=True` 还要等射频扫完（默认 1.5s）
+    —— 在主线程跑就是一次肉眼可见的冻结。取数本身**不发 IP 包**，只是可能慢。
+    """
+
+    finished_signal = pyqtSignal(object)   # scanner.wifi.WifiSnapshot
+
+    def __init__(self, refresh: bool = False):
+        super().__init__()
+        self.refresh = refresh
+
+    def run(self):
+        from scanner import wifi
+        try:
+            snap = wifi.snapshot(refresh=self.refresh)
+        except Exception as e:          # noqa: BLE001 — 取数炸了也不该崩界面
+            _log.warning("无线切片取数异常: %s", e)
+            snap = wifi.WifiSnapshot(
+                capability=wifi.WifiCapability(False, wifi.REASON_QUERY_FAILED,
+                                               str(e)),
+                notes=[wifi.REASON_QUERY_FAILED])
+        self.finished_signal.emit(snap)
+
+
 class OuiUpdateThread(QThread):
     """OUI 数据库在线更新线程。"""
     log_signal = pyqtSignal(str)           # 进度消息

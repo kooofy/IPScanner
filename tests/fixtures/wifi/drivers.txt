@@ -1,0 +1,43 @@
+
+接口名称: WLAN
+
+    驱动程序                  : Intel(R) Wi-Fi 6 AX201 160MHz
+    供应商                    : Intel Corporation
+    提供程序                  : Intel
+    日期                      : 2025/1/2
+    版本                      : 23.110.0.5
+    INF 文件                  : oem125.inf
+    类型                      : 本机 WLAN 驱动程序
+    支持的无线电类型          : 802.11b 802.11g 802.11n 802.11a 802.11ac 802.11ax
+    支持 FIPS 140 模式: 是
+    支持 802.11w 管理帧保护 : 是
+    支持的承载网络  : 否
+    基础结构模式中支持的身份验证和密码:
+                                开放式              无
+                                开放式              WEP-40bit
+                                开放式              WEP-104 位
+                                开放式              WEP
+                                WPA - 企业         TKIP
+                                WPA - 企业         CCMP
+                                WPA - 个人         TKIP
+                                WPA - 个人         CCMP
+                                WPA2 - 企业        TKIP
+                                WPA2 - 企业        CCMP
+                                WPA2 - 个人        TKIP
+                                WPA2 - 个人        CCMP
+                                开放式              供应商定义的
+                                WPA3 - 个人        CCMP
+                                供应商定义的           供应商定义的
+                                WPA3-Enterprise 192 位 GCMP-256
+                                OWE              CCMP
+                                WPA3 - 企业        CCMP
+    支持的频段数: 2
+                                2.4 GHz [ 0 MHz - 0 MHz]
+                                5 GHz [ 0 MHz - 0 MHz]
+    是否存在 IHV 服务         : 是
+    IHV 适配器 OUI            : [00 00 00]，类型: [00]
+    IHV 扩展 DLL 路径         : C:\WINDOWS\system32\IntelIHVRouter10.dll
+    IHV UI 扩展 ClSID         : {00000000-0000-0000-0000-000000000000}
+    IHV 诊断 CLSID            : {00000000-0000-0000-0000-000000000000}
+    支持的无线显示器: 是 (图形驱动程序: 是，WLAN 驱动程序: 是)
+

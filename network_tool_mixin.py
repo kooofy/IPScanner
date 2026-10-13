@@ -14,7 +14,7 @@ from app_logging import get_logger
 from ui_msg import msg_ask, msg_info, msg_warn
 from i18n import tr
 from scanner.constants import SVC_FTP, SVC_HTTP, SVC_HTTPS, SVC_RDP
-from ui_dialogs import SwitchPortDialog
+from ui_dialogs import SwitchPortDialog, WifiDialog
 
 _log = get_logger(__name__)
 
@@ -357,5 +357,18 @@ class NetworkToolMixin:
             snmp_v3_user=(self.snmp_v3_creds.to_user()
                           if self.snmp_v3_creds.has_creds() else None),
         )
+        dlg.exec_()
+
+    def _show_wifi_slice(self):
+        """弹出无线切片对话框（v2.1 §2.2）。
+
+        取数在对话框自己的后台线程里做（`netsh` 是子进程、主动扫描还要等射频），
+        这里只负责打开它 —— 所以本方法**不会**冻界面。
+
+        🔴 默认**只读系统缓存、不扰动射频**；要真扫一圈得在对话框里点
+        「重新扫描（主动扰动射频）」。与 mDNS `listen_only` 同口径。
+        """
+        self._audit(audit_log.CAT_DEVICE, tr("无线切片"), tr("打开无线切片工具"))
+        dlg = WifiDialog(parent=self, dark=self.dark_mode)
         dlg.exec_()
 

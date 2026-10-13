@@ -46,7 +46,7 @@ v1.9/v2.0 的四分法是「结构 / 出口 / 显示 / 安全网」。v2.1 沿�
 | # | 角色 | 事项 | 优先级 | 工时 | 来源 |
 |---|---|---|---|---|---|
 | 2.1 | **结构** | 异步 connect 扫描（`asyncio` + IOCP，无 Npcap 提速） ✅ | **P0（主题项）** | 5–7 天 | `ROADMAP_V2.0.md` §2 `adv #2` |
-| 2.2 | **可见性** | 无线切片（Native Wi-Fi API：信道拥塞 / 漫游日志 / SSID↔BSSID↔子网） | **P1** | 6–8 天 | §2 `adv #4` |
+| 2.2 | **可见性** | 无线切片（Native Wi-Fi API：信道拥塞 / 漫游日志 / SSID↔BSSID↔子网） ✅ | **P1** | 6–8 天 | §2 `adv #4` |
 | 2.3 | **安全网** | 离线 CVE + KEV/EPSS 排序（**先立数据快照维护模型，再编码**） ✅ | **P1** | 6–9 天 | §2 `adv #9` |
 | 2.4 | **出口** | 扫描节流与礼貌模式（并发上限 + 顺序随机化 + 包速率上限，且档位进导出/审计） ✅ | **P1** | 3–5 天 | `PRODUCT_ADVISORY.md` §4.1 |
 
@@ -226,6 +226,58 @@ grep -rn "wlanapi|netsh wlan|WlanOpenHandle|WLAN_INTERFACE" --include=*.py .   �
 
 > ⚠ 本项**平台绑定最强**（Windows 独占 API）。若你希望它同时服务 macOS/Linux，
 > 应单列 —— 本文**明确只做 Windows + 文本降级**，不承诺跨平台等价（见 §4）。
+
+#### 落地记录（2.2）
+
+**交付**（2026-10-13）：
+
+- `scanner/wifi.py`（约 1.4k 行，**零 PyQt / 零第三方 / 零网络**）：
+  - **主路径** `ctypes` 直调 `wlanapi.dll`（`WlanOpenHandle` / `WlanEnumInterfaces`
+    / `WlanQueryInterface` / `WlanScan` / `WlanFreeMemory`）—— `ctypes` 是标准库，
+    不破「不加依赖」；
+  - **降级路径** `netsh wlan show interfaces` / `show networks mode=bssid` 文本解析；
+  - **漫游时间线** `wevtutil qe Microsoft-Windows-WLAN-AutoConfig/Operational /f:xml`，
+    抽 8000 / 8001 / 8002 / 8003（尝试 / 成功 / 失败 / 断开）；`11000` / `11004` /
+    `11005` 这类内部事件**跳过**；
+  - **SSID↔BSSID↔子网**：`link_subnets()` 按**适配器名**把当前关联挂到本机 IPv4 网段，
+    关联依据如实分三态 `name` / `keyword` / `none`（`none` 就说"没关联上"，不硬凑）；
+  - 能力探测 `capability()` 五态：非 Windows / 缺 `wlanapi.dll` / 服务没跑 /
+    没有无线网卡 / 查询失败 —— **任何情况都不抛**。
+- `tests/test_wifi.py`（**175 条**）：真样本解析对拍、**变长 ctypes 结构**（合成缓冲区
+  造 IE 长度 12 / 0 / 200 的 3 个 entry，并反向证明固定步长会读错第 3 个）、
+  「列宽被系统改过」的切列鲁棒性、非 Windows 降级、漫游 XML 解析（含 7 位小数时间戳）、
+  ipconfig 解析与 `scanner/ping.py` 的**交叉对拍**。
+- 样本 `tests/fixtures/wifi/`（`interfaces.txt` / `networks_bssid.txt` / `profiles.txt` /
+  `drivers.txt` / `ipconfig.txt` 等，真机采 + 构造的 en-US 对照），
+  `PROVENANCE.md` 逐份标注**真样本 vs 构造样本**。
+- **GUI 露出**：`ui_threads.WifiSnapshotThread`（取数不冻界面；取数异常退化成
+  "不可用"快照而不是崩界面）+ `ui_dialogs/wifi.py`（四个页签：当前关联 / 信道拥塞 /
+  可见 AP / 漫游时间线）+ 「分析」菜单 →「无线切片...」（挂 `network_tool_mixin`，
+  网络接口信息属该 Mixin 职责）。
+- **i18n**：66 个新键；六张字面量标签表登记进 `test_i18n_lazy._label_tables()`。
+
+**四个真坑**（细节见 `TRAPS.md`「v2.1 §2.2 无线切片」；共同点是**静默错**而不是报错）：
+
+1. **`WLAN_BSS_ENTRY` 是变长结构** —— 按 `sizeof(entry)` 步进会让第 2 个 AP 起
+   每个字段都错位（读出一堆看着像数据的垃圾）。必须按 `ie_offset` / `ie_size` 走。
+2. **`netsh` 文本不能按固定列宽切** —— 真实样本里 `SSID 1 : QZTJXX` 与
+   `名称                   : WLAN` 同屏共存。改成「按第一个半/全角冒号切 + 键规范化 +
+   查不到的键忽略」，续行并入上一个键。
+3. **同机 `wevtutil` 是 cp936、`netsh` 是 UTF-8** —— `decode_output()` 先 utf-8 再
+   cp936，**cp1252 兜底必须放循环外**（它永不抛异常，留在循环里会让兜底变死代码）。
+4. **事件时间戳 7 位小数 + 不带 BSSID** —— `fromisoformat` 只吃 3/6 位，须归一再强制
+   UTC；没有 BSSID ⇒ 时间线**只能诚实地做到 SSID 粒度**。
+
+**验收对照**：解析对拍 ✅（真样本 + 构造 en-US，两份 ipconfig 实现逐条比对）；
+切列不脆 ✅（列宽被改过的样本仍能切分）；非 Windows 降级可测 ✅
+（`capability()` 返回「本平台无此能力」而非抛异常，五态各有用例）；
+漫游日志解析 ✅（给定 XML 样本断言 SSID + 时间戳序列）；
+覆盖率 ✅ **99%**（闸门定 85%；缺的 2 行是 `band_of_text` 的 `except ValueError`，
+正则 `(\d+(?:\.\d+)?)` 让它不可达）；`ui_dialogs/wifi.py` **100%**（另 58 条对话框用例）。
+
+🔴 **本项的"不出网 / 不扰动射频"是身份边界**：模块不 import `socket` / `urllib`
+（AST + 子进程差集双测）；`WlanScan` 只在 `refresh=True` 时调用，GUI 里唯一入口是
+「重新扫描（主动扰动射频）」按钮，**打开界面只读系统缓存**。
 
 ---
 
@@ -576,11 +628,11 @@ grep -rni "cve|kev|epss" --include=*.py .   → 仅 venv/ 第三方命中，项�
 ```
 v2.1「看得更深 —— 扫得更快、看清无线归属、看清暴露面，且扫得礼貌」
 ├─ 2.1 异步 connect 扫描（asyncio + IOCP，无 Npcap）    P0  ← 结构（主题）★ 地基
-├─ 2.2 无线切片（Native Wi-Fi API：拥塞/漫游/SSID↔子网）P1  ← 可见性
+├─ 2.2 无线切片（Native Wi-Fi API：拥塞/漫游/SSID↔子网）P1  ← 可见性 ★ 完成
 ├─ 2.3 离线 CVE + KEV/EPSS（先立快照维护模型）          P1  ← 安全网（有产品门）
 └─ 2.4 扫描节流与礼貌模式（并发/随机化/包速率 + 审计）   P1  ← 出口（依赖 2.1）
 
-进度：3/4 完成（**2.1 ✅ / 2.3 ✅ / 2.4 ✅**；2.2 未开工；落地记录见 §2.1 / §2.3 / §2.4）
+进度：4/4 完成（**2.1 ✅ / 2.2 ✅ / 2.3 ✅ / 2.4 ✅**；落地记录见 §2.1 / §2.2 / §2.3 / §2.4）
 
 不做（明确）：HTTP API / Apprise / Prometheus 常驻 / SNMP trap /
              Npcap 捆绑 / monitor 模式站点勘测 —— 依旧因「开端口 / 加依赖 / 装 agent」出局

@@ -804,6 +804,14 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         act_switch_map.triggered.connect(self._show_switch_port_mapping)
         analysis_menu.addAction(act_switch_map)
 
+        act_wifi = QAction(tr("无线切片..."), self)
+        act_wifi.setIcon(_mi(QStyle.SP_ComputerIcon))
+        act_wifi.setToolTip(tr(
+            "本机无线状态：当前关联的 AP、周围 AP 的信道拥塞、漫游/断开时间线、"
+            "以及该 SSID 对应的网段（只读系统缓存，不主动扫射频）"))
+        act_wifi.triggered.connect(self._show_wifi_slice)
+        analysis_menu.addAction(act_wifi)
+
         analysis_menu.addSeparator()
 
         act_subnet_util = QAction(tr("子网利用率..."), self)

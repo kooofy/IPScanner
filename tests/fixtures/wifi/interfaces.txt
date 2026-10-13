@@ -1,0 +1,28 @@
+
+系统上有 1 个接口: 
+
+    名称                   : WLAN
+    说明            : Intel(R) Wi-Fi 6 AX201 160MHz
+    GUID                   : 53bf544a-bddd-49c7-8f56-caa950e05580
+    物理地址       : 9e:f5:32:fa:3d:42
+    界面类型         : 主要
+    状态                  : 已连接
+    SSID                   : QZTJXX
+    AP BSSID               : a8:0c:ca:9c:7f:ff
+    波段                   : 5 GHz
+    通道                : 157
+    Connected Akm-cipher ： [ akm = 00-0f-ac：02， cipher = 00-0f-ac：04 ]
+    网络类型               : 结构
+    无线电类型             : 802.11ac
+    身份验证               : WPA2 - 个人
+    密码                 : CCMP
+    连接模式        : 自动连接
+    接收速率(Mbps)         : 400
+    传输速率 (Mbps)        : 200
+    信号                   : 87%
+    Rssi                   : -49
+    配置文件               : QZTJXX 
+已配置     QoS MSCS： 0
+    已配置 QoS 映射： 0
+    策略允许的 QoS 映射 ： 0
+

@@ -1,0 +1,26 @@
+Interface name : WLAN
+There are 5 networks currently visible.
+
+SSID 1 : QZTJXX
+    Network type            : Infrastructure
+    Authentication          : WPA2-Personal
+    Encryption              : CCMP
+    BSSID 1                 : a8:0c:ca:1c:80:16
+         Signal             : 83%
+         Radio type         : 802.11n
+         Band               : 2.4 GHz
+         Channel            : 11
+    BSSID 2                 : a8:0c:ca:9c:82:03
+         Signal             : 18%
+         Radio type         : 802.11ac
+         Band               : 5 GHz
+         Channel            : 36
+SSID 2 : ChinaNet-C6C7-5G
+    Network type            : Infrastructure
+    Authentication          : WPA2-Personal
+    Encryption              : CCMP
+    BSSID 1                 : 3c:cd:5d:aa:bb:01
+         Signal             : 41%
+         Radio type         : 802.11ac
+         Band               : 5 GHz
+         Channel            : 149

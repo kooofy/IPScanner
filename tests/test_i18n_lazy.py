@@ -306,6 +306,10 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         from cve_status_mixin import (
             _CVE_BADGE_TEXT, _CVE_HINT_TEXT, _CVE_SOURCE_TEXT,
         )
+        from ui_dialogs.wifi import (
+            _CURRENT_FIELDS, _MATCH_TEXT, _NOTE_TEXT, _REASON_TEXT as _WIFI_REASON,
+            _ROAM_TEXT, _SOURCE_TEXT as _WIFI_SOURCE,
+        )
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
@@ -342,6 +346,15 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "cve_status_mixin._CVE_BADGE_TEXT": list(_CVE_BADGE_TEXT.values()),
             "cve_status_mixin._CVE_HINT_TEXT": list(_CVE_HINT_TEXT.values()),
             "cve_status_mixin._CVE_SOURCE_TEXT": list(_CVE_SOURCE_TEXT.values()),
+            # ui_dialogs.wifi 的五张表（不可用原因 / 各项没拿到的说明 /
+            # 漫游事件类型 / 取数来源 / 关联依据）+ 「当前关联」的字段名元组。
+            # 同上是**字面量表**：取用时过 `tr()`，漏登记就会在英文界面显示中文。
+            "ui_dialogs.wifi._REASON_TEXT": list(_WIFI_REASON.values()),
+            "ui_dialogs.wifi._NOTE_TEXT": list(_NOTE_TEXT.values()),
+            "ui_dialogs.wifi._ROAM_TEXT": list(_ROAM_TEXT.values()),
+            "ui_dialogs.wifi._SOURCE_TEXT": list(_WIFI_SOURCE.values()),
+            "ui_dialogs.wifi._MATCH_TEXT": list(_MATCH_TEXT.values()),
+            "ui_dialogs.wifi._CURRENT_FIELDS": [lbl for lbl, _get in _CURRENT_FIELDS],
         }
 
     def test_all_table_labels_are_translated(self):
