@@ -49,6 +49,7 @@ import os
 import sys
 import time
 import unicodedata
+from dataclasses import dataclass
 
 # 版本号唯一来源：version.py。不要在这里写死字面量，
 # 否则与 GUI 关于对话框、spec 产物名会各说各话。
@@ -696,6 +697,38 @@ def cmd_scan(args) -> int:
     records = [result_to_record(r) for r in results]
     records.sort(key=lambda x: (x["status"] != "online",
                                 _ip_sort_key(x["ip"])))
+
+    # 暴露面（v2.1 §2.3）：按**当前筛选之后**的 results 走，不另读全量
+    # —— 铁律：附加段跟随筛选（见 tests/test_export_filter.py 的坑）。
+    exposure_payload = None
+    if getattr(args, "exposure", False):
+        from scanner import exposure as _exposure
+        exposure_payload = _exposure.match_results(results)
+
+    if args.format == "json":
+        payload = {
+            "version": __version__,
+            "scanned_at": time.time(),
+            "device_count": len(records),
+            "online_count": sum(1 for r in records if r["status"] == "online"),
+            "devices": records,
+        }
+        if exposure_payload is not None:
+            # 键固定英文、值全为规范值（scanner/exposure.py 的语言无关 to_dict）。
+            payload["exposure"] = exposure_payload.to_dict()
+        emit(render_json(payload), args.output)
+    elif args.format == "csv":
+        emit(render_csv(records, _RESULT_COLUMNS), args.output)
+        if exposure_payload is not None:
+            # CSV 是给程序读的：末尾塞一段中文文本会污染解析，所以明确
+            # **不**输出并说明去哪儿拿 —— 静默丢弃才是坑。
+            warn("--exposure 在 --format csv 下不输出（会破坏 CSV 结构）；"
+                 "请改用 --format json（exposure 字段）或 table（末尾段）。")
+    else:
+        body = render_table(records, _RESULT_COLUMNS)
+        if exposure_payload is not None:
+            body = body + "\n" + _render_exposure_text(exposure_payload)
+        emit(body, args.output)
 
     if notifiers:
         _notify_changes(results, baseline_id, notifiers, args, notify_config)
@@ -1596,6 +1629,245 @@ _PORT_UTIL_REASON = {
 }
 
 
+# ────────────────────────── CVE 快照 / 暴露面（v2.1 §2.3） ──────────────────────────
+
+#: 快照 state 规范值 → (状态说明, 下一步动作)。规范值来自
+#: `scanner.cve_snapshot` 的 `STATE_*`（语言无关），文案只在这里出
+#: （铁律：规范值不翻译、`tr()` 结果不写回 scanner/）。
+#: 🔴 每个非 ok 状态都**必须**带下一步动作：只报「无数据」会让用户以为
+#: 「查过了，没有漏洞」—— 那是与事实相反的结论（模型文档 §1 原则 3）。
+_CVE_STATE_TEXT = {
+    "ok": ("快照可用且新鲜。", ""),
+    "stale": ("快照已过期，结论按过期数据给出，可能漏掉新公布的 CVE。",
+              "用 tools/build_cve_snapshot.py 重新生成，"
+              "把 cve_snapshot.json（连同摘要清单）放进数据目录。"),
+    "unknown-age": ("快照没有可用的生成时间，新鲜度未知，无法判断新旧。",
+                    "同上。没有 generated_at 的快照没法判断新旧。"),
+    "empty": ("快照能读，但里面没有任何条目 —— 等于无数据可查。",
+              "同上。"),
+    "missing": ("数据目录与程序内置路径下都没有 CVE 快照。",
+                "同上。内置种子只覆盖少量高知名度 CVE，"
+                "不要指望它长期有效。"),
+    "corrupt": ("CVE 快照读不出来（结构不符或摘要不匹配），已拒绝加载。",
+                "同上。摘要清单（cve_snapshot.sha256）要与数据文件"
+                "同目录；手动改过 json 就会让摘要校验失败。"),
+}
+
+#: 快照 source 规范值 → 人看的来源说明（`SOURCE_*`，同样语言无关）。
+_CVE_SOURCE_TEXT = {
+    "data-dir": "数据目录（用户更新版）",
+    "seed": "程序内置种子（覆盖面很窄）",
+    "none": "无",
+}
+
+
+def _render_cve_status_text(stats: dict) -> str:
+    """`cve --status` 的文本形态。字段名来自 `CveSnapshot.stats()`（英文键），
+    但值是给人看的，所以逐字段翻成本文件统一的文案。"""
+    state = str(stats.get("state") or "")
+    desc, action = _CVE_STATE_TEXT.get(state, ("快照状态无法识别。", ""))
+    lines = [f"CVE 快照：{desc}"]
+    lines.append("  来源：%s" % _CVE_SOURCE_TEXT.get(
+        str(stats.get("source") or ""), str(stats.get("source") or "无")))
+    if stats.get("path"):
+        lines.append("  文件：%s" % stats["path"])
+    gen = stats.get("generated_at")
+    if gen:
+        age = stats.get("age_days")
+        age_txt = "（%s 天前，上限 %s 天）" % (age, stats.get("max_age_days")) \
+            if age is not None else ""
+        lines.append("  生成于：%s%s" % (gen, age_txt))
+    lines.append("  条目：%d 条（其中 KEV %d 条、有 EPSS 分值 %d 条）" % (
+        stats.get("entry_count") or 0, stats.get("kev_count") or 0,
+        stats.get("epss_scored_count") or 0))
+    verified = stats.get("checksum_verified")
+    lines.append("  摘要校验：%s" % {
+        True: "通过", False: "不匹配（已拒绝加载）",
+        None: "无摘要清单，未校验",
+    }.get(verified, "未知"))
+    if stats.get("skipped_records"):
+        lines.append("  ⚠ 有 %d 条记录不可用，已跳过"
+                     % stats["skipped_records"])
+    if action:
+        lines.append("  下一步：%s" % action)
+    return "\n".join(lines) + "\n"
+
+
+def _cve_hint_text(hit) -> list:
+    """一个 `ExposureHit` 的文本行（含它的候选 CVE）。"""
+    ver = " %s" % hit.version if hit.version else ""
+    lines = ["  %s  %s%s（证据：%s）" % (hit.ip, hit.product, ver,
+                                        _CVE_EVIDENCE_TEXT.get(
+                                            hit.evidence, hit.evidence))]
+    for c in hit.candidates:
+        tags = []
+        if c.kev:
+            tags.append("KEV")
+        if c.epss is not None:
+            tags.append("EPSS %.4f" % c.epss)
+        if c.epss_percentile is not None:
+            tags.append("分位 %.1f%%" % (c.epss_percentile * 100))
+        head = "    %s" % c.cve_id
+        if tags:
+            head += "  [%s]" % " / ".join(tags)
+        lines.append(head)
+        if c.summary:
+            lines.append("      %s" % _truncate(c.summary, 90))
+    return lines
+
+
+#: 证据来源规范值（`exposure.EVIDENCE_*`）→ 人看的说明。
+_CVE_EVIDENCE_TEXT = {
+    "banner": "服务 banner",
+    "snmp": "SNMP sysDescr",
+    "http": "HTTP 响应",
+}
+
+
+def _render_exposure_text(report) -> str:
+    """`scan --exposure` 的文本段。
+
+    🔴 措辞硬约束（与 `scanner/exposure.py` 同一套，AST 测试连本函数一起扫）：
+    只准说「**匹配到**候选」，不准说「已验证 / 可利用 / 存在漏洞」。
+    这段话的全部含义是：这台机器上跑的产品，在本地快照里有已知条目。
+    """
+    st = report.snapshot_state
+    desc, action = _CVE_STATE_TEXT.get(st, ("快照状态无法识别。", ""))
+    head = ["暴露面（本地 CVE 快照匹配到的候选，不是漏洞结论）：%s" % desc]
+    if report.age_days is not None:
+        head.append("  快照：%s，%d 天前生成，共 %d 条" % (
+            _CVE_SOURCE_TEXT.get(report.snapshot_source, report.snapshot_source),
+            report.age_days, report.entry_count))
+    if report.verdict == _exposure_verdict_no_data():
+        head.append("  ⚠ 没有数据可查，因此无结论 —— 这不代表没有漏洞。")
+        if action:
+            head.append("  下一步：%s" % action)
+        return "\n".join(head) + "\n"
+    if not report.hits:
+        head.append("  已对照快照逐台检查，没有匹配到任何候选。")
+        head.append("  ⚠ 「没有匹配」同样不等于「没有漏洞」：只认得出快照里"
+                    "出现过的产品，识别也不含版本比对。")
+        return "\n".join(head) + "\n"
+    head.append("  匹配到 %d 台设备、%d 个产品（按严重程度排序）："
+                % (len(report.matched_hosts), len(report.hits)))
+    lines = list(head)
+    for hit in report.hits:
+        lines.extend(_cve_hint_text(hit))
+    return "\n".join(lines) + "\n"
+
+
+def _exposure_verdict_no_data() -> str:
+    """`no-data` 规范值的惰性取用（import 放函数内，与 cli.py 其它 scanner
+    依赖一致；也让 `cli.py` 顶层 import 表保持零 PyQt 零 scanner 子模块）。"""
+    from scanner.exposure import VERDICT_NO_DATA
+    return VERDICT_NO_DATA
+
+
+def cmd_cve(args) -> int:
+    """CVE 快照诊断 / 手工产品查询（v2.1 §2.3）。
+
+    * `--status`（或不带参数时的默认动作）：快照健康状况 + 下一步动作；
+    * `--product "产品 版本"`：按**与扫描完全相同**的识别口径
+      （`exposure.cpe_for_product()`）查这个产品的候选 CVE。
+
+    🔴 全程**不联网**：只读本地快照文件。快照更新靠用户手动跑
+    `tools/build_cve_snapshot.py`（模型文档 §9.3：脚本自己也不上网抓）。
+
+    退出码：快照不可用（缺失/损坏/0 条）→ 1，否则 0。过期（`stale`）算
+    可用 —— 数据在、只是旧，提示说清即可，不该让监控脚本误报故障。
+    """
+    from scanner import cve_snapshot as snap
+
+    snapshot = snap.load_snapshot()
+    stats = snapshot.stats()
+
+    product = (getattr(args, "product", "") or "").strip()
+    if product:
+        return _cve_product_lookup(product, snapshot, args)
+
+    if args.format == "json":
+        emit(render_json(stats), args.output)
+    else:
+        emit(_render_cve_status_text(stats), args.output)
+
+    if not snapshot.usable:
+        # 不可用 = 真的没数据可查。过期不算（见 docstring）。
+        warn("没有可用的 CVE 数据：%s" % _CVE_STATE_TEXT.get(
+            snapshot.state, ("状态 %s" % snapshot.state, ""))[0])
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def _cve_product_lookup(product: str, snapshot, args) -> int:
+    """`cve --product` 的落地：产品名 → 粗粒度 CPE → 候选 CVE。"""
+    from scanner import cve_snapshot as snap
+    from scanner import exposure
+
+    resolved = exposure.cpe_for_product(product)
+    if resolved is None:
+        # 认不出来就说"认不出来"，不猜：猜一个错 CPE 会给用户一个
+        # 空列表，让他以为"这个产品没有已知 CVE"。
+        log("认不出这个产品名（%s），因此无从匹配。" % product)
+        log("可识别的产品见 `scanner/exposure.py` 的提示表，"
+            "或直接用 `ipscanner scan --exposure` 看整网结果。")
+        return EXIT_ERROR
+
+    name, cpe, version = resolved
+    if not snapshot.usable:
+        desc, action = _CVE_STATE_TEXT.get(
+            snapshot.state, ("状态 %s" % snapshot.state, ""))
+        log("没有可用的 CVE 数据：%s" % desc)
+        if action:
+            log("下一步：%s" % action)
+        return EXIT_ERROR
+    if snapshot.state == snap.STATE_STALE:
+        log("⚠ 快照已过期（%d 天前生成），可能漏掉新公布的 CVE。"
+            % (snapshot.age_days or 0))
+
+    candidates = snap.find_candidates(snapshot, cpe)
+
+    if args.format == "json":
+        emit(render_json({
+            "product": name,
+            "version": version,
+            "cpe": cpe,
+            "query": product,
+            "matched": bool(candidates),
+            "candidates": [c.to_dict() for c in candidates],
+        }), args.output)
+    elif candidates:
+        # 表头与命中行**同走 emit**（同一条输出流）：否则加 `-o` 时
+        # 表头进 stderr、命中行进文件，读到的东西是半截的。
+        lines = ["%s%s 匹配到 %d 条候选 CVE（粗粒度产品级，不含版本比对）："
+                 % (name, (" " + version) if version else "", len(candidates))]
+        lines.extend(_cve_hint_text(_FakeHit(name, version, cpe, candidates)))
+        emit("\n".join(lines) + "\n", args.output)
+    else:
+        emit("%s%s：快照里没有匹配到这个产品的条目（不等于没有漏洞）。\n"
+             % (name, (" " + version) if version else ""), args.output)
+    return EXIT_OK
+
+
+@dataclass(frozen=True)
+class _FakeHit:
+    """`_cve_hint_text()` 只用到 ip/product/version/evidence/candidates
+    这几个字段，product 查询没有 ip，就地造一个同形对象复用渲染。"""
+
+    product: str
+    version: str
+    cpe: str
+    candidates: tuple
+
+    @property
+    def ip(self) -> str:
+        return "(手工查询)"
+
+    @property
+    def evidence(self) -> str:
+        from scanner.exposure import EVIDENCE_BANNER
+        return EVIDENCE_BANNER
+
+
 # ────────────────────────── 拓扑文本导出 ──────────────────────────
 
 def cmd_topology(args) -> int:
@@ -2130,6 +2402,13 @@ def build_parser() -> argparse.ArgumentParser:
                          f"默认 {throttle.DEFAULT_POLICY} = 不额外设限，"
                          f"与改造前一致）")
     sp.add_argument("--online-only", action="store_true", help="只输出在线设备")
+    # 暴露面（v2.1 §2.3）。默认关：它要多读一个本地快照文件，而且
+    # 结论是**启发式**（粗粒度产品级匹配），不该在每次扫描里默认出现。
+    sp.add_argument("--exposure", action="store_true",
+                    help="扫描末尾追加「暴露面」段：把每台设备认出的产品对照"
+                         "本地 CVE 快照，列出匹配到的候选 CVE"
+                         "（全程不联网；粗粒度产品级，不含版本比对）")
+    sp.add_argument("--library", action="store_true", help="启用地址库自动匹配（读 mac_library.db）")
     sp.add_argument("--save-snapshot", action="store_true", help="把本次结果存为历史快照")
     sp.add_argument("--note", metavar="备注", help="快照备注（配合 --save-snapshot）")
     sp.add_argument("--switch-map", action="store_true",
@@ -2336,6 +2615,26 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("-o", "--output", metavar="文件",
                     help="写到文件（省略则写 stdout）")
     pp.set_defaults(func=cmd_ports)
+
+    # ── cve（v2.1 §2.3） ──
+    cvp = sub.add_parser("cve", help="CVE 快照诊断 / 候选查询（全程不联网）",
+                         parents=[common],
+                         description="查看本地 CVE 快照的状态，或按产品名查询"
+                                     "匹配到的候选 CVE。"
+                                     "🔴 只读本地快照文件，不发起任何网络请求；"
+                                     "快照更新靠 tools/build_cve_snapshot.py "
+                                     "手动生成后放进数据目录。"
+                                     "⚠ 结论一律是「匹配到的候选」，不是漏洞结论。")
+    cvp.add_argument("--status", action="store_true",
+                     help="输出快照健康状况（省略 --product 时的默认动作）")
+    cvp.add_argument("--product", metavar="产品[ 版本]",
+                     help='按产品名查候选 CVE，如 "Apache httpd 2.4.41"；'
+                          "识别口径与扫描完全相同")
+    cvp.add_argument("-f", "--format", choices=("table", "json"),
+                     default="table", help="输出格式（默认 table）")
+    cvp.add_argument("-o", "--output", metavar="文件",
+                     help="写到文件（省略则写 stdout）")
+    cvp.set_defaults(func=cmd_cve)
 
     # ── watch ──
     wp = sub.add_parser("watch", help="被动发现：不发包地看最近谁在网络上出现过",

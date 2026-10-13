@@ -1,0 +1,131 @@
+{
+ "schema": "ipscanner.cve_snapshot/1",
+ "generated_at": "2021-12-10T00:00:00Z",
+ "max_age_days": 30,
+ "sources": {
+  "nvd": "2021-12-10",
+  "kev": "2021-12-10"
+ },
+ "cves": [
+  {
+   "cve_id": "CVE-2021-44228",
+   "cpe": [
+    "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Apache Log4j2 JNDI 远程代码执行（Log4Shell）"
+  },
+  {
+   "cve_id": "CVE-2021-45046",
+   "cpe": [
+    "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Apache Log4j2 拒绝服务 / 部分场景下的远程代码执行"
+  },
+  {
+   "cve_id": "CVE-2023-20198",
+   "cpe": [
+    "cpe:2.3:o:cisco:ios_xe:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Cisco IOS XE Web UI 权限提升，可创建本地账号并接管设备"
+  },
+  {
+   "cve_id": "CVE-2018-0171",
+   "cpe": [
+    "cpe:2.3:o:cisco:ios:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Cisco IOS Smart Install 远程代码执行"
+  },
+  {
+   "cve_id": "CVE-2018-13379",
+   "cpe": [
+    "cpe:2.3:o:fortinet:fortios:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Fortinet FortiOS SSL VPN 路径遍历，可读取会话文件"
+  },
+  {
+   "cve_id": "CVE-2020-5902",
+   "cpe": [
+    "cpe:2.3:a:f5:big-ip_traffic_management_user_interface:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "F5 BIG-IP TMUI 远程代码执行"
+  },
+  {
+   "cve_id": "CVE-2019-19781",
+   "cpe": [
+    "cpe:2.3:a:citrix:application_delivery_controller:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Citrix ADC 路径遍历，可读取敏感文件"
+  },
+  {
+   "cve_id": "CVE-2023-4966",
+   "cpe": [
+    "cpe:2.3:a:citrix:netscaler_application_delivery_controller:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Citrix NetScaler 会话令牌泄露（CitrixBleed）"
+  },
+  {
+   "cve_id": "CVE-2022-22965",
+   "cpe": [
+    "cpe:2.3:a:vmware:spring_framework:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Spring Framework 远程代码执行（Spring4Shell）"
+  },
+  {
+   "cve_id": "CVE-2021-21972",
+   "cpe": [
+    "cpe:2.3:a:vmware:vcenter_server:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "VMware vCenter Server 插件远程代码执行"
+  },
+  {
+   "cve_id": "CVE-2024-3400",
+   "cpe": [
+    "cpe:2.3:a:paloaltonetworks:pan-os:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "Palo Alto PAN-OS GlobalProtect 命令注入"
+  },
+  {
+   "cve_id": "CVE-2014-0160",
+   "cpe": [
+    "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*"
+   ],
+   "kev": true,
+   "epss": null,
+   "epss_percentile": null,
+   "summary": "OpenSSL Heartbleed 信息泄露"
+  }
+ ]
+}

@@ -170,7 +170,8 @@ jobs:
                            "$dir\_internal\assets\styles\dark.qss",
                            "$dir\_internal\assets\report_templates\assets.html",
                            "$dir\_internal\assets\report_templates\changes.html",
-                           "$dir\_internal\assets\report_templates\exposure.html")) {
+                           "$dir\_internal\assets\report_templates\exposure.html",
+                           "$dir\_internal\cve_snapshot.json")) {
             if (-not (Test-Path $p)) { throw "GUI 产物缺失: $p" }
           }
           Write-Host "GUI 产物 OK: $dir"
@@ -180,6 +181,8 @@ jobs:
         # 末行额外验证报表：`report` 要读 assets/report_templates，
         # 没进 onefile 包的话会静默退回兜底模板（观感变差但不报错）——
         # 所以这里断言产物里确实带了**模板特征串**（兜底模板没有 "Asset inventory"）。
+        # cve 子命令同理：内置种子快照没进包时 `cve --status` 会报 missing
+        # 而不是报出 schema 串，所以断言 schema 特征串。
         run: |
           .\dist\IPScanner_cli.exe --version
           .\dist\IPScanner_cli.exe scan -r 127.0.0.1/32 --no-ports --no-mdns --format json
@@ -188,12 +191,54 @@ jobs:
           if ($html -notmatch "Asset inventory") {
             throw "报表模板未打进 CLI 产物（退回了兜底模板）"
           }
+          $cve = .\dist\IPScanner_cli.exe cve --status --format json
+          if ($cve -notmatch "ipscanner.cve_snapshot/1") {
+            throw "内置 CVE 种子快照未打进 CLI 产物（cve --status 未报告 schema）"
+          }
           Write-Host "CLI 报表产物 OK"
 
   # ── 质量门禁（v1.9 1.4）──────────────────────────────────────────
   # 三个门禁各自独立成一个 job：红了要能一眼看出是**哪一个**红的，
   # 否则"允许红"会慢慢变成"习惯性忽略红"。
   # 取舍与实测基线见 docs/ROADMAP_V1.9.md §1.4。
+
+  quality-cve-build:
+    name: CVE 快照生成脚本 smoke
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 跑 tools/build_cve_snapshot.py 并自校验
+        # 写了没人跑过的脚本等于没写：--check 会让产出再走一遍
+        # scanner.cve_snapshot.load_snapshot()（含 SHA256 自校验）。
+        # 输入是 tests/fixtures/cve/ 下的结构性样本（NVD 2.0 / KEV / EPSS CSV），
+        # 全离线、全确定性 —— 刻意不让脚本自己上网抓（模型文档 9.3）。
+        run: |
+          python tools/build_cve_snapshot.py `
+            --nvd-file tests/fixtures/cve/nvd_sample.json `
+            --kev-file  tests/fixtures/cve/kev_sample.json `
+            --epss-file tests/fixtures/cve/epss_sample.csv `
+            --out "$env:TEMP\cve_build_smoke" --check
+
+      - name: 断言内置种子快照的规模硬上限（32 KiB / 20 条）
+        # 种子文件只涨不删，没有硬上限它会慢慢长成 mini-NVD，
+        # 把装机包和 CI 一起拖肥（模型文档 9.1）。
+        run: |
+          python -c "import json, os; p='cve_snapshot.json'; s=os.path.getsize(p); d=json.load(open(p, encoding='utf-8')); n=len(d.get('cves', [])); assert s <= 32 * 1024, 'seed snapshot too big: %d bytes' % s; assert n <= 20, 'seed snapshot too many entries: %d' % n; print('seed snapshot OK: %d bytes / %d entries' % (s, n))"
 
   quality-coverage:
     name: 覆盖率门禁（per-file 下界）
@@ -250,6 +295,13 @@ jobs:
         #                          （主超时分支已测）。下界 90% 把这部分明账。）
         #   scanner/throttle.py   90%（v2.1 §2.4 新增；2026-10-13 实测 99% ——
         #                          缺的 1 行是 `seconds_until(n<=0)` 的早退分支。）
+        #   scanner/cve_snapshot.py 90%（v2.1 §2.3 新增；2026-10-13 实测 93% ——
+        #                          缺的是读文件失败的 OSError 分支、脏摘要行跳过、
+        #                          `verify_checksum()` 的边缘分支与时间戳的
+        #                          epoch 数字兜底，用 tmp 目录难稳定复现。）
+        #   scanner/exposure.py    85%（v2.1 §2.3 新增；实测 92% ——
+        #                          缺的是 `cpe_for_product()` 的个别防御分支与
+        #                          `cve --product` 用的同形渲染对象。）
         # 🔴 `credentials.py` 的 include 必须写 `./credentials.py`（带 `./`）：
         #    coverage 的 --include 是**后缀匹配**，裸 `credentials.py` 会同时
         #    命中 `ui_dialogs/credentials.py`，于是 --fail-under 作用在**两文件
@@ -266,6 +318,8 @@ jobs:
           python -m coverage report --include="./scanner/ndp.py" --fail-under=85
           python -m coverage report --include="./scanner/async_ports.py" --fail-under=90
           python -m coverage report --include="./scanner/throttle.py" --fail-under=90
+          python -m coverage report --include="./scanner/cve_snapshot.py" --fail-under=90
+          python -m coverage report --include="./scanner/exposure.py" --fail-under=85
 
   quality-types:
     name: 类型门禁（pyright）

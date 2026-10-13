@@ -19,6 +19,7 @@ a = Analysis(
     binaries=[],
     datas=[('oui.db', '.'), ('i18n', 'i18n'),
            ('service_fingerprints.json', '.'),
+           ('cve_snapshot.json', '.'),
            ('assets/report_templates', 'assets/report_templates')],
     hiddenimports=['scanner'],
     hookspath=[],

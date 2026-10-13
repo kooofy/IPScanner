@@ -18,6 +18,27 @@
 
 ### 新增
 
+- **离线 CVE 暴露面 —— v2.1 路线图 2.3**（详见
+  [`docs/ROADMAP_V2.1.md`](docs/ROADMAP_V2.1.md) §2.3 +
+  [`docs/CVE_SNAPSHOT_MODEL.md`](docs/CVE_SNAPSHOT_MODEL.md)）。
+  扫描结果里的 banner / SNMP sysDescr 现在能对照一份**本地 CVE 快照**，
+  列出「匹配到的候选 CVE」（KEV 优先、EPSS 次之排序）。
+  - `scanner/cve_snapshot.py`：只读快照消费层，六态健康模型
+    （ok / stale / unknown-age / empty / missing / corrupt），
+    SHA256 清单校验（没有清单不阻断），**任何情况不抛**；
+  - `scanner/exposure.py`：banner → 粗粒度 CPE → 候选 CVE。
+    **粗粒度产品级**（不做版本区间）⇒ 不漏报、可能多报，由人工收窄；
+  - 结论只写「匹配到候选」，**绝不**写「已验证 / 可利用 / 存在漏洞」；
+  - **无数据 ≠ 无漏洞**：`verdict` 三态（`matched` / `none` / `no-data`）可区分，
+    快照缺失 / 损坏 / 0 条一律明确说「无数据可查」并给出更新命令；
+  - `cve_snapshot.json` 内置种子（12 条高知名度 CVE，`generated_at` 写死旧日期
+    ⇒ 永远显示过期，提醒用户更新）；用户更新版放数据目录即可覆盖；
+  - `tools/build_cve_snapshot.py`：从 NVD / KEV / EPSS 生成快照，**全程离线**，
+    `--check` 会回读自己的产出自校验；
+  - CLI：`ipscanner cve --status` / `cve --product "产品 版本"`，
+    扫描加 `--exposure`（文本报告末尾段 / JSON `exposure` 字段，
+    **跟随当前筛选**；`--format csv` 下明确不输出以免污染结构）。
+
 - **扫描礼貌模式 —— v2.1 路线图 2.4**（详见
   [`docs/ROADMAP_V2.1.md`](docs/ROADMAP_V2.1.md) §2.4）。
   `--throttle {fast,balanced,polite}` 三档：并发上限 + 目标/端口投递顺序随机化
