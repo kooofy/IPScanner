@@ -268,6 +268,22 @@ grep -rn "wlanapi|netsh wlan|WlanOpenHandle|WLAN_INTERFACE" --include=*.py .   �
 4. **事件时间戳 7 位小数 + 不带 BSSID** —— `fromisoformat` 只吃 3/6 位，须归一再强制
    UTC；没有 BSSID ⇒ 时间线**只能诚实地做到 SSID 粒度**。
 
+**接线/CI 时抓到的真 bug（本机全绿、只在别的平台错）**：首次推送后 CI 的
+Linux / macOS job **一次红 18 条**（Windows 5 个 job 全绿，本机也全绿）。两个根因：
+
+1. `capability()` 原本写 `if not _IS_WINDOWS: return not-windows` —— **把调用方注入的
+   替身 `api` 一起挡掉了**，于是整条 `snapshot()` 在非 Windows 上被短路，17 条用例
+   集体失败。改成 `if not _IS_WINDOWS and api is None:`（**注入即硬覆盖**，与
+   `netsh_text` / `adapter_subnets=[]` 同一条口径；生产路径不传 `api`，真实行为不变）。
+2. `ctypes` 结构体用了 `c_ulong` —— Windows（LLP64）4 字节、Linux / macOS（LP64）
+   **8** 字节 ⇒ `sizeof(_WLAN_RATE_SET)` 256 → **264**，而**步长正是从 `sizeof()`
+   推出来的**。结构体字段一律换固定宽度（`c_uint32` / `c_uint16` / `c_uint8`），
+   出参槽与测试里的替身 DLL 同步换；并补一条**跨平台**的尺寸断言
+   （`_DOT11_SSID` 36 / `_WLAN_RATE_SET` 256 / `_WLAN_BSS_ENTRY` 352 / `_WLAN_BSS_LIST` 360）。
+
+两条都属"**只在别的平台上错**"：本机 Windows 永远测不出来。可靠的本地复现是
+**在 import 之前**替换 `platform.system`（做法见 `TRAPS.md`「v2.1 §2.2 无线切片」）。
+
 **验收对照**：解析对拍 ✅（真样本 + 构造 en-US，两份 ipconfig 实现逐条比对）；
 切列不脆 ✅（列宽被改过的样本仍能切分）；非 Windows 降级可测 ✅
 （`capability()` 返回「本平台无此能力」而非抛异常，五态各有用例）；

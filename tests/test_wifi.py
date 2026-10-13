@@ -803,9 +803,17 @@ class AdapterSubnetParseTest(unittest.TestCase):
         self.assertEqual(out[0], ("无线局域网适配器 WLAN", "10.193.27.0/24"))
 
     def test_snapshot_autodetects_adapter_subnets_when_not_given(self):
-        """不给 `adapter_subnets` → 自动跑 `ipconfig`；显式给 `[]` → 就是不关联。"""
+        """不给 `adapter_subnets` → 自动跑 `ipconfig`；显式给 `[]` → 就是不关联。
+
+        ⚠️ 必须连 `_IS_WINDOWS` 一起 patch：`local_adapter_subnets()` 自己有一道
+        平台闸门（非 Windows 直接返回 `[]`，免得去跑 macOS 那个**同名但语义不同**的
+        `ipconfig`）。不 patch 的话这条用例在 CI 的 Linux / macOS job 上会退化成
+        `subnet_match == none` —— 本机 Windows 上照样绿，本地看不出来。
+        """
         api = connected_stub()
-        with mock.patch.object(wifi, "_run", return_value=fixture("ipconfig.txt")):
+        with mock.patch.object(wifi, "_IS_WINDOWS", True), \
+                mock.patch.object(wifi, "_run",
+                                  return_value=fixture("ipconfig.txt")):
             snap = wifi.snapshot(api, netsh_interfaces=fixture("interfaces.txt"),
                                  netsh_networks="", roaming_xml="")
         self.assertEqual(snap.subnet_match, wifi.MATCH_BY_NAME)
@@ -888,6 +896,19 @@ class CapabilityTest(unittest.TestCase):
         self.assertFalse(cap.supported)
         self.assertEqual(cap.reason, wifi.REASON_NOT_WINDOWS)
         self.assertTrue(cap.detail)
+
+    def test_injected_api_wins_even_on_a_non_windows_platform(self):
+        """🔴 注入即硬覆盖：`_IS_WINDOWS` 只管"要不要自己去加载 dll"。
+
+        没有这条，整条 `snapshot()` 流水线在 CI 的 Linux / macOS job 上会被
+        `not-windows` 直接短路 —— 18 条用例集体失败（2026-10-13 就是这么红的，
+        而本机 Windows 上**全绿**，本地根本看不出来）。
+        """
+        api = connected_stub()
+        with mock.patch.object(wifi, "_IS_WINDOWS", False):
+            cap = wifi.capability(api)
+        self.assertTrue(cap.supported)
+        self.assertEqual(cap.reason, wifi.REASON_OK)
 
     def test_no_wlanapi(self):
         with mock.patch.object(wifi, "_IS_WINDOWS", True), \
@@ -1348,7 +1369,7 @@ class FakeQueryDll:
         ctypes.cast(ctypes.pointer(data._obj),
                     ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(buf)
         ctypes.cast(ctypes.pointer(size._obj),
-                    ctypes.POINTER(ctypes.c_ulong))[0] = ctypes.sizeof(buf)
+                    ctypes.POINTER(ctypes.c_uint32))[0] = ctypes.sizeof(buf)
         return 0
 
     @staticmethod
@@ -1361,6 +1382,20 @@ class WlanApiStructTest(unittest.TestCase):
     def test_rate_set_is_256_bytes(self):
         """🔴 省掉它会**静默**读错每条 BSS 的 IE 尺寸，后续条目全是垃圾。"""
         self.assertEqual(ctypes.sizeof(wifi._WLAN_RATE_SET), 256)
+
+    def test_struct_sizes_are_platform_independent(self):
+        """🔴 结构体描述的是 **Windows ABI 的字节布局**，尺寸不能随平台变。
+
+        用 `c_ulong` 写字段时，Linux / macOS（LP64）上 `unsigned long` 是 8 字节
+        ⇒ `_WLAN_RATE_SET` 变 **264**、`_WLAN_BSS_ENTRY` 跟着变 —— 而**步长正是从
+        `sizeof()` 推出来的**。本机（Windows，LLP64）永远是 4 字节，所以这个
+        偏差**只在跨平台 CI 上暴露**。固定宽度类型（`c_uint32` / `c_uint16`）之后，
+        这几个数字在哪个平台都成立。
+        """
+        self.assertEqual(ctypes.sizeof(wifi._DOT11_SSID), 36)
+        self.assertEqual(ctypes.sizeof(wifi._WLAN_RATE_SET), 256)
+        self.assertEqual(ctypes.sizeof(wifi._WLAN_BSS_ENTRY), 352)
+        self.assertEqual(ctypes.sizeof(wifi._WLAN_BSS_LIST), 360)
 
     def test_bss_list_steps_by_ie_size_not_by_fixed_stride(self):
         entries = [("QZTJXX", "a8:0c:ca:1c:80:16", 83, 2412000, 12),

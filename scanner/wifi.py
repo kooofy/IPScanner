@@ -778,9 +778,25 @@ _ERROR_SERVICE_NOT_RUNNING = 1062
 _BSS_TYPE_ANY = 3
 
 
+# ── wlanapi 的结构体（**固定宽度类型**，不随平台变） ─────────────────────
+#
+# 🔴 一律用 `c_uint32` / `c_uint16` / `c_uint8`，**不要** `c_ulong` / `c_ushort`：
+#    `c_ulong` 在 Windows（LLP64）是 4 字节、在 Linux / macOS（LP64）是 **8** 字节
+#    ⇒ `ctypes.sizeof()` 随平台变：`_WLAN_RATE_SET` 会从 256 变成 264。
+#    而**步长正是从 `sizeof()` 推出来的**（`_WLAN_BSS_ENTRY` 那条变长遍历），
+#    所以这不是"反正只在 Windows 跑就没事"的小事 —— 它让"结构体布局"这条
+#    不变量在跨平台 CI 上失去判据（测试只能整个 `skip` 掉）。
+#    这些结构体描述的是 **Windows ABI 的字节布局**，就该用固定宽度类型写死。
+#
+# ⚠️ 例外：`c_wchar * 256`（`WCHAR[]`）在 Windows 是 2 字节、Linux 是 4 字节。
+#    含它的两个结构体（`_WLAN_INTERFACE_INFO` / `_WLAN_CONNECTION_ATTRIBUTES`）
+#    **只在 Windows 上被 DLL 填充**，且没有任何断言依赖其尺寸；改成
+#    `c_uint16 * 256` 要连带改写 utf-16 解码，收益不抵风险，故显式记在这里。
+
+
 class _GUID(ctypes.Structure):
-    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
-                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_uint8 * 8)]
 
     def __str__(self) -> str:                       # pragma: no cover - 仅调试
         d4 = "".join("%02x" % b for b in self.Data4)
@@ -789,7 +805,8 @@ class _GUID(ctypes.Structure):
 
 
 class _DOT11_SSID(ctypes.Structure):
-    _fields_ = [("uSSIDLength", ctypes.c_ulong), ("ucSSID", ctypes.c_ubyte * 32)]
+    _fields_ = [("uSSIDLength", ctypes.c_uint32),
+                ("ucSSID", ctypes.c_uint8 * 32)]
 
     def text(self) -> str:
         n = min(int(self.uSSIDLength), 32)
@@ -799,31 +816,35 @@ class _DOT11_SSID(ctypes.Structure):
 class _WLAN_INTERFACE_INFO(ctypes.Structure):
     _fields_ = [("InterfaceGuid", _GUID),
                 ("strInterfaceDescription", ctypes.c_wchar * 256),
-                ("isState", ctypes.c_uint)]
+                ("isState", ctypes.c_uint32)]
 
 
 class _WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
     #: 变长结构：`InterfaceInfo` 只有 1 个元素，按 `dwNumberOfItems` 手工偏移。
-    _fields_ = [("dwNumberOfItems", ctypes.c_ulong), ("dwIndex", ctypes.c_ulong),
+    _fields_ = [("dwNumberOfItems", ctypes.c_uint32),
+                ("dwIndex", ctypes.c_uint32),
                 ("InterfaceInfo", _WLAN_INTERFACE_INFO * 1)]
 
 
 class _WLAN_ASSOCIATION_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [("dot11Ssid", _DOT11_SSID), ("dot11BssType", ctypes.c_uint),
-                ("dot11Bssid", ctypes.c_ubyte * 6), ("dot11PhyType", ctypes.c_uint),
-                ("uDot11PhyIndex", ctypes.c_ulong),
-                ("wlanSignalQuality", ctypes.c_ulong),
-                ("ulRxRate", ctypes.c_ulong), ("ulTxRate", ctypes.c_ulong)]
+    _fields_ = [("dot11Ssid", _DOT11_SSID), ("dot11BssType", ctypes.c_uint32),
+                ("dot11Bssid", ctypes.c_uint8 * 6),
+                ("dot11PhyType", ctypes.c_uint32),
+                ("uDot11PhyIndex", ctypes.c_uint32),
+                ("wlanSignalQuality", ctypes.c_uint32),
+                ("ulRxRate", ctypes.c_uint32), ("ulTxRate", ctypes.c_uint32)]
 
 
 class _WLAN_SECURITY_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [("bSecurityEnabled", ctypes.c_int), ("bOneXEnabled", ctypes.c_int),
-                ("dot11AuthAlgorithm", ctypes.c_uint),
-                ("dot11CipherAlgorithm", ctypes.c_uint)]
+    _fields_ = [("bSecurityEnabled", ctypes.c_int32),
+                ("bOneXEnabled", ctypes.c_int32),
+                ("dot11AuthAlgorithm", ctypes.c_uint32),
+                ("dot11CipherAlgorithm", ctypes.c_uint32)]
 
 
 class _WLAN_CONNECTION_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [("isState", ctypes.c_uint), ("wlanConnectionMode", ctypes.c_uint),
+    _fields_ = [("isState", ctypes.c_uint32),
+                ("wlanConnectionMode", ctypes.c_uint32),
                 ("strProfileName", ctypes.c_wchar * 256),
                 ("wlanAssociationAttributes", _WLAN_ASSOCIATION_ATTRIBUTES),
                 ("wlanSecurityAttributes", _WLAN_SECURITY_ATTRIBUTES)]
@@ -832,29 +853,32 @@ class _WLAN_CONNECTION_ATTRIBUTES(ctypes.Structure):
 class _WLAN_RATE_SET(ctypes.Structure):
     """`WLAN_RATE_SET`：4 字节长度 + 126 个 `USHORT`（= 256 字节）。
 
-    🔴 不能省成 `c_ulong * 1`：它后面紧跟 `ulIeOffset` / `ulIeSize`，
+    🔴 不能省成 `usRateSet` 只留 1 个元素：它后面紧跟 `ulIeOffset` / `ulIeSize`，
     少 252 字节会让**每一条 BSS 的 IE 尺寸都读错**，进而步长走偏、
     后续条目全是垃圾数据（而不是报错）。
     """
 
-    _fields_ = [("uRateSetLength", ctypes.c_ulong),
-                ("usRateSet", ctypes.c_ushort * 126)]
+    _fields_ = [("uRateSetLength", ctypes.c_uint32),
+                ("usRateSet", ctypes.c_uint16 * 126)]
 
 
 class _WLAN_BSS_ENTRY(ctypes.Structure):
-    _fields_ = [("dot11Ssid", _DOT11_SSID), ("uPhyId", ctypes.c_ulong),
-                ("dot11Bssid", ctypes.c_ubyte * 6), ("dot11BssType", ctypes.c_uint),
-                ("dot11PhyType", ctypes.c_uint), ("uDot11PhyIndex", ctypes.c_ulong),
-                ("wlanSignalQuality", ctypes.c_ulong),
-                ("ulRxRate", ctypes.c_ulong), ("ulTxRate", ctypes.c_ulong),
-                ("uBeaconPeriod", ctypes.c_ulong),
-                ("ulChCenterFrequency", ctypes.c_ulonglong),
+    _fields_ = [("dot11Ssid", _DOT11_SSID), ("uPhyId", ctypes.c_uint32),
+                ("dot11Bssid", ctypes.c_uint8 * 6),
+                ("dot11BssType", ctypes.c_uint32),
+                ("dot11PhyType", ctypes.c_uint32),
+                ("uDot11PhyIndex", ctypes.c_uint32),
+                ("wlanSignalQuality", ctypes.c_uint32),
+                ("ulRxRate", ctypes.c_uint32), ("ulTxRate", ctypes.c_uint32),
+                ("uBeaconPeriod", ctypes.c_uint32),
+                ("ulChCenterFrequency", ctypes.c_uint64),
                 ("wlanRateSet", _WLAN_RATE_SET),
-                ("ulIeOffset", ctypes.c_ulong), ("ulIeSize", ctypes.c_ulong)]
+                ("ulIeOffset", ctypes.c_uint32), ("ulIeSize", ctypes.c_uint32)]
 
 
 class _WLAN_BSS_LIST(ctypes.Structure):
-    _fields_ = [("dwTotalSize", ctypes.c_ulong), ("dwNumberOfItems", ctypes.c_ulong),
+    _fields_ = [("dwTotalSize", ctypes.c_uint32),
+                ("dwNumberOfItems", ctypes.c_uint32),
                 ("wlanBssEntries", _WLAN_BSS_ENTRY * 1)]
 
 
@@ -886,7 +910,7 @@ class _WlanApi:
     # ── 会话 ──
     def open(self):
         """`WlanOpenHandle` → 句柄；失败抛 `OSError(errno)` 供调用方分类。"""
-        negotiated = ctypes.c_ulong()
+        negotiated = ctypes.c_uint32()
         handle = ctypes.c_void_p()
         rc = self._dll.WlanOpenHandle(2, None, ctypes.byref(negotiated),
                                       ctypes.byref(handle))
@@ -925,9 +949,9 @@ class _WlanApi:
 
     # ── 查询 ──
     def _query(self, handle, guid, opcode):
-        size = ctypes.c_ulong()
+        size = ctypes.c_uint32()
         data = ctypes.c_void_p()
-        opcode_type = ctypes.c_uint()
+        opcode_type = ctypes.c_uint32()
         rc = self._dll.WlanQueryInterface(handle, ctypes.byref(guid), opcode, None,
                                           ctypes.byref(size), ctypes.byref(data),
                                           ctypes.byref(opcode_type))
@@ -956,7 +980,7 @@ class _WlanApi:
     def channel_number(self, handle, guid) -> Optional[int]:
         data, _size = self._query(handle, guid, _OPCODE_CHANNEL_NUMBER)
         try:
-            return int(ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong)).contents.value)
+            return int(ctypes.cast(data, ctypes.POINTER(ctypes.c_uint32)).contents.value)
         finally:
             self._dll.WlanFreeMemory(data)
 
@@ -1025,8 +1049,18 @@ def _load_wlanapi() -> Optional[_WlanApi]:
 
 
 def capability(api: Optional[_WlanApi] = None) -> WifiCapability:
-    """本机能不能做无线切片；不能时 `reason` 说明为什么（**不抛**）。"""
-    if not _IS_WINDOWS:
+    """本机能不能做无线切片；不能时 `reason` 说明为什么（**不抛**）。
+
+    🔴 **显式注入的 `api` 是硬覆盖**：`_IS_WINDOWS` 只决定"要不要自己去加载
+    `wlanapi.dll`"，**不**决定"能不能用调用方递进来的对象"。递了就按递的走 ——
+    与 `netsh_text`（`query_interface` / `scan_networks`）和 `adapter_subnets=[]`
+    是同一条口径：**注入即硬覆盖**。
+
+    生产路径没有任何地方传 `api`，所以真实行为逐字不变；而这样整条
+    `snapshot()` 流水线在 Linux / macOS 上也**真的跑得起来** —— CI 的跨平台
+    job 因此能验它（18 条用例），而不是只能把它们 `skip` 掉。
+    """
+    if not _IS_WINDOWS and api is None:
         return WifiCapability(False, REASON_NOT_WINDOWS,
                               "wlanapi 是 Windows 独占 API（本项不做跨平台等价）")
     api = api if api is not None else _load_wlanapi()
