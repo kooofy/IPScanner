@@ -97,6 +97,17 @@ STATE_CORRUPT = "corrupt"        # 文件在读不出来 / 结构不符 / 摘要
 SOURCE_DATA = "data-dir"         # data_dir() 里的用户更新版
 SOURCE_SEED = "seed"             # resource_dir() 里的内置种子
 SOURCE_NONE = "none"             # 没有快照
+#: 在线下载（v2.2 §3.1）。🔴 本模块**仍然零网络**：这个值只表示「data_dir()
+#: 里那份是怎么来的」，落盘由 `cve_updater.py` 完成。加载器**不感知**下载，
+#: 靠同目录下一份 `cve_snapshot.online` 标记文件来区分（见 `_read_source_mark`）。
+SOURCE_ONLINE = "online-download"
+
+#: 在线更新成功后在快照旁边留下的**来源标记**文件名。内容无关紧要（空文件即可），
+#: 存在即表示「这份是程序自己下回来的」。
+#: 🔴 为什么要单独一个文件、而不是在 JSON 里加字段：快照 JSON 是**上游聚合方**
+#: 生成、经过 SHA256 清单校验的**只读数据**，往里写本地状态会当场把摘要校验搞坏。
+#: 标记文件不参与校验，是"本地对来源的判断"，与数据本身分开。
+ONLINE_MARK_FILENAME = "cve_snapshot.online"
 
 #: CPE 2.3 的「粗粒度」模板：只保留厂商 + 产品，其余全通配。
 _COARSE_CPE = "cpe:2.3:a:%s:%s:*:*:*:*:*:*:*:*"
@@ -404,6 +415,25 @@ def sums_path_for(json_path: str) -> str:
                         SUMS_FILENAME)
 
 
+def online_mark_path_for(json_path: str) -> str:
+    """与 `json_path` 同目录的「在线下载来源标记」路径（v2.2 §3.1）。"""
+    return os.path.join(os.path.dirname(os.path.abspath(json_path)),
+                        ONLINE_MARK_FILENAME)
+
+
+def _read_source_mark(json_path: str) -> bool:
+    """快照旁边有没有「在线下载」标记文件。
+
+    **只读存在性、不读内容**：标记文件是本地状态，内容无关紧要。
+    读不到的（权限/竞态）按"没有标记"处理 —— 来源显示退化成 `data-dir`，
+    不会因为一个标记文件的读取失败而影响加载本身。
+    """
+    try:
+        return os.path.isfile(online_mark_path_for(json_path))
+    except OSError:                       # 极罕见：路径非法 / 权限
+        return False
+
+
 def find_sums_path(json_path: str) -> str:
     """摘要清单的实际位置：先认 `cve_snapshot.sha256`，再认发布口径的 `SHA256SUMS`。
 
@@ -535,10 +565,16 @@ def load_snapshot(path: Optional[str] = None, *,
     # 不假装它是只读种子（否则 dev 模式永远显示"种子"，与事实不符）。
     _seed_real = os.path.realpath(os.path.join(resource_dir(), DATA_FILENAME))
     _user_real = os.path.realpath(os.path.join(data_dir(), DATA_FILENAME))
-    snap.source = (SOURCE_SEED
-                   if (os.path.realpath(target) == _seed_real
-                       and _seed_real != _user_real)
-                   else SOURCE_DATA)
+    # v2.2 §3.1：优先认「在线下载」标记（同目录一份 cve_snapshot.online）。
+    # 标记只可能由 `cve_updater.py` 在**校验通过后**的原子落盘里一并写出，
+    # 所以「有标记」= 这份是我们自己下回来的，比"在哪个目录"更精确。
+    if _read_source_mark(target):
+        snap.source = SOURCE_ONLINE
+    else:
+        snap.source = (SOURCE_SEED
+                       if (os.path.realpath(target) == _seed_real
+                           and _seed_real != _user_real)
+                       else SOURCE_DATA)
 
     verified = verify_checksum(target)
     snap.checksum_verified = verified

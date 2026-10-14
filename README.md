@@ -261,9 +261,9 @@ python main.py
 **「Windows 已保护你的电脑」/ 未知发布者**。这是 SmartScreen 对"没有签名记录的新程序"的
 默认反应，**不代表程序有问题**。
 
-> 本项目已备好 [SignPath Foundation](https://signpath.org) 免费开源代码签名的申请材料
-> （见 [`docs/SIGNPATH_APPLICATION.md`](docs/SIGNPATH_APPLICATION.md)）；获批后发行版会带上
-> **可与本仓库相互验证**的签名，届时本节会同步更新。
+> 本项目**正在申请** [SignPath Foundation](https://signpath.org) 的免费开源代码签名
+> （材料与提交步骤见 [`docs/SIGNPATH_APPLICATION.md`](docs/SIGNPATH_APPLICATION.md)）；
+> 获批后发行版会带上**可与本仓库相互验证**的签名，届时本节会同步更新。
 >
 > 另外提醒一句：**买 EV 证书并不能免除拦截** —— 2024 年起微软取消了 EV 的即时信任特权，
 > OV / EV 的新签名文件都得靠下载量累积信誉，而 EV 价格是 OV 的数倍。本项目不走这条路。

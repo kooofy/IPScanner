@@ -1657,8 +1657,66 @@ _CVE_STATE_TEXT = {
 _CVE_SOURCE_TEXT = {
     "data-dir": "数据目录（用户更新版）",
     "seed": "程序内置种子（覆盖面很窄）",
+    "online-download": "在线下载（已校验 SHA256）",
     "none": "无",
 }
+
+#: 在线更新结果原因（`cve_updater.REASON_*` 规范值）→ 人看的说明（v2.2 §3.1）。
+_CVE_UPDATE_REASON_TEXT = {
+    "ok": "更新完成。",
+    "no-url": "尚未配置下载地址（默认常量还是占位符）——"
+              "请手动把新的 cve_snapshot.json 放进数据目录。",
+    "download-failed": "下载失败（网络不可达 / 超时 / 地址无效）。"
+                       "已保留现有数据。",
+    "too-large": "下载内容超过大小上限，已丢弃。请检查地址是否正确。",
+    "checksum-failed": "下载内容的 SHA256 与清单不一致，已丢弃并保留现有数据。",
+    "invalid": "下载回来的内容不是可用的快照，已丢弃并保留现有数据。",
+    "write-failed": "写入数据目录失败（磁盘空间 / 权限），已保留现有数据。",
+    "no-manifest": "服务器上没有可用的 SHA256 清单，出于安全默认拒绝安装。",
+    "unknown": "结果无法识别（详见日志）。",
+}
+
+
+def cmd_cve_update(args) -> int:
+    """`cve --update`：**唯一**联网的 CVE 动作（v2.2 §3.1）。
+
+    🔴 只有显式给 `--update` 才会走到这里 —— 别的 cve 用法（`--status` /
+    `--product`）全程不联网这条承诺**不变**。
+
+    退出码：成功 0；失败 1（与"没有可用数据"同一档，**不**新增码位 ——
+    监控脚本已经在用 0/1/2/3，"这次没更成"不是环境错也不是"有变更"）。
+
+    失败**只提示不报错退出**：下载失败不影响任何既有功能，把它做成红字
+    会让 cron 里的一次网络抖动变成一封告警邮件。
+    """
+    from cve_updater import update_snapshot
+    from scanner import cve_snapshot as snap
+
+    url = (getattr(args, "url", "") or "").strip() or snap.DEFAULT_SNAPSHOT_URL
+    result = update_snapshot(
+        url,
+        require_checksum=not getattr(args, "no_checksum", False),
+    )
+
+    reason = str(result.get("reason") or "unknown")
+    if args.format == "json":
+        emit(render_json(result), args.output)
+    else:
+        text = _CVE_UPDATE_REASON_TEXT.get(reason, _CVE_UPDATE_REASON_TEXT["unknown"])
+        lines = [f"CVE 快照在线更新：{text}"]
+        if result.get("bytes"):
+            lines.append("  下载：%d 字节" % result["bytes"])
+        if result.get("ok"):
+            lines.append("  条目：%d 条" % (result.get("entry_count") or 0))
+            lines.append("  摘要校验：通过")
+            lines.append("  写入：%s" % (result.get("path") or ""))
+        emit("\n".join(lines), args.output)
+
+    if not result.get("ok"):
+        warn(_CVE_UPDATE_REASON_TEXT.get(
+            reason, _CVE_UPDATE_REASON_TEXT["unknown"]))
+        return EXIT_ERROR
+    return EXIT_OK
 
 
 def _render_cve_status_text(stats: dict) -> str:
@@ -1777,6 +1835,11 @@ def cmd_cve(args) -> int:
     可用 —— 数据在、只是旧，提示说清即可，不该让监控脚本误报故障。
     """
     from scanner import cve_snapshot as snap
+
+    # v2.2 §3.1：`--update` 是**唯一**联网分支，且必须显式给出才走。
+    # 放在最前面：它的语义是"动作"而不是"查询"，与 --status/--product 并列。
+    if getattr(args, "update", False):
+        return cmd_cve_update(args)
 
     snapshot = snap.load_snapshot()
     stats = snapshot.stats()
@@ -2630,6 +2693,15 @@ def build_parser() -> argparse.ArgumentParser:
     cvp.add_argument("--product", metavar="产品[ 版本]",
                      help='按产品名查候选 CVE，如 "Apache httpd 2.4.41"；'
                           "识别口径与扫描完全相同")
+    # v2.2 §3.1：**唯一**会联网的 CVE 动作，必须显式点它。
+    cvp.add_argument("--update", action="store_true",
+                     help="🔴 从配置的地址**联网**下载并校验 CVE 快照后安装"
+                          "（本命令其它用法一律不联网）")
+    cvp.add_argument("--url", metavar="地址", default="",
+                     help="配合 --update：覆盖默认下载地址（联调 / 自建镜像用）")
+    cvp.add_argument("--no-checksum", action="store_true",
+                     help="配合 --update：放宽「必须校验 SHA256」的要求"
+                          "（仅联调用，生产勿用）")
     cvp.add_argument("-f", "--format", choices=("table", "json"),
                      default="table", help="输出格式（默认 table）")
     cvp.add_argument("-o", "--output", metavar="文件",

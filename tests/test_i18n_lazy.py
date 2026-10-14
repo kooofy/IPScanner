@@ -305,6 +305,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         from ui_msg import STANDARD_BUTTON_TEXT
         from cve_status_mixin import (
             _CVE_BADGE_TEXT, _CVE_HINT_TEXT, _CVE_SOURCE_TEXT,
+            _CVE_UPDATE_TEXT, _CVE_UPDATE_CONSENT,
         )
         from ui_dialogs.wifi import (
             _CURRENT_FIELDS, _MATCH_TEXT, _NOTE_TEXT, _REASON_TEXT as _WIFI_REASON,
@@ -346,6 +347,13 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "cve_status_mixin._CVE_BADGE_TEXT": list(_CVE_BADGE_TEXT.values()),
             "cve_status_mixin._CVE_HINT_TEXT": list(_CVE_HINT_TEXT.values()),
             "cve_status_mixin._CVE_SOURCE_TEXT": list(_CVE_SOURCE_TEXT.values()),
+            # v2.2 §3.1 追加的两张表：在线更新的**结果原因**文案与**入口**
+            # 确认框文案。同上是字面量表（`update_result_text()` 过 tr()）。
+            # ⚠️ `_CVE_UPDATE_TEXT` 的**键**是 `cve_updater.REASON_*` 规范值，
+            # 不是中文；这里只收集值（中文那些）。
+            "cve_status_mixin._CVE_UPDATE_TEXT": list(_CVE_UPDATE_TEXT.values()),
+            "cve_status_mixin._CVE_UPDATE_CONSENT":
+                list(_CVE_UPDATE_CONSENT.values()),
             # ui_dialogs.wifi 的五张表（不可用原因 / 各项没拿到的说明 /
             # 漫游事件类型 / 取数来源 / 关联依据）+ 「当前关联」的字段名元组。
             # 同上是**字面量表**：取用时过 `tr()`，漏登记就会在英文界面显示中文。

@@ -935,6 +935,15 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         act_cve_status.triggered.connect(self._show_cve_status)
         settings_menu.addAction(act_cve_status)
 
+        # CVE 快照**在线更新**（v2.2 §3.1）：本程序唯一联网的 CVE 动作。
+        # 🔴 只做菜单项，**绝不**在 __init__ 里调用（同意框会挂住无头测试）。
+        act_cve_update = QAction(tr("在线更新 CVE 数据快照..."), self)
+        act_cve_update.setIcon(_mi(QStyle.SP_ArrowDown))
+        act_cve_update.setToolTip(tr("从配置的地址下载并校验 CVE 数据快照"
+                                     "（唯一联网的 CVE 操作，需手动触发）"))
+        act_cve_update.triggered.connect(self._update_cve_snapshot)
+        settings_menu.addAction(act_cve_update)
+
         settings_menu.addSeparator()
 
         # ── 主题：单选（跟随系统 / 浅色 / 深色 / 按时间）──

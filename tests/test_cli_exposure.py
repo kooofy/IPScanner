@@ -293,6 +293,76 @@ class ParserWiringTest(unittest.TestCase):
         self.assertFalse(args.status)      # 不显式给也是同一个动作
         self.assertEqual(args.format, "table")
 
+    def test_cve_update_flag_defaults_off(self):
+        """v2.2 §3.1：`--update` 默认关 —— 不给它就绝不联网。"""
+        p = cli.build_parser()
+        self.assertFalse(p.parse_args(["cve"]).update)
+        self.assertFalse(p.parse_args(["cve", "--status"]).update)
+        self.assertFalse(p.parse_args(["cve", "--product", "x"]).update)
+        self.assertTrue(p.parse_args(["cve", "--update"]).update)
+
+
+class CveUpdateCommandTest(unittest.TestCase):
+    """`cve --update`（v2.2 §3.1）：联网**只此一枝**，且失败不升级退出码语义。
+
+    🔴 全程 mock 掉 `update_snapshot`：CLI 测试绝不能真发包。
+    """
+
+    def test_update_uses_placeholder_url_by_default(self):
+        """默认地址是占位符 → no-url，退出非 0，且**不**发请求。
+
+        （`update_snapshot` 自己会因为占位符短路 —— 这里 mock 掉它，
+        只验证 CLI 把它当失败处理、退出码正确。）
+        """
+        fake = {"ok": False, "reason": "no-url", "path": "",
+                "entry_count": 0, "checksum_verified": False, "bytes": 0}
+        with mock.patch("cve_updater.update_snapshot", return_value=fake) as m:
+            code, out, _err = _run_main(["cve", "--update"])
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("尚未配置下载地址", out)
+        m.assert_called_once()             # 只有这一处会调，且是显式 --update
+
+    def test_update_success_exits_zero(self):
+        fake = {"ok": True, "reason": "ok", "path": "C:/tmp/cve_snapshot.json",
+                "entry_count": 42, "checksum_verified": True, "bytes": 12345}
+        with mock.patch("cve_updater.update_snapshot", return_value=fake):
+            code, out, _err = _run_main(["cve", "--update", "--format", "json"])
+        self.assertEqual(code, cli.EXIT_OK)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["entry_count"], 42)
+
+    def test_update_failure_reports_but_is_not_environment_error(self):
+        """失败必须是 EXIT_ERROR(1)，**不是** EXIT_ENV(3) 或 CHANGES(2)。"""
+        fake = {"ok": False, "reason": "download-failed", "path": "",
+                "entry_count": 0, "checksum_verified": False, "bytes": 0}
+        with mock.patch("cve_updater.update_snapshot", return_value=fake):
+            code, _out, err = _run_main(["cve", "--update"])
+        self.assertEqual(code, cli.EXIT_ERROR)
+
+    def test_update_url_override_forwarded(self):
+        fake = {"ok": True, "reason": "ok", "path": "x", "entry_count": 1,
+                "checksum_verified": True, "bytes": 1}
+        with mock.patch("cve_updater.update_snapshot",
+                        return_value=fake) as m:
+            _run_main(["cve", "--update",
+                       "--url", "https://mirror.invalid/x.json"])
+        self.assertEqual(m.call_args.args[0], "https://mirror.invalid/x.json")
+
+    def test_no_checksum_flag_forwarded(self):
+        fake = {"ok": True, "reason": "ok", "path": "x", "entry_count": 1,
+                "checksum_verified": False, "bytes": 1}
+        with mock.patch("cve_updater.update_snapshot",
+                        return_value=fake) as m:
+            _run_main(["cve", "--update", "--no-checksum"])
+        self.assertFalse(m.call_args.kwargs.get("require_checksum", True))
+
+    def test_status_does_not_touch_network_module(self):
+        """🔴 `cve --status` **绝不能**碰 `cve_updater` —— 这条是身份边界。"""
+        with mock.patch("cve_updater.update_snapshot") as m:
+            _run_main(["cve", "--status"])
+        m.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

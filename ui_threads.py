@@ -447,6 +447,34 @@ class OuiUpdateThread(QThread):
         self.finished_signal.emit(result)
 
 
+class CveUpdateThread(QThread):
+    """在线下载 CVE 数据快照（v2.2 §3.1）。
+
+    为什么必须单独一个线程：联网可能慢到几十秒（超时上限 30s），主线程跑
+    就是整窗口冻结。`cve_updater.update_snapshot()` **永不抛**（失败收成
+    `ok=False` + `reason`），所以这里不需要 try 兜底 —— 但仍保留一层
+    `except` 把"绝不该发生的"异常也转成结果 dict，宁可多一层也不让线程里
+    的异常静默吞掉（QThread 里未捕获异常在部分 Qt 版本上会直接 abort）。
+    """
+
+    finished_signal = pyqtSignal(object)   # dict: update_snapshot 的返回值
+
+    def __init__(self, url: str = "", **kwargs):
+        super().__init__()
+        self.url = url
+        self.kwargs = kwargs
+
+    def run(self):
+        from cve_updater import update_snapshot
+        try:
+            result = update_snapshot(self.url, **self.kwargs)
+        except Exception as e:          # noqa: BLE001 — 线程里炸了也要有结果
+            _log.warning("CVE 快照在线更新线程异常: %s", e)
+            result = {"ok": False, "reason": "download-failed", "path": "",
+                      "entry_count": 0, "checksum_verified": False, "bytes": 0}
+        self.finished_signal.emit(result)
+
+
 class HistoryQueryThread(QThread):
     """历史条件查询：把 `history_store.query_history()` 挪到后台线程执行。
 

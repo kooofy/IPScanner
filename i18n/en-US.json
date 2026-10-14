@@ -1002,5 +1002,21 @@
   "当前波段 %s：建议 %d 信道（2.4 GHz 只看互不重叠的 1/6/11）。": "Current band %s: channel %d recommended (for 2.4 GHz only the non-overlapping 1/6/11 are considered).",
   "当前波段 %s：建议 %d 信道（AP 数最少）。": "Current band %s: channel %d recommended (fewest APs).",
   "共 %d 条关联/断开事件（来源：%s）。时间线是 SSID 粒度 —— AutoConfig 这几条事件不带 BSSID，不能标成「漫游到某个 AP」。": "%d association/disassociation events (source: %s). The timeline is SSID-level — these AutoConfig events carry no BSSID, so they cannot be labelled \"roamed to a specific AP\".",
-  "没有读到关联/断开事件（来源：%s）。": "No association/disassociation events were read (source: %s)."
+  "没有读到关联/断开事件（来源：%s）。": "No association/disassociation events were read (source: %s).",
+  "在线下载（已校验 SHA256）": "Online download (SHA256 verified)",
+  "CVE 数据快照在线更新": "CVE data snapshot online update",
+  "在线更新 CVE 数据快照...": "Update CVE data snapshot online...",
+  "从配置的地址下载并校验 CVE 数据快照（唯一联网的 CVE 操作，需手动触发）": "Download and verify the CVE data snapshot from the configured address (the only network-using CVE action; must be triggered manually)",
+  "更新结束，但结果无法识别。详情见日志。": "The update finished, but the outcome was not recognised. See the log for details.",
+  "更新完成：共 {n} 条（已校验 SHA256）。": "Update complete: {n} entries (SHA256 verified).",
+  "尚未配置下载地址，无法在线更新。请手动把新的 cve_snapshot.json 放进数据目录。": "No download address is configured, so online update is unavailable. Put a new cve_snapshot.json into the data directory manually.",
+  "下载失败（网络不可达 / 超时 / 地址无效）。已保留现有数据，可稍后重试或手动放置文件。": "Download failed (network unreachable / timed out / invalid address). Existing data was kept — retry later or place the file manually.",
+  "下载内容超过大小上限，已丢弃。请检查地址是否正确。": "The downloaded content exceeded the size limit and was discarded. Check that the address is correct.",
+  "下载内容的 SHA256 与清单不一致，已丢弃并保留现有数据（可能是下载损坏或地址被改动）。": "The downloaded content's SHA256 did not match the manifest; it was discarded and existing data kept (the download may be corrupt or the address tampered with).",
+  "下载回来的内容不是可用的快照，已丢弃并保留现有数据。": "The downloaded content is not a usable snapshot; it was discarded and existing data kept.",
+  "下载成功但写入数据目录失败（磁盘空间 / 权限），已保留现有数据。": "The download succeeded but writing to the data directory failed (disk space / permissions); existing data was kept.",
+  "服务器上没有可用的 SHA256 清单，出于安全默认拒绝安装（无法确认下载内容完整）。": "No usable SHA256 manifest is available on the server, so installation is refused by default for safety (the download's integrity cannot be confirmed).",
+  "在线更新 CVE 数据快照": "Update CVE data snapshot online",
+  "将从配置的地址下载 CVE 数据快照（约几百 KB），下载后先校验 SHA256 再安装。\n\n这是本程序**唯一**联网的 CVE 操作 —— 不点它就不会联网。\n\n是否继续？": "The CVE data snapshot (a few hundred KB) will be downloaded from the configured address; its SHA256 is verified before installation.\n\nThis is the program's **only** CVE operation that uses the network — nothing connects unless you click through.\n\nContinue?",
+  "下载并更新": "Download and update"
 }

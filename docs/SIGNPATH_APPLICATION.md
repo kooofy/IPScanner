@@ -1,18 +1,26 @@
 # SignPath Foundation 免费代码签名 —— 申请材料
 
 > **目的**：让发行版带上**可与仓库相互验证**的签名，消掉「Windows 已保护你的电脑 / 未知发布者」。
-> **依据**：`docs/ROADMAP_V1.8.md` §1.4 第 2 项 —— 审批有**外部等待期**，必须最早启动。
-> **状态**：**暂缓提交**（2026-10-10 决定）。材料已备齐、资格与前置条件也都满足，
-> 但 `Reputation` 一栏拿不出使用量证据 —— 仓库 2026-10-10 才公开，
-> stars / forks / 产物下载次数**全为 0**，且项目目前**只有维护者自己在用**。
-> 按实提交大概率被要求补充材料或延后，故决定**先继续完善功能、积累真实反馈**再提交。
->
-> **恢复提交的条件**（满足任一即可回来填表）：
-> 1. 已在真实环境被使用（单位 / 公司 / 实验室 / 客户网络）—— 补上场景、规模、时长；
-> 2. 公开后积累到可引用的下载量 / star / 社区讨论。
->
-> **其余准备工作均已完成**：仓库已公开、Releases 有可免费下载的产物、
-> `CODE_SIGNING_POLICY.md` 与 `CODE_OF_CONDUCT.md` 已入库、九个表单字段已备好（§3）。
+> **依据**：`docs/ROADMAP_V1.8.md` §1.4 第 2 项、`docs/ROADMAP_V2.2.md` §1.4 / §3.4.1。
+> **状态**：**准备提交**（2026-10-14 用户决定**启动申请**，推翻了 10-10 的暂缓决定）。
+> 材料已备齐、资格与前置条件均满足，表单字段见 §3 可直接粘贴；
+> **唯一待用户本人做的是**在 <https://signpath.org/apply.html> 点提交 ——
+> 这一步要留可收信的联系邮箱，本文无法代劳。步骤见 §5.1。
+
+## 0. 决定反转记录（2026-10-14）
+
+| 时间 | 决定 | 依据 |
+|---|---|---|
+| 2026-10-10 | **暂缓提交** | 仓库当天才公开，`Reputation` 一栏拿不出使用量证据（stars / 下载全 0） |
+| **2026-10-14** | **启动申请** | 用户主动改变决定：「早开始攒信誉」的收益大于「材料弱一点」的风险 |
+
+⚠️ **反转的代价必须如实记账**：`Reputation` 仍是本申请最弱的一栏，而且是**可以预判会被追问**
+的一栏 —— 见 §3.1。决定做了就不再反复；**如果审核方要求补充使用量证据**，
+唯一的正路是继续积累真实使用，而不是把申请书改得更花哨。
+
+> 该决定同时推翻了 `docs/ROADMAP_V2.2.md` §1.4 记录的「不启动 SignPath 申请」，
+> 连带：签名流水线从"移除"状态回到"待接线"，`P2-13`（无代码签名）从「未修」改为
+> **「申请中」**。v2.2 的四项交付范围**不变** —— 申请本身不占开发名额（它是个外部等待过程）。
 
 ---
 
@@ -25,26 +33,29 @@
 > 这一条是本项目里少数「**早做比做得好更重要**」的事：其余三项（README / CHANGELOG /
 > release 工作流）都是当天能完成的，唯独签名要等外部审批。
 >
-> ⚖ **但 2026-10-10 的实测数据让「立刻提交」变得不可行**：`Reputation` 一栏要求的
-> 「被广泛使用或信任」的证据，本项目一条都拿不出（stars / 下载量全为 0，无媒体报道，
-> 且只有维护者自己使用）。上面「越早越好」的逻辑针对的是**获批之后**的信誉累积；
-> 而**获批之前**，申请材料本身得先过得了审核。两者冲突时只能先解决后者 ——
-> 决定与恢复条件见本文顶部状态说明。
+> ⚖ **2026-10-10 曾据此判断「暂缓」**：当时 `Reputation` 拿不出使用量证据。
+> 2026-10-14 用户决定**启动申请**，接受「材料里 Reputation 偏弱」这一代价
+> —— 理由是这样才可能尽早开始攒信誉（见本文 §0 反转记录）。
+> ⚠️ **代价要说清**：审核方**很可能追问使用量**。若真被追问，正确应对是
+> 继续积累真实使用并如实回复，而不是修饰材料。
 
 ---
 
 ## 2. 资格自查（逐条对照）
 
-SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html`、`signpath.org`、
-`foropensource.com`，以及一份 2026-02 的实操申请记录；核对日期 2026-10-10）：
+SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html`、`signpath.org`，
+以及一份 2026-02 的实操申请记录；核对日期 2026-10-10，2026-10-14 复核资格行全部仍成立）：
 
-| 要求 | IPScanner 现状 | |
+| 要求 | IPScanner 现状（2026-10-14） | |
 |---|---|:---:|
 | OSI 认可的开源许可 | GPL-3.0（[`LICENSE`](../LICENSE)） | ✅ |
-| 仓库公开 | `github.com/kooofy/IPScanner` | ✅ |
-| 持续开发 | `1.7.x` 发布线仍在推进（v1.7.6） | ✅ |
+| 仓库公开 | `github.com/kooofy/IPScanner`（2026-10-10 起公开） | ✅ |
+| 持续开发 | `2.1.x` 发布线仍在推进（v2.1.0，2026-10-13 发布） | ✅ |
 | 授予对象是**项目**而非个人 | 证书签发给 SignPath Foundation，项目侧只需署名 | ✅ |
 | 构建可复现 | `IPScanner.spec` / `IPScanner_cli.spec` 均入库，CI 有打包验证 | ✅ |
+| 产物可免费下载 | 13 个 Release，每个带 `SHA256SUMS.txt` | ✅ |
+| 代码签名政策 | [`CODE_SIGNING_POLICY.md`](../CODE_SIGNING_POLICY.md) 已入库 | ✅ |
+| 行为准则 | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) 已入库 | ✅ |
 
 免费档给的是 **OV 级证书**（签发主体是 SignPath Foundation，私钥存在其 HSM 上，不落本地），
 支持签名 EXE / MSI / Docker 镜像 / Office 宏等，CI 侧支持 GitHub Actions / Azure DevOps / Jenkins。
@@ -110,20 +121,20 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 
 ### 3.1 `Reputation` —— 本项目最弱的一栏（诚实评估）
 
-**实测数据（2026-10-10，用 GitHub API 拉的，不是估计）**：
+**实测数据（2026-10-14 用 GitHub API 拉的，不是估计）**：
 
-| 指标 | 值 |
-|---|---|
-| 仓库创建 | 2026-07-17 |
-| **转为公开** | **2026-10-10（就是今天）** |
-| stars / forks / watchers / subscribers | **0 / 0 / 0 / 0** |
-| Releases 数量 | 9（v1.0 → v1.7.7） |
-| **产物下载次数** | **0**（私有期间根本下载不了） |
-| 媒体报道 / 博客 / 社区讨论 | **无**（搜过，命中的全是同名但无关的工具） |
+| 指标 | 2026-10-10 | 2026-10-14（现况） |
+|---|---|---|
+| 仓库创建 | 2026-07-17 | 2026-07-17 |
+| **转为公开** | **2026-10-10（第 0 天）** | **2026-10-10（第 4 天）** |
+| stars / forks / watchers / subscribers | **0 / 0 / 0 / 0** | **0 / 0 / 0 / 0** |
+| Releases 数量 | 9（v1.0 → v1.7.7） | **13**（v1.0 → v2.1.0） |
+| **产物下载次数** | **0** | **0** |
+| 媒体报道 / 博客 / 社区讨论 | **无** | **无** |
 
-**结论：这一栏目前拿不出任何「被广泛使用」的证据，而且原因很明确 ——
-仓库今天才公开，在此之前外部根本无法使用它。** 不要试图用无关数据凑数：
-审核方点开链接就能看出 stars/downloads 是 0，硬编反而更糟。
+**结论：这一栏仍然拿不出任何「被广泛使用」的证据 —— 公开才 4 天，这不是缺陷而是时间。**
+不要试图用无关数据凑数：审核方点开链接就能看出 stars/downloads 是 0，硬编反而更糟。
+诚实交代「私有开发 → 公开 4 天」比任何修饰都经得起核对。
 
 **可以如实写的（工程可信度，不是使用量 —— 但正是签名要担保的那个性质）**：
 
@@ -131,9 +142,10 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 > published under GPL-3.0; external usage metrics are therefore not yet meaningful.
 > What the project can demonstrate is verifiable engineering provenance:
 >
-> - 69 commits over 84 days of continuous development (2026-07-18 → 2026-10-10),
->   with 9 tagged releases (v1.0 → v1.7.7).
-> - 1,135 automated tests across 57 test files, run on every push.
+> - 127 commits over 88 days of continuous development (2026-07-18 → 2026-10-13),
+>   with 13 tagged releases (v1.0 → v2.1.0) published under this public repository.
+> - 2,495 automated tests across 86 test files, run on every push and again on
+>   every release tag.
 > - Public CI across three platforms — Python 3.10–3.13 on ubuntu-latest and
 >   macos-latest, plus Windows PyInstaller packaging verification:
 >   https://github.com/kooofy/IPScanner/actions
@@ -147,29 +159,30 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 **⚠ 若本项目已在真实环境里被使用**（单位 / 公司 / 实验室 / 客户网络等），
 **一定要补上这一条 —— 它是目前唯一真实可用的「使用量」证据**，比上面所有工程指标
 都更有说服力。写法：说明场景、规模、使用时长，并指明可核实的联系人身份。
+（2026-10-14 提交时若已出现真实使用，此处**必须先更新**再勾选，别用旧文本。）
 
-**另一条路**：若希望这一栏更有分量，可先公开一段时间积累真实下载与反馈，再提交申请。
-代价是审批本来就有的等待期还要往后推。
+**（已作废的备选）** 2026-10-10 曾设想「先公开一段时间积累下载量再提交」。
+2026-10-14 用户决定**不等了** —— 代价是审核方可能追问使用量，
+收益是尽早开始累积 SmartScreen 信誉（§1）。
 
 ---
 
-## 4. 提交前的加分准备（建议先做完再提交）
-
-申请表单本身不难填，但**审核方要能方便地评估你的项目**。一份 2026-02 的实操记录
-（同样是单人维护的 Windows 桌面项目）总结出下面这些准备，能明显提高通过率：
+## 4. 提交前的加分准备（已全部完成）
 
 | 准备项 | 作用 | IPScanner 现状 |
 |---|---|:---:|
 | 仓库根目录有 `LICENSE` | 证明是 OSI 许可 | ✅ 已有 |
 | README 讲清「是什么 / 从哪下载 / 怎么构建」 | 审核方判断产物来源 | ✅ 已有 |
 | CI 工作流公开 | 证明产物确实由本仓库构建 | ✅ `release.yml` |
-| GitHub Releases 有可免费下载的产物 | 程序硬性要求「发行版可免费下载」 | ⏳ 需先发一版 |
-| **`CODE_SIGNING_POLICY.md`（代码签名政策）** | 说明「签什么、谁有权批准签名」 | ❌ 待建 |
-| **`CODE_OF_CONDUCT.md`（行为准则）** | 证明项目按开源项目方式运营 | ❌ 待建 |
-| **可收信的联系邮箱** | 审批沟通主要走邮件 | ⚠ 需确认 |
+| GitHub Releases 有可免费下载的产物 | 程序硬性要求「发行版可免费下载」 | ✅ 13 个 Release |
+| **`CODE_SIGNING_POLICY.md`（代码签名政策）** | 说明「签什么、谁有权批准签名」 | ✅ 已入库 |
+| **`CODE_OF_CONDUCT.md`（行为准则）** | 证明项目按开源项目方式运营 | ✅ 已入库 |
+| **可收信的联系邮箱** | 审批沟通主要走邮件 | ⚠ **提交时由用户本人填写** |
 
 其中**代码签名政策是审核重点**：SignPath 的签名是**逐次审批**的，它必须知道在你这个
-项目里**谁有权批准一次签名**。单人维护的项目，把维护者同时列进三个角色即可。
+项目里**谁有权批准一次签名**。本项目的
+[`CODE_SIGNING_POLICY.md`](../CODE_SIGNING_POLICY.md) 已把单人维护者同时列入
+**Authors / Reviewers / Approvers** 三个角色，并写明「每次签名都需维护者显式批准」。
 
 程序要求的署名声明（获批后必须原样出现）：
 
@@ -177,17 +190,30 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 
 ---
 
-## 5. 提交之后
+## 5. 提交步骤
 
-1. **在 <https://signpath.org/apply.html> 提交** —— 这一步需要项目所有者操作，本文件无法代劳。
-   审核期间可能收到补充提问，**保持邮箱畅通**。
+### 5.1 提交申请（需用户本人操作）
+
+1. 打开 <https://signpath.org/apply.html>（页面是 JS 渲染的表单；若打不开，
+   从 <https://signpath.org> 首页进）。
+2. 按 §3 的字段表逐项粘贴。**提交前最后确认一遍字段值**，
+   尤其是 `Homepage URL` / `Download page URL` 别填反（见 §3 的告警）。
+3. 联系邮箱填一个**真能收信的地址** —— 审批沟通走邮件，这是全流程唯一
+   需要人工判断的字段。
+4. 提交后把提交日期与审核方回复记到本文档顶部的状态区（保持单一事实来源）。
+
+### 5.2 提交之后
+
+1. **审核期间保持邮箱畅通**，可能收到补充提问；若问使用量，按 §3.1 的口径如实回复。
 2. 获批后：在 SignPath 里建项目 → 接 GitHub 集成 → 设计签名政策（逐次审批）。
-3. 把签名步骤接到 `release.yml` 的**「构建」与「打包」之间**：
+3. 把签名步骤接到 `release.yml` 的**「构建 CLI 版（onefile）」与「打包分发产物」之间**
+   （2026-10-14 已核对工作流实际步骤名）：
    必须先签 exe、再 `Compress-Archive`；顺序反了签的就是压缩包本身（无效）。
-   仓库里两个产物分别对应 `IPScanner.spec` 产出的 exe 与 `IPScanner_cli.exe`。
+   仓库里两个待签产物分别是 `dist\IPScanner_<版本>\IPScanner_<版本>.exe`（GUI onedir）
+   与 `dist\IPScanner_cli.exe`（CLI onefile）。
 4. 把程序要求的署名声明写进 Release 说明与下载页（`--generate-notes` 之外补一行）：
    `Free code signing provided by SignPath.io, certificate by SignPath Foundation`
-5. **首个带签名的版本另起一个 `1.7.N`**，不要复用已发布的 v1.7.6。
+5. **首个带签名的版本另起一个 `2.1.N`**，不要复用已发布的 v2.1.0。
 
 ---
 
