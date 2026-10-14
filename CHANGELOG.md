@@ -14,6 +14,33 @@
 
 ---
 
+## [Unreleased]
+
+> v2.2 开发中（主题：「**能取信**」，详见
+> [`docs/ROADMAP_V2.2.md`](docs/ROADMAP_V2.2.md)）。
+> **SignPath Foundation 申请已提交**（2026-10-14，见
+> [`docs/SIGNPATH_APPLICATION.md`](docs/SIGNPATH_APPLICATION.md)）——
+> 审核属外部等待，不占 v2.2 名额；签名流水线接线等审批结果。
+
+### 新增
+
+- **CVE 快照在线更新 —— v2.2 路线图 3.1（主题项）**。
+  内置种子快照从此可以**手动联网更新**，扫描引擎的零网络边界不变。
+  - 新增顶层联网模块 `cve_updater.py`（与 `oui_updater.py` 同位，
+    **不在 `scanner/` 下）—— 零网络不变量靠**模块拆分**而非注释保住：
+    `scanner/` 一个文件都不 import 它（AST import 判据测试钉住）；
+  - 取回后**先验 SHA256**，不匹配即拒绝写入并保留旧数据；
+    下载失败只降级为 `REASON_*` 八态，**绝不**升级成扫描失败；
+  - 只在**用户显式触发**时联网；取不到校验清单默认拒绝落盘
+    （`--no-checksum` 仅联调用）；
+  - 「在线下载」来源以**旁路标记文件**（`cve_snapshot.online`，不参与校验）
+    区分 —— 不往快照 JSON 加字段，避免破坏摘要自洽；
+  - 落盘 `tempdir → *.tmp → os.replace()` 原子替换；配额 32 MiB 途中拦截；
+  - GUI：设置菜单「在线更新 CVE 数据快照...」+ 同意框（`msg_consent`）；
+  - CLI：`cve --update` / `--url` / `--no-checksum`。
+
+---
+
 ## [2.1.0] - 2026-10-13
 
 > **v2.1 四项全部落地**。依据是 [`docs/ROADMAP_V2.1.md`](docs/ROADMAP_V2.1.md)

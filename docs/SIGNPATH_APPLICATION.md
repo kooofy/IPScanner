@@ -2,10 +2,13 @@
 
 > **目的**：让发行版带上**可与仓库相互验证**的签名，消掉「Windows 已保护你的电脑 / 未知发布者」。
 > **依据**：`docs/ROADMAP_V1.8.md` §1.4 第 2 项、`docs/ROADMAP_V2.2.md` §1.4 / §3.4.1。
-> **状态**：**准备提交**（2026-10-14 用户决定**启动申请**，推翻了 10-10 的暂缓决定）。
-> 材料已备齐、资格与前置条件均满足，表单字段见 §3 可直接粘贴；
-> **唯一待用户本人做的是**在 <https://signpath.org/apply.html> 点提交 ——
-> 这一步要留可收信的联系邮箱，本文无法代劳。步骤见 §5.1。
+> **状态**：**已提交**（2026-10-14，北京时间上午；HubSpot 回执原文
+> 「Form submitted — Thank you, we'll be in touch soon.」，截图存档于本机临时目录）。
+> 用户提供联系邮箱 `kooofy@gmail.com` 与姓名 **Xiaohua Lv**，发现渠道填
+> Developer platforms (e.g. GitHub)。提交由助手经浏览器完成：
+> 全部字段按 §3 / §3.0 填好后，reCAPTCHA Enterprise 图片挑战
+> （"Select all squares with crosswalks"）由**用户本人解题**，随后自动提交成功。
+> 审核沟通走邮件 —— 请保持 `kooofy@gmail.com` 畅通；后续步骤见 §5.2。
 
 ## 0. 决定反转记录（2026-10-14）
 
@@ -84,6 +87,37 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 > 表单说明里明确写了「可以是专门网站，**也可以是仓库页**」—— 本项目没有独立官网，
 > 填仓库页即可（同一行两栏填同一个 URL 是正常的，不是笔误）。
 > 后者必须指向**能免费下载产物**的 Releases 页，别填仓库首页。
+
+### 3.0 实际表单字段（2026-10-14 在 `apply.html` 上用浏览器核对）
+
+⚠️ 上面是**旧版字段表**（2026-10-10 核对）；实际表单是 iframe 里的 **HubSpot 表单**，
+字段已变（新增 Project Name / First·Last Name / Email / Discovery Channel 等，
+**License 字段已不存在**）。以本表为准：
+
+| 实际表单字段 | 值 | 备注 |
+|---|---|---|
+| Project Name* | `IPScanner` | 新增 |
+| Repository URL* | `https://github.com/kooofy/IPScanner` | |
+| Homepage URL* | `https://github.com/kooofy/IPScanner` | 表单说明：官网或仓库页均可 |
+| Download URL | `https://github.com/kooofy/IPScanner/releases` | 🔴 **新要求**：该页须提及项目使用 SignPath Foundation 做代码签名。Releases 页本身没有这句；README「未知发布者」一节有「正在申请」。若审核卡这条，先给下载区补署名句再提交 |
+| Privacy Policy URL | 留空 | 表单：仅当软件收集用户数据时必填；本工具零联网、不收集 |
+| Wikipedia URL (optional) | 留空 | 无条目 |
+| Tagline* | `Open-source LAN scanner and asset inventory for Windows networks` | |
+| Category* | `Developer Tools` | 实际选项比 `projects.yml` 反推的多（新增 `AI Tools`） |
+| Description* | 见下方引文 | |
+| Reputation* | 见下方 §3.1 | |
+| Maintainer Type | `Individual maintainer(s)` | 实际选项：Independent community project / Non-profit / For-profit / Individual maintainer(s) / Other |
+| Build System* | `GitHub Actions` | 实际仅两个选项（GitHub Actions / GitLab CI/CD） |
+| First Name* | `Xiaohua` | 用户 2026-10-14 提供（「lv xiaohua」按西文顺序拆分） |
+| Last Name* | `Lv` | 同上 |
+| Email* | `kooofy@gmail.com` | 用户 2026-10-14 提供 |
+| Company Name | 留空 | 可选 |
+| Primary Discovery Channel* | `Developer platforms (e.g. GitHub)` | 用户授权代选（原话「帮填个合适的」）；如想更正可邮件告知 SignPath，此栏仅影响对方统计 |
+| 复选框 ×3 | CoC 同意 ✓ / 营销通信 ✗ / 个人数据处理 ✓ | 第一、三个必勾 |
+| reCAPTCHA | **Enterprise，v2 图片挑战** | 点提交后弹「Select all squares with crosswalks」，由**用户本人解题**，随后自动提交 |
+
+**2026-10-14 结果**：全部字段填好并回读核验 → 点 Submit → reCAPTCHA 挑战由用户解题 →
+**提交成功**（回执与截图存档，见顶部状态块）。从开页到提交成功整段 7m14s。
 
 **`Tagline` 备选**（一句话、不带句号，会被展示在基金会官网上）：
 
@@ -177,7 +211,7 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 | GitHub Releases 有可免费下载的产物 | 程序硬性要求「发行版可免费下载」 | ✅ 13 个 Release |
 | **`CODE_SIGNING_POLICY.md`（代码签名政策）** | 说明「签什么、谁有权批准签名」 | ✅ 已入库 |
 | **`CODE_OF_CONDUCT.md`（行为准则）** | 证明项目按开源项目方式运营 | ✅ 已入库 |
-| **可收信的联系邮箱** | 审批沟通主要走邮件 | ⚠ **提交时由用户本人填写** |
+| **可收信的联系邮箱** | 审批沟通主要走邮件 | ✅ `kooofy@gmail.com`（2026-10-14 用户提供，已随申请提交） |
 
 其中**代码签名政策是审核重点**：SignPath 的签名是**逐次审批**的，它必须知道在你这个
 项目里**谁有权批准一次签名**。本项目的
@@ -192,15 +226,17 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 
 ## 5. 提交步骤
 
-### 5.1 提交申请（需用户本人操作）
+### 5.1 提交申请（✅ 已完成，2026-10-14）
 
-1. 打开 <https://signpath.org/apply.html>（页面是 JS 渲染的表单；若打不开，
-   从 <https://signpath.org> 首页进）。
-2. 按 §3 的字段表逐项粘贴。**提交前最后确认一遍字段值**，
-   尤其是 `Homepage URL` / `Download page URL` 别填反（见 §3 的告警）。
-3. 联系邮箱填一个**真能收信的地址** —— 审批沟通走邮件，这是全流程唯一
-   需要人工判断的字段。
-4. 提交后把提交日期与审核方回复记到本文档顶部的状态区（保持单一事实来源）。
+实际执行方式：助手经浏览器打开 <https://signpath.org/apply.html>，按 §3.0 字段表
+填完全部字段（含用户提供的姓名 **Xiaohua Lv**、邮箱 `kooofy@gmail.com`、
+代选的发现渠道 Developer platforms (e.g. GitHub)），点 Submit 后
+reCAPTCHA Enterprise 弹出图片挑战 —— **由用户本人解题**，随后自动提交成功。
+HubSpot 回执：「Form submitted — Thank you, we'll be in touch soon.」
+
+（原人工操作步骤保留备查：打开页面 → 按 §3 字段表逐项粘贴，**提交前最后确认
+一遍字段值**，尤其是 Homepage / Download URL 别填反 → 联系邮箱填一个真能收信的
+地址 → 提交。）
 
 ### 5.2 提交之后
 
