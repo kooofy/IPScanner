@@ -14,9 +14,10 @@ from app_logging import get_logger
 
 from . import constants as _C
 from . import throttle
-from .constants import COMMON_PORTS, _SYSTEM_SHARES
+from .constants import _SYSTEM_SHARES
 from .util import _inet_checksum, _local_ip_for_dst, _run_cmd
 from i18n import tr
+from port_services import common_ports
 
 # 端口探测是"高频、单点失败很常见"的场景（绝大多数端口本来就是关的，
 # 超时属正常），因此逐端口失败一律 debug；只有整个子系统不可用才 warning。
@@ -257,7 +258,7 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 0.5,
       用于上层做 RTT 自适应超时（估计网络延迟），不影响返回值。
     """
     if ports is None:
-        ports = COMMON_PORTS
+        ports = common_ports()
     if not ports:
         return []
     if mode == "syn":

@@ -306,6 +306,10 @@ python main.py
 # 扫描网段，输出 JSON
 python cli.py scan -r 192.168.1.0/24 --level quick --format json
 
+# 目标写在文件里（-iL，nmap 习惯）：每行一个 CIDR/IP，# 开头为注释，空行跳过
+# 合法行全部收用；非法行报错并给出行号。与 -r 至少其一，也可同时用
+python cli.py scan -iL targets.txt --level quick
+
 # 只输出在线设备，写入文件
 python cli.py scan -r 10.0.0.1-10.0.0.200 --online-only --format csv -o result.csv
 
@@ -637,6 +641,7 @@ IPScanner/
 ├─ oui_database.py            # MAC OUI 厂商库查询（oui.db）
 ├─ oui_updater.py             # OUI 库在线更新
 ├─ parse_ieee_oui.py          # 解析 IEEE oui.txt，生成 OUI 厂商数据库
+├─ port_services.py          # 端口→服务名映射（表在 port_services.json，数据目录可覆盖）
 ├─ service_fingerprints.py    # 服务版本指纹库（规则在 service_fingerprints.json）
 ├─ excel_handler.py           # Excel 导入 / 导出（模板：设备清单模板.xlsx）
 │
@@ -699,6 +704,7 @@ IPScanner/
 | `notify.json` | 通知渠道与告警策略（维护窗口 / 静音 / 去重） |
 | `alert_dedup.json` | 通知去重状态（上次发送时刻；自动生成，可安全删除） |
 | `service_fingerprints.json` | 服务版本指纹规则（随版本内置，可在数据目录放置同名文件覆盖更新） |
+| `port_services.json` | 端口→服务名映射表（随版本内置，可在数据目录放置同名文件覆盖更新；非法项自动忽略，结构不符整套回退内置） |
 | `notify.json` | 定时扫描的变更告警通知渠道配置（见「定时扫描与变更告警」） |
 | `ipscanner.log` | 运行日志（1 MB × 3 轮转） |
 | `crash.log` | 未捕获异常堆栈 |

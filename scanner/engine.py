@@ -14,7 +14,7 @@ from .banners import (read_greeting, read_mongodb_banner, read_mysql_banner,
                       read_postgresql_banner, read_rdp_banner, read_redis_banner,
                       read_vnc_banner)
 from .classify import infer_device
-from .constants import (COMMON_PORTS, PROTOCOL_PORTS, SVC_HTTP, SVC_HTTPS,
+from .constants import (PROTOCOL_PORTS, SVC_HTTP, SVC_HTTPS,
                         SVC_IMAP, SVC_MONGODB, SVC_MYSQL, SVC_POP3,
                         SVC_POSTGRESQL, SVC_RDP, SVC_REDIS, SVC_SMTP,
                         SVC_SNMP, SVC_TELNET, SVC_VNC, SVC_MDNS, SVC_SMB)
@@ -35,6 +35,7 @@ from .throttle import prepare_targets as _prepare_targets
 from app_logging import get_logger
 from i18n import tr
 from service_fingerprints import fingerprint_banner
+from port_services import common_ports
 
 # 扫描编排层的异常大多是"单台设备/单个环节失败"，不应影响整批扫描，
 # 但必须留痕 —— 否则用户只看到"结果少了几个字段"，无从判断原因。
@@ -53,7 +54,7 @@ def _proto_ports_already_scanned(scan_ports_flag: bool, ports, proto_ports) -> b
     """
     if not scan_ports_flag:
         return False
-    scanned = set(ports or COMMON_PORTS)
+    scanned = set(ports or common_ports())
     return all(p in scanned for p in proto_ports)
 
 

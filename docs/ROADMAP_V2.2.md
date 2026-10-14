@@ -11,7 +11,7 @@
 >
 > | 项    | 值                                                                                                                       |
 > | ---- | ----------------------------------------------------------------------------------------------------------------------- |
-> | 状态   | **草案** · 2026-10-14（**待用户拍板**）                                                                                          |
+> | 状态   | **定稿** · 2026-10-14（四项已定案；**3.1 / 3.2 已落地**，3.3 / 3.4 待排）                                                  |
 > | 基线   | `kooofy/IPScanner` @ `dbe7726`（v2.1.0 已发布）                                                                              |
 > | 来源   | `ROADMAP_V2.1.md` §3/§5、`docs/PRODUCT_ADVISORY.md` §4/§5/§9/§10、`docs/CVE_SNAPSHOT_MODEL.md` §10.3、`TRAPS.md` §「已知未修问题」 |
 > | 事实核验 | 本文所有「现状」栏均经**本次实测**（`grep` / 读源码 / 数行数），非引述                                                                             |
@@ -238,13 +238,13 @@ SignPath 签名流水线**不属于 v2.2**（§1.4：申请是外部等待过程
 
 **验收标准**：
 
-- [ ] `cve_snapshot.py` 仍然**不 import `urllib`/`requests`/`socket`**（现有 AST 测试**不改**即通过）
-- [ ] 新模块的联网入口**只有一条**，且**只能被显式调用**（测试断言"启动路径不触发网络"）
-- [ ] SHA256 不匹配时：**拒绝落盘 + 保留旧数据 + 只 `warning`**（三条断言各一条用例）
-- [ ] 下载失败（模拟超时 / 404 / 连接错误）→ **扫描仍正常完成**，退出码不变
-- [ ] 成功后徽标显示「来源：在线下载」，且 `SOURCE_*` 新态有 zh-CN + en-US 两套译文
-- [ ] 新增 `en-US.json` 键**先查重键**（已有 `状态`→`Status`），**追加成块**、不重排
-- [ ] `tools/build_cve_snapshot.py --check` 仍能自校验（不能被新路径破坏）
+- [x] `cve_snapshot.py` 仍然**不 import `urllib`/`requests`/`socket`**（现有 AST 测试**不改**即通过）
+- [x] 新模块的联网入口**只有一条**，且**只能被显式调用**（测试断言"启动路径不触发网络"）
+- [x] SHA256 不匹配时：**拒绝落盘 + 保留旧数据 + 只 `warning`**（三条断言各一条用例）
+- [x] 下载失败（模拟超时 / 404 / 连接错误）→ **扫描仍正常完成**，退出码不变
+- [x] 成功后徽标显示「来源：在线下载」，且 `SOURCE_*` 新态有 zh-CN + en-US 两套译文
+- [x] 新增 `en-US.json` 键**先查重键**（已有 `状态`→`Status`），**追加成块**、不重排
+- [x] `tools/build_cve_snapshot.py --check` 仍能自校验（不能被新路径破坏）
 
 **风险**：
 
@@ -252,6 +252,41 @@ SignPath 签名流水线**不属于 v2.2**（§1.4：申请是外部等待过程
   必须优雅降级，且提示语要**明确告诉用户"可以手动下载放入数据目录"**（现有路径不能废）。
 - ⚠️ 联网引入**新的失败面**：DNS 失败、证书错误、代理劫持 —— 全部走"只 warning"口径。
 - ⚠️ 徽标多一态 → 徽标文案表（`_CVE_*_TEXT`）与 `test_i18n_lazy.py::_label_tables()` 需同步。
+
+#### 落地记录（3.1）
+
+**交付**（2026-10-14，提交 `2efb8c4`）：
+
+- 新增顶层联网模块 **`cve_updater.py`**（326 行，**不在 `scanner/` 下**，与 `oui_updater.py` 同位）——
+  零网络不变量靠**模块拆分**而非注释保住：
+  - `update_snapshot(url="", *, fetch=None, target_dir=None, timeout=30, require_checksum=True)`：
+    **注入式 transport**（`fetch(url, timeout) -> bytes`），测试全走 fetch 桩，**不碰网**；
+  - 取回后**先验 SHA256**（同目录 `cve_snapshot.sha256` 清单），不匹配即拒绝写入并保留旧数据；
+  - **取不到清单默认拒绝落盘**（`REASON_NO_MANIFEST`）—— "没有清单可验"等价于"没验"，
+    此时拒绝比装一份来路不明的数据更安全；`require_checksum=False` 仅联调用；
+  - 原子落盘 `tempdir → *.tmp → os.replace()`，32 MiB 配额途中拦截（`REASON_TOO_LARGE`）；
+  - 失败只降级为 `REASON_*` 八态（`ok` / `no-url` / `download-failed` / `too-large` /
+    `checksum-failed` / `invalid` / `write-failed` / `no-manifest`），**绝不**升级成扫描失败。
+- 「在线下载」来源**不写进快照 JSON**（会破坏摘要自洽）⇒ `data_dir()` 旁放**不参与校验**的
+  旁路标记文件 `cve_snapshot.online`，原子落盘**最后一步**才写，失败不留假标记。
+- `scanner/cve_snapshot.py`（+44 行）：只新增常量（`SOURCE_ONLINE` / `ONLINE_MARK_FILENAME`）
+  与标记消费，**不 import 任何网络库**（现有 AST import 判据测试**不改**即通过）。
+- GUI：设置菜单「在线更新 CVE 数据快照...」+ `msg_consent` 同意弹窗（**不放 `__init__`**），
+  成功失败都刷新徽标（`cve_status_mixin.py` +95 行，`ui_threads.py` +28 行）。
+- CLI：`cve --update` / `--url` / `--no-checksum`；`--url` 还是 `CHANGE-ME` 占位符时
+  直接返回 `no-url`，**不发任何请求**。
+
+**测试**：新增 `tests/test_cve_updater.py`（**34 例**）+ `tests/test_cli_exposure.py`
+CLI 用例（+70 行）。AST import 判据**反向**断言 `scanner/` 零 import 新模块，
+并钉住三个文件名契约与「下载产出必须被运行期加载器接受」的回读闭环。
+i18n 补 16 键，两张新字面量表（`_CVE_UPDATE_TEXT` / `_CVE_UPDATE_CONSENT`）
+已登记进 `test_i18n_lazy.py::_label_tables()`。全量 **2495 OK**，ruff 全绿，
+CI（run 38495188819）**10/10 全绿**。
+
+**验收对照**：§3.1 七条验收**全过**（见上方勾选）。零网络边界 ✅（AST 不改即过 +
+反向断言）；显式触发 ✅（启动路径不触发网络的测试）；验签三断言 ✅；
+失败降级 ✅（下载失败后扫描照常完成）；徽标两套译文 ✅；JSON 键追加成块 ✅；
+`build_cve_snapshot.py --check` ✅。
 
 ---
 
@@ -283,11 +318,11 @@ SignPath 签名流水线**不属于 v2.2**（§1.4：申请是外部等待过程
 
 **验收标准**：
 
-- [ ] 外部端口映射文件**能真实生效**：放一个改过的文件进 `data_dir()`，重启后新映射被采用
-- [ ] 文件损坏 / 缺失 / 结构不符 → **回退内置**，不抛、不静默变空表（各一条用例）
-- [ ] 新增资源进 **GUI spec `datas`** 且 CI 断言到**具体文件**（不能只断言目录）
-- [ ] `-iL` 在含空行 / 注释 / 非法行的样本上：**合法行全收、非法行报错并说明行号**、超限拒绝
-- [ ] 端口映射外置前后，`exposure` 的候选 CVE 结果**逐条相同**（回归测试）
+- [x] 外部端口映射文件**能真实生效**：放一个改过的文件进 `data_dir()`，重启后新映射被采用
+- [x] 文件损坏 / 缺失 / 结构不符 → **回退内置**，不抛、不静默变空表（各一条用例）
+- [x] 新增资源进 **GUI spec `datas`** 且 CI 断言到**具体文件**（不能只断言目录）
+- [x] `-iL` 在含空行 / 注释 / 非法行的样本上：**合法行全收、非法行报错并说明行号**、超限拒绝
+- [x] 端口映射外置前后，`exposure` 的候选 CVE 结果**逐条相同**（回归测试）
 
 **风险**：
 
@@ -295,6 +330,70 @@ SignPath 签名流水线**不属于 v2.2**（§1.4：申请是外部等待过程
   不认识的就忽略，绝不抛）。要补 fuzz 或至少边界用例。
 - ⚠️ `_PORT_NAME_TEXT` 若被当作**匹配表**用（拿比较），则**不能翻译**；
   若只用于显示，则**必须**走惰性 `tr()`。**改之前先判据：这串拿去比较还是显示？**（`TRAPS.md` §i18n）
+
+#### 落地记录（3.2）
+
+**交付**（2026-10-14，两个子项都已完成，测试全绿）：
+
+**3.2-a 端口映射外置**（与 `service_fingerprints.json` 同构的外置数据）：
+
+- 新增根目录数据文件 **`port_services.json`** + 加载模块 **`port_services.py`**：
+  `data_path()` 三层优先（`data_dir()` → `resource_dir()` → 模块内兜底表），
+  **逐字照抄** `service_fingerprints.data_path()` 的范式；
+  - 数据文件走**兜底不 fail-fast**：单条畸形跳过留痕（`debug`）、整表结构不符
+    **回退整套**、**绝不静默变空表**；
+  - `counts()` 返回各表条数，供测试与诊断。
+- 🔴 **不能 eager import**：`scanner/__init__.py` 顶端改为 PEP 562 `__getattr__`
+  **惰性转发**（`COMMON_PORTS` / `PORT_NAMES` → `scanner.constants` 的 `_LAZY_ALIASES`
+  同名别名 → 再惰性调 `common_ports()` / `port_names()`）。若在包 import 期
+  `from .constants import COMMON_PORTS`，外置表会被读一次并**冻结成快照** ——
+  之后 `reload()` 也看不到，必须重启进程，**违背「重启后新映射被采用」的验收口径**。
+- 调用点换 loader（两处，都改调 `port_services.common_ports()`）：
+  `scanner/engine.py`（`_proto_ports_already_scanned`）、
+  `scanner/ports.py`（`scan_ports()` 默认端口表）—— 外置表生效后
+  **同一调用点跟着变**（测试钉住）。
+
+**3.2-b CLI `-iL` 目标文件**（nmap 习惯）：
+
+- `cli.py` 新增 `_read_target_file()` / `_merge_targets()`：
+  - 每行一个 CIDR/IP；**空行与 `#` 注释跳过**；`utf-8-sig` 读入**兼容 BOM**；
+  - 逐行校验复用引擎的 `count_ip_range()` —— 与 `-r` **同一套口径**，无双标；
+  - **行号级报错**：非法行 / 单行超 65536 上限都带**行号与原文**，汇总后一次报出；
+  - `os.path.isdir()` 前置判断（Windows 上 `open(目录)` 抛 `PermissionError`
+    而不是 `IsADirectoryError`）；
+  - `-r` 与 `-iL` **至少其一、可并用**（argparse 的 `required=True` 表达不了
+    「二选一」，故 `-r` 去掉 `required`、改运行期 `_merge_targets()` 拦截）；
+    文件目标汇入 `args.ranges` 后，由既有 `_run_scan` 限额循环统一把关
+    （总量上限 / IPv6 专属报错原样复用）。
+- `scan` 与 `diff` 两个子命令都加 `-iL/--target-file`。
+
+**🔴 偏离记账（与「做法」原文不同的一处，有意为之）**：
+
+- 路线图「做法」第 3 条写 `-iL` 需过 **`validate_target()`**。**实际未采用**：
+  该函数在 `network_tool_mixin.py` 里，**import PyQt5**（CLI 零 GUI 约束不容破）；
+  且它校验的是**主机名**，而扫描目标是 **IP 范围**，口径本来就不对。
+  改用 `count_ip_range()`（与 `-r` 同源）—— 这是**修正原文**，不是降低标准。
+
+**测试**（`tests/test_port_services.py` **24 例** + `tests/test_cli.py` **+11 = 128 例**）：
+
+- 外部生效**双级**验证：进程内注入 + **子进程重启级**（patch
+  `app_paths._data_dir_cache` 后断言 `port_services._cache is None` 且外置表被采用）——
+  直接对应验收「重启后新映射被采用」；
+- 回退**五类**各至少一条：缺失 / 损坏 / 顶层非对象 / `{}` / 类型错
+  （一张表坏**不牵连**另一张，各自独立回退）；
+- 边界不变式：`exposure` **完整管线**注入快照前后 **hits 逐条相同**
+  + `cpe_for_product` 一致（端口表外置**不漂移**暴露面口径）；
+- 打包：两个 spec 的 `datas` 都断言到**具体文件**（`('port_services.json', '.')`）；
+- `-iL`：空行 / 注释 / BOM / 非法行行号 / IPv6 行号 / 超限行号 / 文件不存在 /
+  是目录 / 只有注释 / `-r`+`-iL` 合并 / **端到端子进程**（真扫 `127.0.0.1/32`
+  出 JSON）；
+- CI 覆盖率闸门新增 `--include="./port_services.py" --fail-under=95`，
+  **实测 99%**（110 stmts，缺 1 行 = `_load()` 双重检查锁第二条 return）。
+
+**验收对照**：§3.2 五条验收**全过**（见上方勾选）。全量 **2530 OK**
+（2518 + 1 条 exposure 全管线回归 + 11 条 CLI），ruff 全绿。
+新 i18n 键 **0** —— `cli.py` 消息按本文件整体惯例**不翻译**（与既有 20 处
+`log(f"错误…")` 一致）。
 
 ---
 

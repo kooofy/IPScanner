@@ -20,6 +20,7 @@
 用法示例
 --------
     python cli.py scan -r 192.168.1.0/24 --level quick
+    python cli.py scan -iL targets.txt --level quick
     python cli.py scan -r 10.0.0.0/24 --protocols HTTP,HTTPS,SNMP --format json -o out.json
     python cli.py scan -r 192.168.1.0/24 --save-snapshot --note "周一巡检"
     python cli.py diff -r 192.168.1.0/24 --fail-on-change
@@ -358,6 +359,91 @@ def _resolve_ports(args):
     return list(get_ports_for_level(getattr(args, "level", "quick")))
 
 
+def _read_target_file(path):
+    """从文件读扫描目标（``-iL``，nmap 习惯）：每行一个 CIDR/IP。
+
+    跳过空行与 ``#`` 开头的注释行。返回 ``(targets, error)``：
+    * 文件不存在 / 是目录 / 读不了 / 不是 UTF-8 → 带路径的错误；
+    * 某一行不是合法 IPv4 范围 → 错误里**逐行列出行号与原文**
+      （IPv6 单独说明，因为那类用户真正的问题是"本工具只扫 IPv4"）；
+    * 单行超过 65536 上限 → 同样带行号（总量上限由 ``_run_scan`` 统一把关）；
+    * 整个文件没有任何有效目标 → 明说，绝不返回空列表让上层静默扫 0 个。
+
+    逐行校验复用引擎的 ``count_ip_range()`` —— 与 ``-r`` 的值同一套口径，
+    不存在"命令行能过、文件里不能过"的双标。
+    """
+    from scanner.range import (MAX_IPS_PER_RANGE, count_ip_range,
+                               is_ipv6_range)
+
+    if not path:
+        return [], "-iL/--target-file 需要文件路径"
+    # 先判目录：Windows 上 open(目录) 抛的是 PermissionError 而不是
+    # IsADirectoryError，光靠 except 分支在两边对不上。
+    if os.path.isdir(path):
+        return [], f"目标文件是目录：{path}"
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return [], f"目标文件不存在：{path}"
+    except UnicodeDecodeError:
+        return [], f"目标文件不是 UTF-8 文本：{path}"
+    except OSError as e:
+        return [], f"目标文件读不了（{path}）：{e}"
+
+    def _short(text: str) -> str:
+        return text if len(text) <= 60 else text[:57] + "..."
+
+    targets = []
+    bad = []
+    for lineno, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        n = count_ip_range(line)
+        if n <= 0:
+            if is_ipv6_range(line):
+                bad.append(f"第 {lineno} 行「{_short(line)}」是 IPv6 范围，"
+                           f"本工具目前只支持 IPv4 扫描")
+            else:
+                bad.append(f"第 {lineno} 行「{_short(line)}」不是合法的 IP 范围")
+            continue
+        if n > MAX_IPS_PER_RANGE:
+            bad.append(f"第 {lineno} 行「{_short(line)}」包含 {n} 个地址，"
+                       f"超过单次上限 {MAX_IPS_PER_RANGE} 个")
+            continue
+        targets.append(line)
+    if bad:
+        return [], ("目标文件有以下行无法使用：\n  "
+                    + "\n  ".join(bad) + f"\n（文件：{path}）")
+    if not targets:
+        return [], (f"目标文件里没有有效目标（{path}）—— "
+                    f"空行与 # 开头的注释行都会被跳过")
+    return targets, ""
+
+
+def _merge_targets(args):
+    """合并 ``-r`` 与 ``-iL`` 两个来源的目标，返回 ``(ranges, error)``。
+
+    v2.2 §3.2：两者**至少其一**（也可并用，``-r`` 在前、文件行在后）。
+    文件目标的逐行校验（含行号）在 ``_read_target_file`` 完成；
+    合并后的总量上限由 ``_run_scan`` 的既有循环统一把关 —— 同一套限额，
+   不管目标从哪个渠道来。
+    """
+    ranges = [r for r in (getattr(args, "ranges", None) or [])
+              if r and str(r).strip()]
+    target_file = getattr(args, "target_file", None)
+    if target_file:
+        file_targets, error = _read_target_file(target_file)
+        if error:
+            return [], error
+        ranges.extend(file_targets)
+    if not ranges:
+        return [], ("请用 -r/--range 指定扫描范围，或用 -iL/--target-file "
+                    "从文件读取目标（两者至少其一，也可并用）")
+    return ranges, ""
+
+
 def _resolve_protocols(args):
     raw = getattr(args, "protocols", "") or ""
     return [p.strip().upper() for p in raw.split(",") if p.strip()] or None
@@ -451,6 +537,15 @@ def _run_scan(args):
     from scanner import NetworkScanner
     from scanner.range import (count_ip_range, is_ipv6_range,
                                MAX_IPS_PER_RANGE, MAX_IPS_TOTAL)
+
+    # 目标来源合并（v2.2 §3.2）：-r 与 -iL 至少其一。放在最前面 ——
+    # 文件读失败要**在**其它参数解析 / 扫描构建之前就给出带行号的错误，
+    # 而不是等用户看到"无法解析 IP 范围"再去猜是哪来的。
+    ranges, range_error = _merge_targets(args)
+    if range_error:
+        log(f"错误: {range_error}")
+        return None, None
+    args.ranges = ranges
 
     try:
         ports = _resolve_ports(args)
@@ -938,8 +1033,9 @@ def cmd_diff(args) -> int:
         label = f"快照 #{from_id} → #{to_id}"
     else:
         # ── 模式 B：扫描当前网络并与快照对比 ──
-        if not args.ranges:
-            log("错误: 需要 -r/--range（或改用 --from/--to 比较两个快照）")
+        if not (args.ranges or getattr(args, "target_file", None)):
+            log("错误: 需要 -r/--range 或 -iL/--target-file"
+                "（或改用 --from/--to 比较两个快照）")
             return EXIT_ERROR
         results, _scanner = _run_scan(args)
         if results is None:
@@ -2440,9 +2536,13 @@ def build_parser() -> argparse.ArgumentParser:
     # ── scan ──
     sp = sub.add_parser("scan", help="扫描网段并输出结果", parents=[common],
                         description="扫描一个或多个 IP 范围，输出设备清单。")
-    sp.add_argument("-r", "--range", action="append", required=True,
+    sp.add_argument("-r", "--range", action="append",
                     dest="ranges", metavar="范围",
-                    help="IP 范围，可重复。支持 192.168.1.0/24、192.168.1.1-254、单个 IP")
+                    help="IP 范围，可重复。支持 192.168.1.0/24、192.168.1.1-254、单个 IP"
+                         "（与 -iL 至少其一，可并用）")
+    sp.add_argument("-iL", "--target-file", metavar="文件",
+                    help="从文件读扫描目标（nmap 习惯）：每行一个 CIDR/IP，"
+                         "空行与 # 开头的注释行跳过（与 -r 至少其一，可并用）")
     sp.add_argument("--level", choices=("quick", "standard", "all"), default="quick",
                     help="端口扫描级别（默认 quick=常用 21 个端口）")
     sp.add_argument("--ports", metavar="列表",
@@ -2506,6 +2606,8 @@ def build_parser() -> argparse.ArgumentParser:
                         description="扫描当前网络并与历史快照对比，或直接对比两个快照。")
     dp.add_argument("-r", "--range", action="append", dest="ranges", metavar="范围",
                     help="IP 范围，可重复（与 --from/--to 二选一）")
+    dp.add_argument("-iL", "--target-file", metavar="文件",
+                    help="从文件读扫描目标（每行一个 CIDR/IP；与 -r 至少其一）")
     dp.add_argument("--against", type=int, metavar="ID",
                     help="对比的基线快照 ID（默认最近一次快照）")
     dp.add_argument("--from", dest="from_id", type=int, metavar="ID",

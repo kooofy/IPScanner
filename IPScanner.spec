@@ -49,6 +49,7 @@ a = Analysis(
     binaries=[],
     datas=[('assets', 'assets'), ('oui.db', '.'), ('i18n', 'i18n'),
            ('service_fingerprints.json', '.'),
+           ('port_services.json', '.'),
            ('cve_snapshot.json', '.')],
     hiddenimports=['scanner', 'PyQt5.QtXml', 'PyQt5.QtPrintSupport'],
     hookspath=[],

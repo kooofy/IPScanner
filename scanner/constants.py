@@ -6,6 +6,15 @@ import re
 import threading
 from i18n import tr
 
+# v2.2 §3.2：常用端口表（quick 级）与端口显示名已外置为顶层
+# port_services.json（由顶层模块 port_services 三层加载：data_dir() →
+# resource_dir() → 模块内兜底，与 service_fingerprints 同范式）。
+# 这里只取加载函数；字面量默认值搬去了 port_services 的内置兜底表。
+# 加载是惰性的 —— import 期不读盘、不调 tr()。
+from port_services import common_ports as _common_ports
+from port_services import port_names as _port_names
+from port_services import raw_port_name as _raw_port_name
+
 """
 扫描引擎常量：端口映射、扫描级别、OUI 分类提示等。
 """
@@ -30,8 +39,8 @@ if _IS_WINDOWS:
             _CMD_ENCODING = "gbk"
 
 
-COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445,
-                993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 8080, 8443]
+# 常用端口（quick 级）已外置到 port_services.json（见文件顶部导入说明）。
+# 这个名字经文件末尾的 _LAZY_ALIASES 惰性保留，语义 = common_ports()。
 
 
 # ── 扫描级别：端口范围（对齐 nmap 的 -F / 默认 / -p- 精神） ──
@@ -133,8 +142,8 @@ def get_ports_for_level(level: str):
         return list(range(1, 1024))
     if level == "all":
         return list(range(1, 65536))
-    # quick 与未识别：当前高频服务端口
-    return COMMON_PORTS
+    # quick 与未识别：当前高频服务端口（外置表，用户可在 data_dir() 覆盖）
+    return _common_ports()
 
 
 
@@ -162,21 +171,14 @@ def format_ports_display(ports, top_n: int = PORT_DISPLAY_TOP_N):
 UDP_PORTS = [53, 67, 69, 123, 137, 138, 161, 500, 514, 1900, 5353]
 
 
-# 端口名显示表：值同样是惰性翻译的原文（见 port_name）
-_PORT_NAME_TEXT = {
-    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
-    67: "DHCP", 69: "TFTP", 80: "HTTP", 110: "POP3", 123: "NTP",
-    135: "RPC", 137: "NetBIOS-NS", 138: "NetBIOS-DGM", 139: "NetBIOS",
-    143: "IMAP", 161: "SNMP", 443: "HTTPS", 445: "SMB", 500: "IKE",
-    514: "Syslog", 993: "IMAPS", 995: "POP3S", 1433: "MSSQL", 1521: "Oracle",
-    1900: "SSDP", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
-    5353: "mDNS", 5900: "VNC", 8080: "HTTP-Alt", 8443: "HTTPS-Alt",
-}
+# 端口名显示表已外置到 port_services.json（见文件顶部导入说明）。
+# values 是显示文本原文，只在显示时过 tr()（见 port_name）——
+# 它们绝不参与比较（比较用端口号本身或 SVC_* 规范代码）。
 
 
 def port_name(port) -> str:
     """端口号 -> 服务名（惰性翻译）。未知端口返回空串。"""
-    text = _PORT_NAME_TEXT.get(port)
+    text = _raw_port_name(port)
     return tr(text) if text else ""
 
 
@@ -477,7 +479,10 @@ _IOT_VENDOR_KEYWORDS = (
 # 新代码请优先用 scan_level_label() / port_name()。
 _LAZY_ALIASES = {
     "SCAN_LEVEL_LABELS": lambda: {lv: scan_level_label(lv) for lv in SCAN_LEVELS},
-    "PORT_NAMES": lambda: {p: port_name(p) for p in _PORT_NAME_TEXT},
+    # v2.2 §3.2：COMMON_PORTS 从模块字面量改为惰性别名（外置表加载函数），
+    # 旧调用点 `from scanner.constants import COMMON_PORTS` 语义不变。
+    "COMMON_PORTS": _common_ports,
+    "PORT_NAMES": lambda: {p: port_name(p) for p in _port_names()},
     "_PHONE_BRAND_DISPLAY": phone_brand_display,
 }
 

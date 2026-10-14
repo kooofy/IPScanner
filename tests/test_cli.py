@@ -571,13 +571,126 @@ class EmitTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), "hello\n")
 
 
+class TargetFileTest(unittest.TestCase):
+    """`-iL/--target-file`（v2.2 §3.2）：每行一个 CIDR/IP，行号级报错。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, text, name="targets.txt"):
+        path = os.path.join(self.dir, name)
+        with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return path
+
+    def test_parser_has_iL_option(self):
+        args = cli.build_parser().parse_args(["scan", "-iL", "x.txt"])
+        self.assertEqual(args.target_file, "x.txt")
+        self.assertIsNone(args.ranges)
+
+    def test_reads_targets_skips_blanks_and_comments(self):
+        path = self._write("\n".join([
+            "# 办公网",
+            "192.168.1.0/30",
+            "",
+            "   ",
+            "  # 缩进注释也算注释行",
+            "10.0.0.5-10.0.0.9",
+            "172.16.0.1",
+        ]))
+        targets, err = cli._read_target_file(path)
+        self.assertEqual(err, "")
+        self.assertEqual(targets,
+                         ["192.168.1.0/30", "10.0.0.5-10.0.0.9", "172.16.0.1"])
+
+    def test_bom_is_tolerated(self):
+        path = self._write("192.168.1.0/30\n")
+        with io.open(path, "rb") as fh:
+            data = b"\xef\xbb\xbf" + fh.read()
+        with io.open(path, "wb") as fh:
+            fh.write(data)
+        targets, err = cli._read_target_file(path)
+        self.assertEqual(err, "")
+        self.assertEqual(targets, ["192.168.1.0/30"])
+
+    def test_invalid_line_reports_line_number(self):
+        path = self._write("192.168.1.0/30\n\nnot-a-range\n10.0.0.0/24\n")
+        targets, err = cli._read_target_file(path)
+        self.assertEqual(targets, [])
+        self.assertIn("第 3 行", err)
+        self.assertIn("not-a-range", err)
+
+    def test_ipv6_line_says_so_with_line_number(self):
+        path = self._write("192.168.1.0/30\n2001:db8::/32\n")
+        _targets, err = cli._read_target_file(path)
+        self.assertIn("第 2 行", err)
+        self.assertIn("IPv6", err)
+
+    def test_over_limit_line_rejected_with_line_number(self):
+        path = self._write("192.168.1.0/30\n10.0.0.0/8\n")
+        targets, err = cli._read_target_file(path)
+        self.assertEqual(targets, [])
+        self.assertIn("第 2 行", err)
+        self.assertIn("65536", err)
+
+    def test_missing_file(self):
+        targets, err = cli._read_target_file(os.path.join(self.dir, "nope.txt"))
+        self.assertEqual(targets, [])
+        self.assertIn("不存在", err)
+
+    def test_directory_is_an_error(self):
+        targets, err = cli._read_target_file(self.dir)
+        self.assertEqual(targets, [])
+        self.assertIn("目录", err)
+
+    def test_only_comments_is_an_error(self):
+        path = self._write("# 只有注释\n\n# 还是没有目标\n")
+        targets, err = cli._read_target_file(path)
+        self.assertEqual(targets, [])
+        self.assertIn("没有有效目标", err)
+
+    def test_merge_r_and_iL(self):
+        path = self._write("192.168.1.0/30\n")
+        args = cli.build_parser().parse_args(
+            ["scan", "-r", "10.0.0.0/30", "-iL", path])
+        ranges, err = cli._merge_targets(args)
+        self.assertEqual(err, "")
+        self.assertEqual(ranges, ["10.0.0.0/30", "192.168.1.0/30"])
+
+    def test_end_to_end_scan_from_file(self):
+        """端到端：文件里的 127.0.0.1/32 真的进了扫描器（与既有 -r 冒烟同口径）。"""
+        path = self._write("# 本机回环\n127.0.0.1/32\n")
+        proc = subprocess.run(
+            [sys.executable, "cli.py", "scan", "-iL", path,
+             "--no-ports", "--no-mdns", "--format", "json"],
+            cwd=ROOT, capture_output=True)
+        self.assertEqual(proc.returncode, 0,
+                         msg=proc.stderr.decode("utf-8", "replace"))
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(payload["device_count"], 1)
+
+
 class ParserTest(unittest.TestCase):
 
-    def test_scan_requires_range(self):
+    def test_scan_requires_a_target_source(self):
+        """v2.2 §3.2：-r 与 -iL 至少其一，但**解析期不再强制**（ argparse 表达
+        不了"至少其一"又不许并用）。改成运行期给可读错误，意图不变：
+        没给目标就必须失败，且说清该给什么。"""
         p = cli.build_parser()
-        with self.assertRaises(SystemExit):
-            with contextlib.redirect_stderr(io.StringIO()):
-                p.parse_args(["scan"])
+        args = p.parse_args(["scan"])   # 能解析：不在这里炸
+        self.assertIsNone(args.ranges)
+        self.assertIsNone(args.target_file)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            results, _scanner = cli._run_scan(args)
+        self.assertIsNone(results)
+        msg = err.getvalue()
+        self.assertIn("-r/--range", msg)
+        self.assertIn("-iL/--target-file", msg)
 
     def test_command_required(self):
         p = cli.build_parser()

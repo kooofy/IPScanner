@@ -312,6 +312,11 @@ jobs:
         #                          `except ValueError`：正则已经保证匹配到的是
         #                          数字串，那两行**不可达**。下界 85% 把这个差额
         #                          与「将来换掉那个正则」的风险一起明账。）
+        #   port_services.py    95%（v2.2 §3.2 新增；2026-10-14 实测 99% ——
+        #                          缺的 1 行是 `_load()` 双重检查锁里的第二条
+        #                          `return _cache`，只在**多线程并发首载**
+        #                          竞争时可达，单线程测试到不了。下界 95%
+        #                          把这个差额明账。）
         # 🔴 `credentials.py` 的 include 必须写 `./credentials.py`（带 `./`）：
         #    coverage 的 --include 是**后缀匹配**，裸 `credentials.py` 会同时
         #    命中 `ui_dialogs/credentials.py`，于是 --fail-under 作用在**两文件
@@ -320,6 +325,7 @@ jobs:
         #    在全仓库唯一，无此问题。
         #    ⚠ `scanner/ndp.py` 同理写 `./scanner/ndp.py`：仓库里另有
         #    `scanner/passive.py`，虽然当前不重名，但写全路径能防未来撞名。
+        #    ⚠ `port_services.py` 同理写 `./port_services.py` 防未来撞名。
         run: |
           python -m coverage report --include="history_store.py" --fail-under=95
           python -m coverage report --include="db_util.py" --fail-under=90
@@ -331,6 +337,7 @@ jobs:
           python -m coverage report --include="./scanner/cve_snapshot.py" --fail-under=90
           python -m coverage report --include="./scanner/exposure.py" --fail-under=85
           python -m coverage report --include="./scanner/wifi.py" --fail-under=85
+          python -m coverage report --include="./port_services.py" --fail-under=95
 
   quality-types:
     name: 类型门禁（pyright）
