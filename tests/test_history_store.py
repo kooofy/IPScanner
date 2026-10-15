@@ -534,7 +534,10 @@ class SchemaMigrationTest(unittest.TestCase):
     """
 
     _TABLES = ("snapshots", "devices", "switch_map", "port_map",
-               "security_findings", "assets")
+               "security_findings", "assets",
+               # v2.3 §3.1 趋势观测层 —— 🔴 这两张**没有外键、不参与 prune()**，
+               # 是趋势能跨过"20 份快照上限"存活的唯一原因（ROADMAP_V2.3 §4）。
+               "trend_observations", "asset_events")
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -1416,10 +1419,16 @@ class FingerprintIdentityTest(unittest.TestCase):
         # 回填也带上了 fingerprint 字段（可能为空 —— 老 devices 只有 hostname）
         self.assertIn("fingerprint", rows[0])
 
-    def test_schema_version_is_five(self):
-        self.assertEqual(history_store.SCHEMA_VERSION, 5)
-        self.assertEqual([v for v, _s, _d in history_store.MIGRATIONS],
-                         [1, 2, 3, 4, 5])
+    def test_fingerprint_migration_is_version_five(self):
+        """指纹（v2.0 §2.1）落在第 5 版 —— 后续新增迁移**不**改变这一点。
+
+        ⚠️ 别在这里断言 `SCHEMA_VERSION == 5`：那是"迁移链最后一版"，
+        v2.3 §3.1 加了 v6 之后就不再是 5 了。当前版本的断言在
+        `tests/test_trend.py::MigrationTest.test_schema_version_is_six`。
+        """
+        versions = [v for v, _s, _d in history_store.MIGRATIONS]
+        self.assertEqual(versions[:5], [1, 2, 3, 4, 5])
+        self.assertIn(5, versions)
 
     def test_every_migration_has_a_legacy_marker(self):
         """每版迁移都要有「能推断出它」的表或列标记（见 db_util 推断规则）。"""

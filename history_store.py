@@ -23,6 +23,7 @@ from app_logging import get_logger
 
 import db_util
 import device_fingerprint
+import trend_store
 
 _log = get_logger(__name__)
 
@@ -216,12 +217,55 @@ _SQL_V5 = """
         ALTER TABLE devices ADD COLUMN fingerprint TEXT DEFAULT '';
 """
 
+# ── v6：趋势观测层（v2.3 §3.1）─────────────────────────────────────────
+#
+# 为什么必须**独立两张表**、而不是给 `devices` 加列或加索引：
+#   `prune(max_keep=20)` 只留最近 20 份快照，`devices` 靠 `ON DELETE CASCADE`
+#   跟着被删 ⇒ 拿 `devices` 画曲线，曲线会**随时间自己变短**。
+#   （`watch` 子命令的 --help 原文就写着「快照上限 20 条，持续轮询会把历史冲掉」，
+#    所以它默认不敢写快照 —— 项目早就撞过这面墙。）
+#
+# 🔴 因此这两张表**没有任何 `snapshot_id` 外键**、**不参与 `prune()`**，
+#    由 `prune_trend()` 单独按天数保留（默认 365 天）。
+#    ⚠️ 谁要是给它们加了 `REFERENCES snapshots(id) ON DELETE CASCADE`，
+#       趋势就又会被 20 条上限冲掉 —— 加之前先读 `docs/ROADMAP_V2.3.md` §4。
+#
+# 行大小：一次扫描一行，几十字节 ⇒ 一年 365 行仅几十 KB。
+_SQL_V6 = """
+        CREATE TABLE IF NOT EXISTS trend_observations (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            time          REAL NOT NULL,
+            total         INTEGER NOT NULL DEFAULT 0,
+            online        INTEGER NOT NULL DEFAULT 0,
+            offline       INTEGER NOT NULL DEFAULT 0,
+            ranges_json   TEXT DEFAULT '',
+            ports_scanned INTEGER,
+            duration_s    REAL,
+            source        TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_trend_time ON trend_observations(time);
+
+        -- 事件流：**只在变化时写行**（连续两轮结果相同则不新增），
+        -- 所以"每轮全量写 devices"的膨胀问题在这里不存在。
+        -- `event_type` 是 `trend_store.EVENT_*` 的英文规范值，🔴 语言无关。
+        CREATE TABLE IF NOT EXISTS asset_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           REAL NOT NULL,
+            identity_key TEXT NOT NULL DEFAULT '',
+            event_type   TEXT NOT NULL,
+            detail_json  TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_ae_ts ON asset_events(ts);
+        CREATE INDEX IF NOT EXISTS idx_ae_key_type ON asset_events(identity_key, event_type);
+"""
+
 MIGRATIONS = [
     (1, _SQL_V1, "snapshots / devices + 三个索引"),
     (2, _SQL_V2, "switch_map / port_map + 三个索引"),
     (3, _SQL_V3, "security_findings + 两个索引"),
     (4, _SQL_V4, "assets + devices.identity_key（资产表）"),
     (5, _SQL_V5, "assets/devices.fingerprint（指纹降级身份）"),
+    (6, _SQL_V6, "trend_observations / asset_events（趋势观测层）"),
 ]
 
 #: 本程序支持的 schema 版本（= 迁移链最后一版）。
@@ -240,6 +284,9 @@ _LEGACY_TABLES = (
     ("security_findings", 3),
     ("assets", 4),
     ("assets", "fingerprint", 5),
+    # v6 是**建表**（不是只加列），用表名标记就够 —— 与 `_SQL_V5` 必须用列
+    # 标记是两种情形，别照抄（见 `db_util.infer_legacy_version`）。
+    ("trend_observations", 6),
 )
 
 
@@ -589,7 +636,8 @@ def _conn(db_path=None):
         yield c
 
 
-def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int:
+def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None,
+                  trend=None) -> int:
     """保存一条快照（devices 为设备字典列表）。返回新快照 id。
 
     devices 中每个字典可用字段：ip/status/mac/hostname/vendor/
@@ -599,6 +647,11 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
     `(规范代码, 规范值)` 对（见 `tls_cert_facts()`）。走这里而不是另开一个
     `save_*()`，是为了让 GUI 与 CLI 的**所有**落库路径自动带上它 ——
     单独一个函数迟早会有人忘记调。
+
+    `trend`（可选 dict）是**趋势观测层**的补充元数据（v2.3 §3.1），
+    键为 `ranges` / `ports_scanned` / `duration_s` / `source`。
+    🔴 **不传也会写一行趋势** —— `total` / `online` / `offline` 从 `devices`
+    直接算得出，不需要调用方帮忙。趋势是增强，写入失败只记 `warning`。
     """
     ts = time.time() if ts is None else ts
     with _conn(db_path) as conn:
@@ -616,6 +669,9 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
             raise RuntimeError("快照 INSERT 未返回 rowid，拒绝继续写入 devices")
         sec_rows = []
         asset_rows = []
+        # (identity_key, 设备字典) —— 趋势观测层要用：total/online 从这里数，
+        # 事件也从这里与旧状态比。即使 `key` 为空也收（总数要按设备台数算）。
+        pairs = []
         # 本次事务内**尚未落库**的指纹 → 键。资产写入在上面被攒成一批、循环结束
         # 才 UPSERT，所以同一份快照里后出现的行读 DB 看不到前一行；靠这个字典
         # 让「同一次扫描里同一台设备的两个随机 MAC」也收敛成一台。
@@ -654,9 +710,23 @@ def save_snapshot(devices, ts=None, note=None, max_keep=20, db_path=None) -> int
                     d.get("location", ""), d.get("user", ""), d.get("remark", ""),
                     ts, ts,
                 ))
+            pairs.append((key, d))
             ip = d.get("ip", "")
             for kind, value in (d.get("security_findings") or ()):
                 sec_rows.append((sid, ip, kind, value))
+        # ── 趋势观测层（v2.3 §3.1）──
+        # 🔴 必须在 assets UPSERT **之前**调：事件是「本次观测 vs 旧状态」的差，
+        #    UPSERT 之后 `status` 已被本次覆盖，再比就永远比不出翻转。
+        # 🔴 trend_observations / asset_events **没有外键**、不参与 `prune()` ——
+        #    它们是趋势能跨过"20 份快照上限"存活的唯一原因，见 ROADMAP_V2.3 §4。
+        try:
+            n_events = _record_trend(conn, ts, pairs, trend)
+            if n_events:
+                _log.debug("趋势观测：1 行观测 + %d 条事件", n_events)
+        except Exception as e:  # noqa: BLE001
+            # 丢的是趋势数据 ⇒ warning（不是 pass）。趋势是增强，不是前提：
+            # 这里吃掉异常是为了不让"记不住趋势"变成"扫描失败"。
+            _log.warning("趋势观测写入失败（历史与资产不受影响）：%s", e)
         if asset_rows:
             # 同一份快照里出现重复身份键（例如同 MAC 两行）时，UPSERT 的
             # seen_count 会各记一次 —— 与"这台设备在这次扫描里被看到几次"一致。
@@ -1252,6 +1322,178 @@ def prune(max_keep=20, db_path=None):
                 (excess,),
             )
             conn.commit()
+
+
+def _load_asset_states(conn, keys):
+    """分批读 `assets` 的旧状态 —— 事件是「本次观测 vs 旧状态」的差。
+
+    SQLite 的 SQL 变量数有上限（默认 999），所以按 500 切片。
+    ⚠️ **必须在 assets UPSERT 之前读**：UPSERT 之后 `status` 已被本次覆盖，
+    再读就永远比不出翻转了。
+    """
+    states = {}
+    wanted = [k for k in keys if k]
+    if not wanted:
+        return states
+    for i in range(0, len(wanted), 500):
+        chunk = wanted[i:i + 500]
+        ph = ",".join("?" * len(chunk))
+        for r in conn.execute(
+                "SELECT identity_key, status, open_ports FROM assets "
+                "WHERE identity_key IN (%s)" % ph, chunk).fetchall():
+            states[r["identity_key"]] = r
+    return states
+
+
+def _port_set(text) -> set:
+    """`open_ports` 文本 → 端口集合。空 / 非法一律当空集（不抛）。"""
+    if not text:
+        return set()
+    out = set()
+    for piece in str(text).replace(";", ",").split(","):
+        piece = piece.strip()
+        if piece.isdigit():
+            out.add(int(piece))
+    return out
+
+
+def _build_asset_events(pairs, states):
+    """算出事件行 `[(identity_key, event_type, detail_json), ...]`。
+
+    🔴 **只在变化时产生行**：连续两轮扫描结果完全相同 ⇒ 一行都不写。
+    这条是防止事件表膨胀的关键（否则每轮 × 每台设备都在写）。
+
+    🔴 `detail_json` 里的键与值一律**语言无关**（`from`/`to` 用
+    `online`/`offline` 规范值），与 v2.2 §3.3 `SUM_SCHEMA_KEYS` 同一口径 ——
+    拿 `tr()` 结果落库，结论会随界面语言漂移。
+    """
+    events = []
+    for key, d in pairs:
+        if not key:
+            continue
+        old = states.get(key)
+        if old is None:
+            events.append((key, trend_store.EVENT_FIRST_SEEN, json.dumps(
+                {"ip": d.get("ip", ""), "mac": d.get("mac", "")},
+                ensure_ascii=False, sort_keys=True)))
+            continue
+        old_status = (old["status"] or "").strip()
+        new_status = (d.get("status", "") or "").strip()
+        # 只在 online ↔ offline 之间算翻转：`scanning` 这类中间态不参与，
+        # 否则一次未完成的扫描会被记成一次掉线。
+        if old_status != new_status and {old_status, new_status} == {"online", "offline"}:
+            events.append((key, trend_store.EVENT_STATUS_FLIP, json.dumps(
+                {"from": old_status, "to": new_status}, sort_keys=True)))
+        # 🔴 只比对**实际开放**的端口 —— `all` 档有 65535 个端口，
+        #    逐端口落库会胀爆（v2.2 §3.3 的教训）。这里两侧都是"开着的端口"，
+        #    差集天然很小。
+        old_ports = _port_set(old["open_ports"])
+        new_ports = _port_set(d.get("open_ports"))
+        opened = sorted(new_ports - old_ports)
+        closed = sorted(old_ports - new_ports)
+        if opened:
+            events.append((key, trend_store.EVENT_PORT_OPEN,
+                           json.dumps({"ports": opened})))
+        if closed:
+            events.append((key, trend_store.EVENT_PORT_CLOSE,
+                           json.dumps({"ports": closed})))
+    return events
+
+
+def _record_trend(conn, ts, pairs, meta):
+    """写一行 `trend_observations` + 若干 `asset_events`。
+
+    🔴 只在 `save_snapshot()` 的事务内调用，且**被 try/except 包着**：
+    趋势是增强，不是前提 —— 写入失败**绝不**升级成扫描失败
+    （与 v2.2 三项的失败口径同一条）。
+
+    返回写入的事件条数（便于日志与测试）。
+    """
+    meta = meta or {}
+    total = len(pairs)
+    online = sum(1 for _, d in pairs
+                 if (d.get("status") or "").strip() == "online")
+    conn.execute(
+        "INSERT INTO trend_observations "
+        "(time, total, online, offline, ranges_json, ports_scanned, "
+        " duration_s, source) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            ts, total, online, total - online,
+            json.dumps(meta.get("ranges") or [], ensure_ascii=False, sort_keys=True),
+            meta.get("ports_scanned"),
+            meta.get("duration_s"),
+            meta.get("source") or "",
+        ),
+    )
+    events = _build_asset_events(pairs, _load_asset_states(conn, [k for k, _ in pairs]))
+    if events:
+        conn.executemany(
+            "INSERT INTO asset_events (ts, identity_key, event_type, detail_json) "
+            "VALUES (?,?,?,?)",
+            [(ts, key, etype, detail) for key, etype, detail in events],
+        )
+    return len(events)
+
+
+def read_scan_trend(since_ts=None, db_path=None) -> list:
+    """趋势观测行（按 `time` 升序）。`since_ts=None` 表示全部。
+
+    返回 dict 的键即 `trend_store.TREND_SCHEMA_KEYS` 加 `id`。
+    """
+    sql = ("SELECT id, time, total, online, offline, ranges_json, "
+           "ports_scanned, duration_s, source FROM trend_observations")
+    args: tuple = ()
+    if since_ts is not None:
+        sql += " WHERE time >= ?"
+        args = (since_ts,)
+    sql += " ORDER BY time ASC, id ASC"
+    with _conn(db_path) as conn:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
+def read_asset_events(since_ts=None, event_type=None, identity_key=None,
+                      db_path=None) -> list:
+    """事件流行（按 `ts` 升序）。三个过滤条件都可省略。
+
+    ⚠️ `event_type` 不做翻译匹配 —— 库里存的是英文规范值，
+    调用方要传 `trend_store.EVENT_*`。
+    """
+    sql = "SELECT id, ts, identity_key, event_type, detail_json FROM asset_events"
+    clauses = []
+    args = []
+    if since_ts is not None:
+        clauses.append("ts >= ?")
+        args.append(since_ts)
+    if event_type:
+        clauses.append("event_type = ?")
+        args.append(event_type)
+    if identity_key:
+        clauses.append("identity_key = ?")
+        args.append(identity_key)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY ts ASC, id ASC"
+    with _conn(db_path) as conn:
+        return [dict(r) for r in conn.execute(sql, tuple(args)).fetchall()]
+
+
+def prune_trend(keep_days=None, db_path=None) -> int:
+    """删掉 `keep_days` 天之前的趋势行与事件行，返回删除总行数。
+
+    🔴 与 `prune()` 是**两套机制**：`prune()` 按**份数**保留快照（默认 20 份），
+    本函数按**天数**保留趋势（默认 365 天）。互不干涉 ——
+    这正是 `trend_observations` / `asset_events` **没有外键**的原因。
+
+    `keep_days=None` 表示不删（与 `prune(max_keep=None)` 同语义）。
+    """
+    if keep_days is None or keep_days <= 0:
+        return 0
+    cutoff = time.time() - keep_days * 86400.0
+    with _conn(db_path) as conn:
+        a = conn.execute("DELETE FROM trend_observations WHERE time < ?", (cutoff,))
+        b = conn.execute("DELETE FROM asset_events WHERE ts < ?", (cutoff,))
+        conn.commit()
+    return (a.rowcount or 0) + (b.rowcount or 0)
 
 
 def migrate_from_json(json_path, db_path=None) -> int:

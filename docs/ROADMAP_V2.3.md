@@ -160,15 +160,18 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 
 **验收标准**：
 
-- [ ] `prune(max_keep=20)` 跑 30 次后，`trend_observations` **仍有 30 行**（趋势不被冲掉）
-- [ ] `devices` 被 prune 删空后，`trend_observations` 仍能画出完整在线率曲线
-- [ ] 事件**只在变化时写行**：连续两轮扫描结果完全相同 ⇒ **不新增 `asset_events` 行**
-- [ ] `event_type` 全部是**语言无关规范值**（测试断言集合 == 常量表，且不含中文）
-- [ ] 迁移幂等：对已升级到 V6 的库再跑一次 `_init_db()` **不报错、不重复建表**
-- [ ] 旧库（V5）升级后**既有数据一条不丢**（回填与否要有明确说明）
-- [ ] 趋势写入抛异常时：**扫描仍正常完成、退出码不变**（只 `warning`）
-- [ ] 空数据给 `reason` + 下一步，**不给空表**（照 v2.2 §3.3 `no_records` 的口径）
-- [ ] CLI 零 PyQt（照既有铁律）
+- [x] `prune(max_keep=20)` 跑 **33** 次后，`trend_observations` **仍有 33 行**（趋势不被冲掉）
+      —— `PruneIsolationTest.test_trend_survives_snapshot_pruning`，同批快照只剩 20 份
+- [x] `devices` 被 prune 删空后，`trend_observations` 仍能画出完整在线率曲线（同上）
+- [x] 事件**只在变化时写行**：连续两轮扫描结果完全相同 ⇒ **不新增 `asset_events` 行**
+- [x] `event_type` 全部是**语言无关规范值**（测试断言 ASCII + 无中文 + ⊆ 常量表）
+- [x] 迁移幂等：对已升级到 V6 的库再跑一次 `_init_db()` **不报错、不重复建表**
+- [x] 旧库（V5）升级后**既有数据一条不丢**
+      —— ⚠️ **不回填**：趋势表是全新的，`v6` 只 `CREATE TABLE`，历史扫描**不可能**
+      凭空变出趋势行。升级前的扫描在趋势里查不到，这是事实不是缺陷。
+- [x] 趋势写入抛异常时：**扫描仍正常完成、退出码不变**（只 `warning`）
+- [x] 空数据给 `reason` + 下一步，**不给空表**（照 v2.2 §3.3 `no_records` 的口径）
+- [x] CLI 零 PyQt（照既有铁律）
 
 **风险**：事件流**写多了会胀库**。缓解：① 只在变化时写；② 给 `asset_events` 也定保留策略；
 ③ **逐端口事件只记实际开放的端口**（见 §3.3，不记 65535 个）。
@@ -366,3 +369,26 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
 3. **前置问题在拍板前已答清**（§4）：`prune(max_keep=20)` 会删 `devices`
    ⇒ 趋势建在不参与 prune 的新表上。这条是 3.1 的核心约束。
 4. 落地顺序照 §6：**3.1 → 3.2 → 3.3 → 3.4**（3.1 未完成不开 3.2 / 3.3）。
+
+### 2026-10-15 · §3.1 趋势观测层落地（含**一处偏离**，要对账）
+
+**落地**：新模块 `trend_store.py`（纯计算：零 DB / 零 PyQt / 零 i18n）
++ `history_store` 的 `_SQL_V6`（两张表）+ `save_snapshot()` 挂写入
++ CLI `trend`。测试 `tests/test_trend.py`（36 例）；`trend_store.py` 覆盖 **99%**。
+
+**🔴 偏离**：§3.1 原写 `trend_observations` 含 `new_count` / `gone_count`，
+**实际没有这两列**。原因：这两个数只有"上一次快照"能比出来，而那份快照
+随时可能被 `prune()` 删掉 —— 于是"新增 0 台"到底是**真没有**还是**基线丢了**，
+用户无从分辨（v2.2 §3.4-a 定的"不猜"原则）。
+⇒ 交给**事件流**：`first_seen` 天然就是"新出现的身份键"，不需要比上一次。
+趋势行只记**规模与在线率**（`total` / `online` / `offline`），这正是曲线要的。
+
+**顺带修掉的一个初版 bug**：`online_ratio_series()` 原用
+`sorted(key=lambda x: float(x.get("time")))` —— 一行脏数据就让 `float()` 抛
+`ValueError`，**整条曲线**消失；改为先过滤再排序（并加 `_as_int()` 兜底）。
+
+**既有测试的连带修改**（不是"改测试让它过"，是它钉错了东西）：
+- `tests/test_history_store.py` 的 `_TABLES` 补两张新表。
+- `test_schema_version_is_five` → 改名 `test_fingerprint_migration_is_version_five`：
+  它的本意是"指纹落在 v5"，不该钉死 `SCHEMA_VERSION`（那是"最后一版"）。
+  当前版本的断言移到 `tests/test_trend.py::MigrationTest.test_schema_version_is_six`。

@@ -338,6 +338,10 @@ jobs:
           python -m coverage report --include="./scanner/exposure.py" --fail-under=85
           python -m coverage report --include="./scanner/wifi.py" --fail-under=85
           python -m coverage report --include="./port_services.py" --fail-under=95
+          # v2.3 §3.1 新增：
+          #   trend_store.py  90%（纯计算模块；只跑 test_trend 实测 99%，
+          #                       全量跑只会更高，故 90 是宽松下界）
+          python -m coverage report --include="./trend_store.py" --fail-under=90
           # v2.2 §3.3 / §3.4-a 新增：
           #   audit_log.py    90%（聚合层落地时实测 93%：只跑 audit_activity +
           #                        audit_log_categories 两个模块的下界，

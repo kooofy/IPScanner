@@ -1842,6 +1842,99 @@ def cmd_audit(args) -> int:
     return EXIT_OK
 
 
+# ────────────────────────── 在线率趋势（v2.3 §3.2） ──────────────────────────
+
+_TREND_REASON_TEXT = {
+    "no_records": (
+        "所选时间窗内没有任何趋势观测记录。",
+        "趋势观测自 v2.3 起才随每次扫描自动写入 —— 更早的扫描不在其内。"
+        "先跑一次 `ipscanner scan -r <网段>`，再回来查就有数据了。",
+    ),
+    "out_of_window": (
+        "库里有趋势记录，但都不在所选时间窗内。",
+        "把 --window 放大（30d / all），或先跑一次扫描。",
+    ),
+}
+
+
+def _fmt_trend_ts(ts, granularity="raw"):
+    """趋势点的时间标签。`day` 粒度只到日，`raw` 到分钟。
+
+    ⚠️ 按**本地时区**（`time.localtime`）与 `trend_store._day_key()` 同口径 ——
+    用 UTC 会让"今天"在东八区偏 8 小时，与用户的日历对不上。
+    """
+    fmt = "%Y-%m-%d" if granularity == "day" else "%Y-%m-%d %H:%M"
+    return time.strftime(fmt, time.localtime(ts))
+
+
+def cmd_trend(args) -> int:
+    """在线率趋势：把「每次扫描的规模与在线率」按时间排成曲线（v2.3 §3.2）。
+
+    数据源是 `trend_observations` —— 🔴 **不是** `devices`：
+    `prune(max_keep=20)` 只留 20 份快照，且 `devices` 靠 `ON DELETE CASCADE`
+    跟着删 ⇒ 拿它画曲线会「随时间自己变短」。趋势行无外键、不参与 prune，
+    这是它能跨过 20 份上限存活的唯一原因（见 `docs/ROADMAP_V2.3.md` §4）。
+
+    退出码恒为 0：「这段时间没数据」不是失败，是要说清的事实 ——
+    照 v2.2 §3.3 的口径 **给 reason + 下一步，不给一张会误导的空表**。
+    """
+    import history_store
+    import trend_store
+
+    window = getattr(args, "window", "24h")
+    granularity = getattr(args, "granularity", "raw")
+    db_path = getattr(args, "db", None)
+    since = trend_store.window_start(window=window)
+    rows = history_store.read_scan_trend(since_ts=since, db_path=db_path)
+    series = trend_store.online_ratio_series(rows, granularity=granularity)
+
+    if not rows:
+        # 🔴 区分「库里根本没有」与「有、但都不在窗口内」—— 两者的下一步
+        #    完全不同（前者该去跑扫描，后者该放大窗口），报成同一种会误导。
+        reason = (trend_store.REASON_OUT_OF_WINDOW
+                  if history_store.read_scan_trend(db_path=db_path)
+                  else trend_store.REASON_NO_RECORDS)
+    elif not series:
+        reason = trend_store.REASON_OUT_OF_WINDOW
+    else:
+        reason = None
+
+    payload = {
+        "window": window,
+        "window_hours": trend_store.normalize_hours(window),
+        "granularity": granularity,
+        "samples": len(series),
+        "points": series,
+        "reason": reason,
+    }
+    if args.format == "json":
+        emit(render_json(payload), args.output)
+        return EXIT_OK
+
+    if reason:
+        hint, action = _TREND_REASON_TEXT.get(reason, ("没有可用的趋势数据。", ""))
+        lines = [hint]
+        if action:
+            lines.append("下一步：" + action)
+        emit("\n".join(lines) + "\n", args.output)
+        return EXIT_OK
+
+    win = ("全部历史" if payload["window_hours"] is None
+           else "过去 %g 小时" % payload["window_hours"])
+    ratios = [p["ratio"] for p in series]
+    lines = ["在线率趋势（%s · 粒度 %s）" % (win, granularity)]
+    lines.append("  观测 %d 次 · 当前 %.1f%% · 均值 %.1f%% · 最低 %.1f%% · 最高 %.1f%%" % (
+        len(series), ratios[-1] * 100.0, sum(ratios) / len(ratios) * 100.0,
+        min(ratios) * 100.0, max(ratios) * 100.0))
+    lines.append("  %-18s %7s %7s %9s" % ("时间", "总数", "在线", "在线率"))
+    for p in series:
+        lines.append("  %-18s %7d %7d %8.1f%%" % (
+            _fmt_trend_ts(p["time"], granularity), p["total"], p["online"],
+            p["ratio"] * 100.0))
+    emit("\n".join(lines) + "\n", args.output)
+    return EXIT_OK
+
+
 # ────────────────────────── Nagios 插件契约（v2.2 §3.4-a） ──────────────────────────
 
 def cmd_nagios(args) -> int:
@@ -2941,6 +3034,29 @@ def build_parser() -> argparse.ArgumentParser:
     aup.add_argument("-o", "--output", metavar="文件",
                      help="写到文件（省略则写 stdout）")
     aup.set_defaults(func=cmd_audit)
+
+    # ── trend（v2.3 §3.2 在线率趋势） ──
+    # `choices` 直接取 `trend_store` 的常量：避免 CLI 与 GUI 两处各写一份而漂移。
+    import trend_store
+
+    trp = sub.add_parser(
+        "trend", parents=[common],
+        help="在线率趋势：把每次扫描的规模与在线率排成曲线",
+        description="读趋势观测表，回答「这段时间的在线率是怎么变的」。"
+                    "🔴 数据源是**独立的趋势表**，不是快照里的 devices —— "
+                    "快照上限 20 份、会被 prune 冲掉，画不了长期曲线（见 "
+                    "docs/ROADMAP_V2.3.md §4）。趋势自 v2.3 起随每次扫描自动写入；"
+                    "时间窗内没有记录时会说明原因并给出下一步命令。")
+    trp.add_argument("--window", choices=trend_store.WINDOW_CHOICES, default="24h",
+                     help="时间窗：24h / 7d / 30d / all，默认 24h")
+    trp.add_argument("--granularity", choices=trend_store.GRANULARITY_CHOICES,
+                     default="raw",
+                     help="粒度：raw（每次观测一个点）/ day（按自然日聚合），默认 raw")
+    trp.add_argument("-f", "--format", choices=("table", "json"),
+                     default="table", help="输出格式（默认 table）")
+    trp.add_argument("-o", "--output", metavar="文件",
+                     help="写到文件（省略则写 stdout）")
+    trp.set_defaults(func=cmd_trend)
 
     # ── nagios（v2.2 §3.4-a 插件契约） ──
     np_ = sub.add_parser(
