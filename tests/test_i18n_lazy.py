@@ -318,6 +318,15 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             _REASON_TEXT as _ACTIVITY_REASON,
             _WINDOW_TEXT as _ACTIVITY_WINDOW,
         )
+        from ui_dialogs.trend_view import (
+            _COLUMN_LABELS as _TREND_COLS,
+            _GRANULARITY_TEXT as _TREND_GRAN,
+            _HINT_SAMPLING,
+            _REASON_TEXT as _TREND_REASON,
+            _UNIT_INSUFFICIENT,
+            _UNIT_TEXT as _TREND_UNIT,
+            _WINDOW_TEXT as _TREND_WINDOW,
+        )
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
@@ -380,6 +389,17 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "ui_dialogs.audit_activity._COLUMN_LABELS": list(_ACTIVITY_COLS),
             "ui_dialogs.audit_activity._HINT_ESTIMATE": [_HINT_ESTIMATE],
             "ui_dialogs.audit_activity._HINT_SCOPE": [_HINT_SCOPE],
+            # ui_dialogs.trend_view（v2.3 §3.2 在线率趋势与稳定性）：四张字面量表
+            # + 「样本不足」兜底词 + 采样近似提示。`_REASON_TEXT` 同 audit_activity
+            # 是 (说明, 下一步) 二元组，要摊平再逐个校验。
+            "ui_dialogs.trend_view._WINDOW_TEXT": list(_TREND_WINDOW.values()),
+            "ui_dialogs.trend_view._GRANULARITY_TEXT": list(_TREND_GRAN.values()),
+            "ui_dialogs.trend_view._REASON_TEXT": [
+                text for pair in _TREND_REASON.values() for text in pair],
+            "ui_dialogs.trend_view._UNIT_TEXT": list(_TREND_UNIT.values()),
+            "ui_dialogs.trend_view._UNIT_INSUFFICIENT": [_UNIT_INSUFFICIENT],
+            "ui_dialogs.trend_view._COLUMN_LABELS": list(_TREND_COLS),
+            "ui_dialogs.trend_view._HINT_SAMPLING": [_HINT_SAMPLING],
         }
 
     def test_all_table_labels_are_translated(self):

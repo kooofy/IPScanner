@@ -200,11 +200,32 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 
 **验收标准**：
 
-- [ ] 曲线数据点数量 == 窗口内的观测次数（`raw` 粒度下逐一对应）
-- [ ] 空窗口 / 仅一次观测：**给 `reason` + 下一步**，不画空图、不报 0
-- [ ] MTBF 只有一次翻转时**明确说样本不足**，不返回 0.0 冒充结果
-- [ ] 曲线值**语言无关**（JSON 键固定英文），本地化只发生在显示层
-- [ ] GUI 标签表登记进 `tests/test_i18n_lazy.py::_label_tables()` + `en-US.json`
+- [x] 曲线数据点数量 == 窗口内的观测次数（`raw` 粒度下逐一对应）
+      —— `TrendViewDialogTest.test_rows_and_summary_report_counts` /
+      `CliTrendTest.test_table_output_lists_every_observation`
+- [x] 空窗口 / 仅一次观测：**给 `reason` + 下一步**，不画空图、不报 0
+      —— `TrendViewDialogTest.test_empty_state_shows_reason_and_next_step`；
+      两种空的原因**分开报**（`test_out_of_window_is_distinct_from_no_records`：
+      窗外数据该放大窗口，库里没数据该去跑扫描）
+- [x] MTBF 只有一次翻转时**明确说样本不足**，不返回 0.0 冒充结果
+      —— `StabilityTest`；`CliTrendTest.test_table_warns_when_mtbf_sample_is_insufficient`
+- [x] 曲线值**语言无关**（JSON 键固定英文），本地化只发生在显示层
+      —— `CliTrendTest.test_json_keys_are_english_and_fixed`；时长单位由
+      `trend_store.duration_parts()` 只给**规范值**（`second`/`minute`/…），
+      CLI 与 GUI 各自 `tr()` 后拼（领域层不 import `i18n`）
+- [x] GUI 标签表登记进 `tests/test_i18n_lazy.py::_label_tables()` + `en-US.json`
+      —— `ui_dialogs.trend_view` 四张表 +「样本不足」+ 采样提示，共 7 项
+
+**落地要点（2026-10-15）**：
+
+- 纯计算在 `trend_store.py`（零 DB / 零 PyQt / 零 i18n）：`stability()` /
+  `first_seen_devices()` / `duration_parts()`。
+- CLI `trend` 增 `stability` / `new_devices` 两块（JSON 键固定英文）；表格分节打印，
+  样本不足时明写「样本不足」+「不等于稳定」，🔴 **不显示 0 冒充结果**。
+- GUI 新 `ui_dialogs/trend_view.py`（照 `audit_activity.py` 结构：时间窗 + 粒度
+  下拉 + 刷新 + 表格 + 空态下一步）；分析菜单「在线率趋势...」+
+  `HistoryMixin._show_trend_view()`。
+- 🔴 **两处偏离见 §10**：① 按网段曲线本轮未做；② 趋势元数据列生产路径不写。
 
 ### 3.3 端口长期暴露时长
 
@@ -392,3 +413,33 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
 - `test_schema_version_is_five` → 改名 `test_fingerprint_migration_is_version_five`：
   它的本意是"指纹落在 v5"，不该钉死 `SCHEMA_VERSION`（那是"最后一版"）。
   当前版本的断言移到 `tests/test_trend.py::MigrationTest.test_schema_version_is_six`。
+
+### 2026-10-15 · §3.2 在线率曲线与稳定性落地（含**两处偏离**，要对账）
+
+**落地**：`trend_store.py` 增 `stability()` / `first_seen_devices()` /
+`duration_parts()`；CLI `trend` 增 `stability` / `new_devices` 两块（JSON 键固定英文）；
+GUI 新 `ui_dialogs/trend_view.py`（时间窗 + 粒度下拉 + 表格 + 空态下一步）+
+分析菜单「在线率趋势...」+ `HistoryMixin._show_trend_view()`。
+测试 `tests/test_trend.py` 增至 **52** 例（`trend_store.py` 覆盖 **99%**）。
+
+**🔴 偏离 ①：按网段曲线本轮未做。**
+§3.2 做法 #1 写「支持全局与按网段（网段从 `ranges_json` 拆）」，
+**实际只做了全局曲线**。原因：`trend_observations` 存的是**每次扫描的全局聚合**
+（一行一个 `total` / `online`），**没有按网段的拆分** —— 一次扫多个网段时，
+拆不回"某个网段自己的在线率"。要做对，得让趋势写入端**按网段各记一份计数**
+（改 `ranges_json` 形状或加列），属独立改动。**宁可不做，也不给会误导的曲线**
+（把 A+B 的合计标成"网段 A 的在线率"，比没有更糟 —— 违反"只陈述事实"红线）。
+
+**🔴 偏离 ②：趋势元数据列生产路径不写。**
+§3.1 给 `trend_observations` 定了 `ranges_json` / `ports_scanned` /
+`duration_s` / `source` 四个元数据列，但**生产代码没有一个调用方传 `trend=`**
+（`grep -rn "trend=" --include=*.py` 只命中 `save_snapshot` 的定义与测试）。
+即 `save_snapshot()` 默认写的那一行里，这四列恒为空 / `None`。
+⇒ 影响：曲线本身**不受影响**（`total`/`online`/`offline` 是从 `devices` 现算的），
+但 `source`（cli/gui）等列目前是**死数据**；这也是偏离 ① 无法落地的前置原因。
+
+**处理**：两处**同一根因**（趋势写入端没拿到扫描上下文）。建议作为
+**独立的小改动**收口：CLI `scan --save-snapshot` 与 GUI `_save_snapshot()`
+各自把 `ranges` / `ports_scanned` / `duration_s` / `source` 传进
+`save_snapshot(trend=…)`，之后按网段曲线才有数据基础。
+**不占 §3 四项名额**，可与 3.3 / 3.4 并行，或另开补丁轨道。

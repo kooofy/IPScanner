@@ -351,7 +351,116 @@ class EventTypeTest(unittest.TestCase):
         self.assertTrue(seen.issubset(set(trend_store.EVENT_TYPES)), seen)
 
 
+# ─────────────────────────── 稳定性（v2.3 §3.2） ───────────────────────────
+
+class StabilityTest(unittest.TestCase):
+    def _flips(self, statuses, step=600.0):
+        """按状态序列落多次扫描，返回全部事件。"""
+        db = _new_db()
+        base = time.time() - 100000
+        for k, st in enumerate(statuses):
+            _scan(db, [_dev(1, st)], ts=base + k * step)
+        return history_store.read_asset_events(db_path=db)
+
+    def test_mtbf_and_mttr_from_alternating_states(self):
+        # online/offline/online/offline/online：掉线 2 次、恢复 2 次
+        # 两次掉线间隔 = 2*step，掉线→恢复 = step
+        s = trend_store.stability(
+            self._flips(["online", "offline", "online", "offline", "online"]))
+        self.assertEqual(s["failures"], 2)
+        self.assertEqual(s["flips"], 4)
+        self.assertAlmostEqual(s["mtbf_seconds"], 1200.0)
+        self.assertAlmostEqual(s["mttr_seconds"], 600.0)
+        self.assertEqual(s["mtbf_samples"], 1)
+        self.assertEqual(s["mttr_samples"], 2)
+
+    def test_single_failure_gives_no_mtbf(self):
+        # 🔴 只掉线一次 ⇒ 算不出"两次掉线之间"。给 None + reason，
+        #    **不返回 0.0 冒充结果**（v2.2 §3.4-a「不猜」原则）。
+        s = trend_store.stability(self._flips(["online", "offline"]))
+        self.assertIsNone(s["mtbf_seconds"])
+        self.assertEqual(s["reason"], trend_store.REASON_INSUFFICIENT_SAMPLES)
+        self.assertEqual(s["mtbf_samples"], 0)
+
+    def test_no_events_at_all(self):
+        s = trend_store.stability([])
+        self.assertEqual(s["devices"], 0)
+        self.assertIsNone(s["mtbf_seconds"])
+        self.assertEqual(s["reason"], trend_store.REASON_INSUFFICIENT_SAMPLES)
+
+    def test_flappers_sorted_by_flip_count(self):
+        db = _new_db()
+        base = time.time() - 100000
+        for k in range(4):
+            _scan(db, [_dev(1, "online" if k % 2 == 0 else "offline"), _dev(2)],
+                  ts=base + k * 600)
+        s = trend_store.stability(history_store.read_asset_events(db_path=db))
+        self.assertEqual(s["flappers"][0]["identity_key"], "aa:bb:cc:dd:ee:01")
+        self.assertEqual(s["flappers"][0]["flips"], 3)
+
+    def test_first_seen_devices_newest_first(self):
+        db = _new_db()
+        base = time.time() - 100000
+        _scan(db, [_dev(1)], ts=base)
+        _scan(db, [_dev(1), _dev(2)], ts=base + 600)
+        out = trend_store.first_seen_devices(
+            history_store.read_asset_events(db_path=db))
+        self.assertEqual([d["ip"] for d in out], ["192.168.1.2", "192.168.1.1"])
+
+    def test_first_seen_limit(self):
+        db = _new_db()
+        base = time.time() - 100000
+        _scan(db, [_dev(1)], ts=base)
+        _scan(db, [_dev(1), _dev(2)], ts=base + 600)
+        events = history_store.read_asset_events(db_path=db)
+        self.assertEqual(len(trend_store.first_seen_devices(events, limit=1)), 1)
+
+    def test_malformed_events_are_skipped_not_raised(self):
+        # 坏 JSON / 非法时间戳 / 非 online-offline 的 `to` —— 一律跳过。
+        # 一行脏事件不该让"看趋势"整个崩掉。
+        events = [
+            {"event_type": trend_store.EVENT_STATUS_FLIP, "ts": 1.0,
+             "identity_key": "k1", "detail_json": "{not json"},
+            {"event_type": trend_store.EVENT_STATUS_FLIP, "ts": "abc",
+             "identity_key": "k1", "detail_json": '{"to": "offline"}'},
+            {"event_type": trend_store.EVENT_STATUS_FLIP, "ts": 2.0,
+             "identity_key": "k1", "detail_json": '{"to": "scanning"}'},
+            {"event_type": trend_store.EVENT_FIRST_SEEN, "ts": "abc",
+             "identity_key": "k1", "detail_json": "{not json"},
+        ]
+        self.assertEqual(trend_store.stability(events)["devices"], 0)
+        self.assertEqual(trend_store.first_seen_devices(events), [])
+
+
 # ─────────────────────────── CLI ───────────────────────────
+
+class DurationPartsTest(unittest.TestCase):
+    """时长分档：**只有一份**（CLI 与 GUI 都调它），分支必须逐个测到。"""
+
+    def test_none_and_junk_are_insufficient(self):
+        for bad in (None, "abc", float("nan"), float("inf"), float("-inf")):
+            self.assertEqual(
+                trend_store.duration_parts(bad),
+                (None, trend_store.DURATION_UNIT_NONE))
+
+    def test_negative_clamps_to_zero_seconds(self):
+        self.assertEqual(trend_store.duration_parts(-5),
+                         (0.0, trend_store.DURATION_UNIT_SECOND))
+
+    def test_buckets_and_conversion(self):
+        # 秒 / 分钟 / 小时 / 天 四档各来一个，顺带核数值换算。
+        self.assertEqual(trend_store.duration_parts(30),
+                         (30.0, trend_store.DURATION_UNIT_SECOND))
+        self.assertEqual(trend_store.duration_parts(90)[1],
+                         trend_store.DURATION_UNIT_MINUTE)
+        self.assertAlmostEqual(trend_store.duration_parts(90)[0], 1.5)
+        self.assertEqual(trend_store.duration_parts(7200)[1],
+                         trend_store.DURATION_UNIT_HOUR)
+        self.assertAlmostEqual(trend_store.duration_parts(7200)[0], 2.0)
+        self.assertEqual(trend_store.duration_parts(172800)[1],
+                         trend_store.DURATION_UNIT_DAY)
+        self.assertAlmostEqual(trend_store.duration_parts(172800)[0], 2.0)
+
 
 class CliTrendTest(unittest.TestCase):
     def _run(self, db, *extra):
@@ -399,10 +508,129 @@ class CliTrendTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(
             sorted(payload),
-            ["granularity", "points", "reason", "samples", "window", "window_hours"])
+            ["granularity", "new_devices", "points", "reason", "samples",
+             "stability", "window", "window_hours"])
         self.assertEqual(sorted(payload["points"][0]),
                          ["online", "ratio", "time", "total"])
         self.assertIsNone(payload["reason"])
+
+    def test_table_output_includes_stability_and_new_devices(self):
+        db = _new_db()
+        base = time.time() - 100000
+        for k, st in enumerate(["online", "offline", "online"]):
+            _scan(db, [_dev(1, st)], ts=base + k * 600)
+        rc, out = self._run(db, "--window", "all")
+        self.assertEqual(rc, 0)
+        self.assertIn("稳定性", out)
+        self.assertIn("MTBF", out)
+        self.assertIn("新出现设备", out)
+
+    def test_table_warns_when_mtbf_sample_is_insufficient(self):
+        # 只有一次掉线 ⇒ 明说"这是采样近似、不等于稳定"，而不是静默给 0。
+        db = _new_db()
+        base = time.time() - 100000
+        for k, st in enumerate(["online", "offline"]):
+            _scan(db, [_dev(1, st)], ts=base + k * 600)
+        rc, out = self._run(db, "--window", "all")
+        self.assertEqual(rc, 0)
+        self.assertIn("样本不足", out)
+        self.assertIn("不等于稳定", out)
+
+
+# ─────────────────────── GUI 对话框（v2.3 §3.2） ───────────────────────
+#
+# Qt 相关导入放在这里而不是文件顶部：本模块的纯计算 / 写入 / CLI 用例都不需要
+# Qt，把 `ensure_qt_app()` 提到顶部会让它们都付一次 Qt 初始化成本。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from tests._qt_app import ensure_qt_app  # noqa: E402
+
+ensure_qt_app()
+
+from i18n import tr  # noqa: E402
+from ui_dialogs.trend_view import (  # noqa: E402
+    TrendViewDialog, _COLUMN_LABELS, _GRANULARITY_TEXT, _REASON_TEXT,
+    _WINDOW_TEXT,
+)
+
+
+class TrendViewDialogTest(unittest.TestCase):
+    """只读对话框：控件文本与可见性（offscreen 下截图全白，不看图）。
+
+    🔴 对话框直接读 `history_store.DB_PATH`，所以这里像 `test_audit_activity`
+    一样**临时替换默认库路径**（`db_util` 按路径缓存连接，新路径 = 新连接）。
+    """
+
+    def setUp(self):
+        self.db = _new_db()
+        self._old = history_store.DB_PATH
+        history_store.DB_PATH = self.db
+
+    def tearDown(self):
+        history_store.DB_PATH = self._old
+
+    def test_column_count_derives_from_labels(self):
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.table.columnCount(), len(_COLUMN_LABELS))
+        self.assertEqual(dlg.table.horizontalHeaderItem(0).text(),
+                         tr(_COLUMN_LABELS[0]))
+        dlg.deleteLater()
+
+    def test_rows_and_summary_report_counts(self):
+        now = time.time()
+        for k in range(3):
+            _scan(self.db, [_dev(1), _dev(2, "offline")], ts=now - (3 - k) * 5)
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.table.rowCount(), 3)
+        self.assertIn("50.0%", dlg.summary_label.text())
+        self.assertTrue(dlg.next_label.isHidden())   # 有数据时不显示"下一步"
+        dlg.deleteLater()
+
+    def test_empty_state_shows_reason_and_next_step(self):
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.table.rowCount(), 0)
+        hint, action = _REASON_TEXT[trend_store.REASON_NO_RECORDS]
+        self.assertEqual(dlg.summary_label.text(), tr(hint))
+        self.assertIn(tr(action), dlg.next_label.text())
+        self.assertFalse(dlg.next_label.isHidden())   # 空态必须显示"下一步"
+        dlg.deleteLater()
+
+    def test_out_of_window_is_distinct_from_no_records(self):
+        # 🔴 库里有数据但都在窗外 ⇒ 提示"放大窗口"，不是"去跑扫描"。
+        _scan(self.db, [_dev(1)], ts=time.time() - 10 * 86400)
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.table.rowCount(), 0)
+        hint, _ = _REASON_TEXT[trend_store.REASON_OUT_OF_WINDOW]
+        self.assertEqual(dlg.summary_label.text(), tr(hint))
+        dlg.deleteLater()
+
+    def test_switching_window_reloads(self):
+        _scan(self.db, [_dev(1)], ts=time.time() - 10 * 86400)
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.table.rowCount(), 0)
+        idx = [i for i in range(dlg.window_combo.count())
+               if dlg.window_combo.itemData(i) == "all"][0]
+        dlg.window_combo.setCurrentIndex(idx)
+        self.assertEqual(dlg.table.rowCount(), 1)
+        dlg.deleteLater()
+
+    def test_granularity_day_aggregates(self):
+        base = time.time() - 3600
+        for k in range(3):
+            _scan(self.db, [_dev(1)], ts=base + k)
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.table.rowCount(), 3)
+        idx = [i for i in range(dlg.gran_combo.count())
+               if dlg.gran_combo.itemData(i) == "day"][0]
+        dlg.gran_combo.setCurrentIndex(idx)
+        self.assertEqual(dlg.table.rowCount(), 1)
+        dlg.deleteLater()
+
+    def test_window_choices_match_store(self):
+        """GUI 的时间窗 / 粒度表必须与 `trend_store` 一致（两处不能漂）。"""
+        self.assertEqual(set(_WINDOW_TEXT), set(trend_store.WINDOW_CHOICES))
+        self.assertEqual(set(_GRANULARITY_TEXT),
+                         set(trend_store.GRANULARITY_CHOICES))
 
 
 def tearDownModule():

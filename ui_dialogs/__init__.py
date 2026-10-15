@@ -15,6 +15,7 @@ from .reports import (ChangeReportDialog, ConflictReportDialog,
                       SubnetUtilizationDialog)
 from .switch_port import SwitchPortDialog
 from .topology import TopologyDialog
+from .trend_view import TrendViewDialog
 from .wifi import WifiDialog
 
 __all__ = [
@@ -24,5 +25,5 @@ __all__ = [
     "WmiCredentialDialog", "SnmpV3CredentialDialog",
     "ConflictReportDialog", "SubnetUtilizationDialog", "ChangeReportDialog",
     "AuditLogDialog", "AuditActivityDialog", "SwitchPortDialog",
-    "LocateDeviceDialog", "WifiDialog",
+    "LocateDeviceDialog", "WifiDialog", "TrendViewDialog",
 ]

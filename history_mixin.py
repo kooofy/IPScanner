@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QProgressDialog
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from ui_dialogs import (
     AuditActivityDialog, AuditLogDialog, HistoryCompareDialog,
-    HistoryQueryDialog, LocateDeviceDialog, TopologyDialog
+    HistoryQueryDialog, LocateDeviceDialog, TopologyDialog, TrendViewDialog
 )
 from ui_utils import _detect_gateway
 import audit_log
@@ -25,6 +25,11 @@ class HistoryMixin:
     def _show_audit_activity(self):
         """弹出扫描活动自查（v2.2 §3.3）：按时间窗看聚合，不看流水。"""
         dlg = AuditActivityDialog(parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _show_trend_view(self):
+        """弹出在线率趋势与稳定性（v2.3 §3.2）：看网络自己变成了什么样。"""
+        dlg = TrendViewDialog(parent=self, dark=self.dark_mode)
         dlg.exec_()
 
     def _audit(self, category, action, detail=""):

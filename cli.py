@@ -1867,6 +1867,24 @@ def _fmt_trend_ts(ts, granularity="raw"):
     return time.strftime(fmt, time.localtime(ts))
 
 
+def _fmt_duration(seconds):
+    """秒 → 人话。`None` 一律说"样本不足" —— 不拿 0 冒充结果。
+
+    分档逻辑在 `trend_store.duration_parts()`（**只有一份**），
+    避免 CLI 与 GUI 各写一套而漂移。
+    """
+    import trend_store
+
+    value, unit = trend_store.duration_parts(seconds)
+    if unit == trend_store.DURATION_UNIT_NONE:
+        return "样本不足"
+    fmt = {trend_store.DURATION_UNIT_SECOND: "%.0f 秒",
+           trend_store.DURATION_UNIT_MINUTE: "%.1f 分钟",
+           trend_store.DURATION_UNIT_HOUR: "%.1f 小时",
+           trend_store.DURATION_UNIT_DAY: "%.1f 天"}
+    return fmt[unit] % value
+
+
 def cmd_trend(args) -> int:
     """在线率趋势：把「每次扫描的规模与在线率」按时间排成曲线（v2.3 §3.2）。
 
@@ -1899,12 +1917,20 @@ def cmd_trend(args) -> int:
     else:
         reason = None
 
+    # 事件流：稳定性（抖动 / MTBF / MTTR）与首现设备。
+    # 它们读 `asset_events`，曲线读 `trend_observations` —— 两张表，
+    # 但都**不参与 prune**，所以时间窗口径一致。
+    events = history_store.read_asset_events(since_ts=since, db_path=db_path)
+    stab = trend_store.stability(events)
+    newcomers = trend_store.first_seen_devices(events, limit=10)
     payload = {
         "window": window,
         "window_hours": trend_store.normalize_hours(window),
         "granularity": granularity,
         "samples": len(series),
         "points": series,
+        "stability": stab,
+        "new_devices": newcomers,
         "reason": reason,
     }
     if args.format == "json":
@@ -1931,6 +1957,21 @@ def cmd_trend(args) -> int:
         lines.append("  %-18s %7d %7d %8.1f%%" % (
             _fmt_trend_ts(p["time"], granularity), p["total"], p["online"],
             p["ratio"] * 100.0))
+    lines.append("  稳定性：翻转 %d 次 · 掉线 %d 次 · MTBF %s（样本 %d）· "
+                 "MTTR %s（样本 %d）" % (
+                     stab["flips"], stab["failures"],
+                     _fmt_duration(stab["mtbf_seconds"]), stab["mtbf_samples"],
+                     _fmt_duration(stab["mttr_seconds"]), stab["mttr_samples"]))
+    if stab["reason"] == trend_store.REASON_INSUFFICIENT_SAMPLES:
+        lines.append("  ⚠ MTBF 要同一台设备掉线 ≥2 次才统计得出；且这是**扫描采样**"
+                     "近似 —— 短于扫描间隔的抖动根本看不到，"
+                     "「翻转 0 次」只说明没看见，不等于稳定。")
+    if newcomers:
+        lines.append("  新出现设备 %d 台（最多列 10 台）：" % len(newcomers))
+        for d in newcomers:
+            lines.append("    %-16s %-20s %s" % (
+                d["ip"] or d["identity_key"], d["mac"] or "-",
+                _fmt_trend_ts(d["ts"])))
     emit("\n".join(lines) + "\n", args.output)
     return EXIT_OK
 

@@ -835,6 +835,13 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         act_audit_activity.triggered.connect(self._show_audit_activity)
         analysis_menu.addAction(act_audit_activity)
 
+        act_trend = QAction(tr("在线率趋势..."), self)
+        act_trend.setIcon(_mi(QStyle.SP_FileDialogDetailedView))
+        act_trend.setToolTip(tr(
+            "过去这段时间的在线率曲线与稳定性（MTBF / 抖动 / 首现设备）"))
+        act_trend.triggered.connect(self._show_trend_view)
+        analysis_menu.addAction(act_trend)
+
         # ── 设置菜单 ──
         settings_menu = menubar.addMenu(tr("设置(&O)"))
         settings_menu.setStyleSheet("")

@@ -21,6 +21,7 @@
 **无外键、不参与 prune、独立保留**。详见 `docs/ROADMAP_V2.3.md` §4。
 """
 
+import json
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -240,3 +241,138 @@ def online_ratio_series(rows: Iterable[dict], granularity: str = "raw") -> List[
             "ratio": online_ratio(online, total),
         })
     return out
+
+
+# ── 时长单位（🔴 语言无关的规范值，由调用方 `tr()` 后再拼） ─────────────────
+#
+# 本模块**不 import `i18n`**，所以不能返回"20.0 分钟"这种已经拼好的中文 ——
+# 那等于把显示层的事塞进领域层。只给单位名，让 CLI / GUI 各自翻译。
+DURATION_UNIT_SECOND = "second"
+DURATION_UNIT_MINUTE = "minute"
+DURATION_UNIT_HOUR = "hour"
+DURATION_UNIT_DAY = "day"
+DURATION_UNIT_NONE = "insufficient"
+
+
+def duration_parts(seconds):
+    """秒 → `(数值, 单位规范值)`；`None` / 非法 → `(None, insufficient)`。
+
+    分档：< 60 秒用秒，< 1 小时用分钟，< 1 天用小时，再往上用天。
+    """
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return (None, DURATION_UNIT_NONE)
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / inf
+        return (None, DURATION_UNIT_NONE)
+    if value < 0:
+        value = 0.0
+    if value < 60:
+        return (value, DURATION_UNIT_SECOND)
+    if value < 3600:
+        return (value / 60.0, DURATION_UNIT_MINUTE)
+    if value < 86400:
+        return (value / 3600.0, DURATION_UNIT_HOUR)
+    return (value / 86400.0, DURATION_UNIT_DAY)
+
+
+def _flips_by_device(events):
+    """`status_flip` 事件按设备分组 → `{identity_key: [(ts, to_status), ...]}`。
+
+    每组按 `ts` 升序（不管调用方给的是什么顺序）。
+    """
+    out: Dict[str, List[tuple]] = {}
+    for e in events:
+        if e.get("event_type") != EVENT_STATUS_FLIP:
+            continue
+        try:
+            detail = json.loads(e.get("detail_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if detail.get("to") not in ("online", "offline"):
+            continue
+        try:
+            ts = float(e.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        out.setdefault(e.get("identity_key", ""), []).append(
+            (ts, detail["to"]))
+    for seq in out.values():
+        seq.sort(key=lambda kv: kv[0])
+    return out
+
+
+def stability(events, top=10):
+    """稳定性：抖动次数 / MTBF / MTTR / 抖得最凶的几台。
+
+    🔴 **这是采样近似，不是连续监控** —— 我们只知道"扫描那一刻"的状态，
+    真实掉线发生在两次扫描之间 ⇒ **精度下限就是扫描间隔**。
+    若扫描间隔（1 天）远大于掉线时长（5 分钟），短抖动会被**完全漏掉**：
+    这时"翻转 0 次"不代表网络稳定，只代表"没看见"。
+
+    所以样本不足时 MTBF / MTTR 返回 **`None`** 并给
+    `reason=insufficient_samples` —— 🔴 **不返回 0.0 冒充结果**
+    （照 v2.2 §3.4-a「数据不可信报 UNKNOWN 不猜 OK」的原则）。
+
+    返回键：`devices` / `flips` / `failures` / `mtbf_seconds` /
+    `mttr_seconds` / `mtbf_samples` / `mttr_samples` / `reason` / `flappers`。
+    """
+    flips = _flips_by_device(events)
+    if not flips:
+        return {"devices": 0, "flips": 0, "failures": 0,
+                "mtbf_seconds": None, "mttr_seconds": None,
+                "mtbf_samples": 0, "mttr_samples": 0,
+                "reason": REASON_INSUFFICIENT_SAMPLES, "flappers": []}
+
+    between = []   # 相邻两次掉线之间的时长 ≈ 无故障时间（MTBF 的分子）
+    repair = []    # 掉线 → 恢复的时长（MTTR）
+    per_device = []
+    for key, seq in flips.items():
+        offs = [ts for ts, st in seq if st == "offline"]
+        ons = [ts for ts, st in seq if st == "online"]
+        per_device.append({"identity_key": key, "flips": len(seq),
+                           "failures": len(offs)})
+        between.extend(b - a for a, b in zip(offs, offs[1:]) if b > a)
+        for off_ts in offs:
+            later = [t for t in ons if t >= off_ts]
+            if later:
+                repair.append(later[0] - off_ts)
+
+    per_device.sort(key=lambda d: (-d["flips"], d["identity_key"]))
+    return {
+        "devices": len(flips),
+        "flips": sum(d["flips"] for d in per_device),
+        "failures": sum(d["failures"] for d in per_device),
+        "mtbf_seconds": (sum(between) / len(between)) if between else None,
+        "mttr_seconds": (sum(repair) / len(repair)) if repair else None,
+        "mtbf_samples": len(between),
+        "mttr_samples": len(repair),
+        "reason": None if between else REASON_INSUFFICIENT_SAMPLES,
+        "flappers": per_device[:top] if top else per_device,
+    }
+
+
+def first_seen_devices(events, limit=None):
+    """窗口内**新出现**的设备（按时间降序，最近优先）。
+
+    只认 `first_seen` 事件 —— 它天然就是"新出现的身份键"，
+    🔴 不需要拿"上一次快照"来比：那份快照随时可能被 `prune()` 删掉，
+    于是"新增 0 台"到底是真没有还是基线丢了，用户无从分辨
+    （这正是 §3.1 把 `new_count` 从趋势表里拿掉的原因）。
+    """
+    out = []
+    for e in events:
+        if e.get("event_type") != EVENT_FIRST_SEEN:
+            continue
+        try:
+            detail = json.loads(e.get("detail_json") or "{}")
+        except (TypeError, ValueError):
+            detail = {}
+        try:
+            ts = float(e.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        out.append({"ts": ts, "identity_key": e.get("identity_key", ""),
+                    "ip": detail.get("ip", ""), "mac": detail.get("mac", "")})
+    out.sort(key=lambda d: -d["ts"])
+    return out[:limit] if limit else out
