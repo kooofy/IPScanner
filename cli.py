@@ -761,8 +761,33 @@ def _collect_responders(args, results):
             + ", ".join(outside))
 
 
+def _scan_trend_meta(args, elapsed=None, source="cli"):
+    """构造 `save_snapshot(trend=…)` 的扫描元数据（v2.3 §3.2 接线）。
+
+    没有它，`trend_observations` 的 `ranges_json` / `ports_scanned` /
+    `duration_s` / `source` 就永远是空的 —— 全局曲线不受影响（`total`/`online`
+    是从 devices 现算的），但**按网段曲线没数据可画**（见 ROADMAP_V2.3 §10）。
+
+    `ranges` 用 `_run_scan` 合并好的 `args.ranges`；端口数重算一次
+    （`_resolve_ports` 是纯解析、无副作用），解析失败就当没扫端口。
+    """
+    try:
+        ports = _resolve_ports(args)
+        n_ports = len(ports) if ports else None
+    except ValueError:
+        n_ports = None
+    return {
+        "ranges": list(getattr(args, "ranges", []) or []),
+        "ports_scanned": n_ports,
+        "duration_s": elapsed,
+        "source": source,
+    }
+
+
 def cmd_scan(args) -> int:
+    _t0 = time.perf_counter()
     results, _scanner = _run_scan(args)
+    elapsed = time.perf_counter() - _t0
     if results is None:
         return EXIT_ERROR
     if not results:
@@ -818,7 +843,8 @@ def cmd_scan(args) -> int:
         try:
             import history_store
             sid = history_store.save_snapshot(
-                _snapshot_devices(results), note=args.note, db_path=_db_path(args)
+                _snapshot_devices(results), note=args.note, db_path=_db_path(args),
+                trend=_scan_trend_meta(args, elapsed),
             )
             log(f"已保存快照 #{sid}")
             if switch_maps:
@@ -1076,14 +1102,17 @@ def cmd_diff(args) -> int:
             log("错误: 需要 -r/--range 或 -iL/--target-file"
                 "（或改用 --from/--to 比较两个快照）")
             return EXIT_ERROR
+        _t0 = time.perf_counter()
         results, _scanner = _run_scan(args)
+        _elapsed = time.perf_counter() - _t0
         if results is None:
             return EXIT_ERROR
         db = _db_path(args)
         if args.save_snapshot:
             try:
                 sid = history_store.save_snapshot(
-                    _snapshot_devices(results), note=args.note, db_path=db
+                    _snapshot_devices(results), note=args.note, db_path=db,
+                    trend=_scan_trend_meta(args, _elapsed),
                 )
                 log(f"已保存快照 #{sid}")
             except Exception as e:  # noqa: BLE001
@@ -1649,7 +1678,8 @@ def cmd_import(args) -> int:
                 "services": r["services"], "os_guess": r["os_guess"]}
                for r in rows]
     sid = history_store.save_snapshot(
-        payload, note=f"Nmap XML 导入：{args.input}", db_path=_db_path(args))
+        payload, note=f"Nmap XML 导入：{args.input}", db_path=_db_path(args),
+        trend={"source": "import"})
     log(f"已写入快照 #{sid}：{len(payload)} 台设备")
     return EXIT_OK
 
@@ -1854,6 +1884,11 @@ _TREND_REASON_TEXT = {
         "库里有趋势记录，但都不在所选时间窗内。",
         "把 --window 放大（30d / all），或先跑一次扫描。",
     ),
+    "no_range_data": (
+        "所选网段在这个时间窗内没有按网段计数。",
+        "网段名可能写错了，或这些数据来自 v2.3 §3.2 之前（那时不记每网段计数）。"
+        "去掉 --range 看全局曲线，或按上面列出的可用网段重试。",
+    ),
 }
 
 
@@ -1901,10 +1936,12 @@ def cmd_trend(args) -> int:
 
     window = getattr(args, "window", "24h")
     granularity = getattr(args, "granularity", "raw")
+    range_name = getattr(args, "range", None) or None
     db_path = getattr(args, "db", None)
     since = trend_store.window_start(window=window)
     rows = history_store.read_scan_trend(since_ts=since, db_path=db_path)
-    series = trend_store.online_ratio_series(rows, granularity=granularity)
+    series = trend_store.online_ratio_series(rows, granularity=granularity,
+                                             range_name=range_name)
 
     if not rows:
         # 🔴 区分「库里根本没有」与「有、但都不在窗口内」—— 两者的下一步
@@ -1913,7 +1950,9 @@ def cmd_trend(args) -> int:
                   if history_store.read_scan_trend(db_path=db_path)
                   else trend_store.REASON_NO_RECORDS)
     elif not series:
-        reason = trend_store.REASON_OUT_OF_WINDOW
+        # 有行却没点：要么全在窗外，要么（带 --range 时）该网段没有按网段计数。
+        reason = (trend_store.REASON_NO_RANGE_DATA if range_name
+                  else trend_store.REASON_OUT_OF_WINDOW)
     else:
         reason = None
 
@@ -1927,6 +1966,7 @@ def cmd_trend(args) -> int:
         "window": window,
         "window_hours": trend_store.normalize_hours(window),
         "granularity": granularity,
+        "range": range_name,
         "samples": len(series),
         "points": series,
         "stability": stab,
@@ -1940,6 +1980,10 @@ def cmd_trend(args) -> int:
     if reason:
         hint, action = _TREND_REASON_TEXT.get(reason, ("没有可用的趋势数据。", ""))
         lines = [hint]
+        if reason == trend_store.REASON_NO_RANGE_DATA:
+            available = trend_store.range_names(rows)
+            if available:
+                lines.append("窗口内有按网段计数的网段：" + "、".join(available))
         if action:
             lines.append("下一步：" + action)
         emit("\n".join(lines) + "\n", args.output)
@@ -1948,7 +1992,8 @@ def cmd_trend(args) -> int:
     win = ("全部历史" if payload["window_hours"] is None
            else "过去 %g 小时" % payload["window_hours"])
     ratios = [p["ratio"] for p in series]
-    lines = ["在线率趋势（%s · 粒度 %s）" % (win, granularity)]
+    scope = ("网段 " + range_name) if range_name else "全部网段"
+    lines = ["在线率趋势（%s · 粒度 %s · %s）" % (win, granularity, scope)]
     lines.append("  观测 %d 次 · 当前 %.1f%% · 均值 %.1f%% · 最低 %.1f%% · 最高 %.1f%%" % (
         len(series), ratios[-1] * 100.0, sum(ratios) / len(ratios) * 100.0,
         min(ratios) * 100.0, max(ratios) * 100.0))
@@ -2553,7 +2598,8 @@ def _save_watch_snapshot(args, ledger):
     note = args.note or "被动发现"
     try:
         sid = history_store.save_snapshot(devices, note=note,
-                                          db_path=_db_path(args))
+                                          db_path=_db_path(args),
+                                          trend={"source": "watch"})
     except Exception as e:  # noqa: BLE001
         warn(f"保存快照失败: {e}")
         return
@@ -3093,6 +3139,9 @@ def build_parser() -> argparse.ArgumentParser:
     trp.add_argument("--granularity", choices=trend_store.GRANULARITY_CHOICES,
                      default="raw",
                      help="粒度：raw（每次观测一个点）/ day（按自然日聚合），默认 raw")
+    trp.add_argument("--range", metavar="网段", dest="range",
+                     help="只看某个网段的曲线（用写入端算好的每网段计数）；"
+                          "省略则看全局。可选网段见空窗口提示里列出的列表")
     trp.add_argument("-f", "--format", choices=("table", "json"),
                      default="table", help="输出格式（默认 table）")
     trp.add_argument("-o", "--output", metavar="文件",

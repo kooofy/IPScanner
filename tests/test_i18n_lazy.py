@@ -322,6 +322,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             _COLUMN_LABELS as _TREND_COLS,
             _GRANULARITY_TEXT as _TREND_GRAN,
             _HINT_SAMPLING,
+            _RANGE_ALL_TEXT,
             _REASON_TEXT as _TREND_REASON,
             _UNIT_INSUFFICIENT,
             _UNIT_TEXT as _TREND_UNIT,
@@ -400,6 +401,7 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "ui_dialogs.trend_view._UNIT_INSUFFICIENT": [_UNIT_INSUFFICIENT],
             "ui_dialogs.trend_view._COLUMN_LABELS": list(_TREND_COLS),
             "ui_dialogs.trend_view._HINT_SAMPLING": [_HINT_SAMPLING],
+            "ui_dialogs.trend_view._RANGE_ALL_TEXT": [_RANGE_ALL_TEXT],
         }
 
     def test_all_table_labels_are_translated(self):

@@ -87,6 +87,7 @@ DEFAULT_KEEP_DAYS = 365
 # ── 空数据的理由（照 v2.2 §3.3 的口径：给 reason + 下一步，不给空表）──────
 REASON_NO_RECORDS = "no_records"
 REASON_OUT_OF_WINDOW = "out_of_window"
+REASON_NO_RANGE_DATA = "no_range_data"
 REASON_INSUFFICIENT_SAMPLES = "insufficient_samples"
 
 
@@ -202,19 +203,78 @@ def bucket_by_day(rows: Iterable[dict]) -> List[dict]:
     return [buckets[k] for k in sorted(buckets)]
 
 
-def online_ratio_series(rows: Iterable[dict], granularity: str = "raw") -> List[dict]:
+def row_range_counts(row: dict) -> Dict[str, dict]:
+    """一行趋势的按网段计数 → `{网段: {"total": int, "online": int}}`。
+
+    `ranges_json` 有三种可能，全都**不抛**：
+    * JSON 字符串（正常情况，`history_store._range_counts()` 写的）；
+    * 已是 list（调用方先 `json.loads` 过）；
+    * 旧格式 / 空（v2.3 §3.2 之前是纯网段名列表，或压根没写）⇒ 返回 `{}`
+      —— 没有每网段计数可给，按网段视图自然为空（**不猜**）。
+    """
+    raw = row.get("ranges_json")
+    if not raw:
+        return {}
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+    else:
+        items = raw
+    if not isinstance(items, list):
+        return {}
+    out: Dict[str, dict] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = it.get("range")
+        if not isinstance(name, str) or not name:
+            continue
+        out[name] = {"total": _as_int(it.get("total")),
+                     "online": _as_int(it.get("online"))}
+    return out
+
+
+def range_names(rows: Iterable[dict]) -> List[str]:
+    """窗口内出现过的网段名（去重、升序）—— GUI 下拉与 CLI `--range` 的取值来源。"""
+    names = set()
+    for r in rows:
+        names.update(row_range_counts(r))
+    return sorted(names)
+
+
+def online_ratio_series(rows: Iterable[dict], granularity: str = "raw",
+                        range_name: Optional[str] = None) -> List[dict]:
     """把观测行转成曲线点：`[{"time":…, "total":…, "online":…, "ratio":…}]`。
 
     `ratio` 是 0.0–1.0 的浮点数；`total` 为 0 的行**仍然输出**
     （`ratio` 为 0.0），因为"这轮扫到 0 台"本身是有效观测 ——
     但它与"没有观测"是两回事，后者由调用方用 `REASON_NO_RECORDS` 表达。
 
+    `range_name` 非空时画**该网段**的曲线：只取该网段每行的 `total`/`online`，
+    不含该网段的行**跳过**（那次扫描没扫它）。🔴 计数是写入端按网段算好的
+    （`history_store._range_counts()`）—— 读的时候拆不出来，所以旧数据
+    （没有每网段计数）在按网段视图里就是空的，这是事实不是缺陷。
+
     `granularity` 不是 `GRANULARITY_CHOICES` 里的值时抛 `ValueError`。
     """
     if granularity not in GRANULARITY_CHOICES:
         raise ValueError("未知粒度：%s（可选：%s）"
                          % (granularity, "/".join(GRANULARITY_CHOICES)))
-    source = list(rows)
+    # 先归一化成"全局 或 选定网段"的 total/online，再交给 `bucket_by_day` ——
+    # 这样分档聚合逻辑只有一份（`bucket_by_day` 只认 total/online/time）。
+    source = []
+    for r in rows:
+        if range_name is None:
+            total, online = _as_int(r.get("total")), _as_int(r.get("online"))
+        else:
+            hit = row_range_counts(r).get(range_name)
+            if hit is None:
+                continue
+            total, online = hit["total"], hit["online"]
+        source.append({"time": r.get("time"), "total": total, "online": online,
+                       "offline": max(total - online, 0)})
     if granularity == "day":
         source = bucket_by_day(source)
     # 🔴 **先过滤、再排序** —— 不能让 `sorted` 的 key 直接 float() 一个脏值：

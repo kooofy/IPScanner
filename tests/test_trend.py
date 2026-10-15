@@ -13,6 +13,7 @@
 其余验收：事件**只在变化时写行**、`event_type` 是语言无关规范值、
 迁移幂等、写入失败不升级成扫描失败、空数据给 `reason` 不给空表。
 """
+import argparse
 import contextlib
 import io
 import json
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -166,7 +168,10 @@ class TrendWriteTest(unittest.TestCase):
         _scan(db, [_dev(1)], ranges=["192.168.1.0/24"], ports_scanned=22,
               duration_s=1.5, source="cli")
         row = history_store.read_scan_trend(db_path=db)[0]
-        self.assertEqual(json.loads(row["ranges_json"]), ["192.168.1.0/24"])
+        # 🔴 `ranges_json` 存的是**每网段计数**，不是网段名列表 ——
+        #    只有带着计数，按网段曲线才画得出来（v2.3 §3.2 接线）。
+        self.assertEqual(json.loads(row["ranges_json"]),
+                         [{"range": "192.168.1.0/24", "total": 1, "online": 1}])
         self.assertEqual(row["ports_scanned"], 22)
         self.assertEqual(row["source"], "cli")
 
@@ -462,6 +467,179 @@ class DurationPartsTest(unittest.TestCase):
         self.assertAlmostEqual(trend_store.duration_parts(172800)[0], 2.0)
 
 
+class PerRangeCountsTest(unittest.TestCase):
+    """写入端的每网段计数（`history_store._range_counts`）—— 按网段曲线的唯一数据源。"""
+
+    @staticmethod
+    def _pairs(devs):
+        # `_record_trend` 拿到的 pairs 是 `(identity_key, device_dict)`。
+        return [(d.get("mac", ""), d) for d in devs]
+
+    def test_counts_split_per_range(self):
+        got = history_store._range_counts(self._pairs([
+            {"ip": "192.168.1.1", "status": "online"},
+            {"ip": "192.168.1.2", "status": "offline"},
+            {"ip": "10.0.0.1", "status": "online"},
+        ]), ["192.168.1.0/24", "10.0.0.0/24"])
+        self.assertEqual(got, [
+            {"range": "192.168.1.0/24", "total": 2, "online": 1},
+            {"range": "10.0.0.0/24", "total": 1, "online": 1},
+        ])
+
+    def test_range_with_no_device_is_still_recorded(self):
+        # 扫了但一台都没有 ⇒ 记 0/0（"扫过它"是事实，不该因为 0 台就消失）。
+        got = history_store._range_counts(
+            self._pairs([{"ip": "192.168.1.1", "status": "online"}]),
+            ["192.168.1.0/24", "10.0.0.0/24"])
+        self.assertEqual(got[1],
+                         {"range": "10.0.0.0/24", "total": 0, "online": 0})
+
+    def test_bad_range_and_bad_ip_are_skipped(self):
+        got = history_store._range_counts(
+            self._pairs([{"ip": "not-an-ip", "status": "online"},
+                         {"ip": "", "status": "online"},
+                         {"ip": "192.168.1.1", "status": "online"}]),
+            ["bogus/x", "", "192.168.1.0/24"])
+        self.assertEqual(got, [{"range": "192.168.1.0/24",
+                                "total": 1, "online": 1}])
+
+    def test_overlapping_ranges_each_count_the_device(self):
+        # 重叠网段各自计数（比"首个匹配"可预测：每个网段都得到"扫它时里面有多少台"）。
+        got = history_store._range_counts(
+            self._pairs([{"ip": "192.168.1.5", "status": "online"}]),
+            ["192.168.1.0/24", "192.168.0.0/16"])
+        self.assertEqual([r["total"] for r in got], [1, 1])
+
+    def test_no_ranges_gives_empty(self):
+        self.assertEqual(history_store._range_counts(self._pairs([]), []), [])
+        self.assertEqual(history_store._range_counts(self._pairs([]), None), [])
+
+
+class PerRangeSeriesTest(unittest.TestCase):
+    """读端：`row_range_counts` / `range_names` / 按网段曲线。"""
+
+    def test_row_range_counts_accepts_str_and_list(self):
+        obj = [{"range": "192.168.1.0/24", "total": 3, "online": 2}]
+        want = {"192.168.1.0/24": {"total": 3, "online": 2}}
+        self.assertEqual(
+            trend_store.row_range_counts({"ranges_json": json.dumps(obj)}), want)
+        self.assertEqual(
+            trend_store.row_range_counts({"ranges_json": obj}), want)
+
+    def test_row_range_counts_is_tolerant(self):
+        # 旧格式（纯网段名列表）/ 脏 JSON / 空 / 类型不对 / 缺 range 键 ——
+        # 一律空 dict，不抛（趋势读端崩掉 = 用户什么都看不到）。
+        for bad in ('["192.168.1.0/24"]', "{oops", "", None, [1, 2], "{}",
+                    '[{"total": 1, "online": 1}]', '[{"range": "", "total": 1}]'):
+            self.assertEqual(
+                trend_store.row_range_counts({"ranges_json": bad}), {},
+                "输入 %r 不该抛" % (bad,))
+
+    def test_range_names_sorted_and_deduped(self):
+        rows = [
+            {"ranges_json": json.dumps(
+                [{"range": "10.0.0.0/24", "total": 1, "online": 1}])},
+            {"ranges_json": json.dumps(
+                [{"range": "10.0.0.0/24", "total": 1, "online": 1},
+                 {"range": "192.168.1.0/24", "total": 2, "online": 1}])},
+        ]
+        self.assertEqual(trend_store.range_names(rows),
+                         ["10.0.0.0/24", "192.168.1.0/24"])
+
+    def test_series_skips_rows_without_the_range(self):
+        rows = [
+            {"time": 100.0, "total": 4, "online": 3, "ranges_json": json.dumps(
+                [{"range": "10.0.0.0/24", "total": 2, "online": 2}])},
+            {"time": 200.0, "total": 4, "online": 3, "ranges_json": json.dumps(
+                [{"range": "192.168.1.0/24", "total": 2, "online": 1}])},
+        ]
+        series = trend_store.online_ratio_series(rows, range_name="10.0.0.0/24")
+        self.assertEqual([p["time"] for p in series], [100.0], "不含该网段的行要跳过")
+        self.assertEqual(series[0]["total"], 2)
+        self.assertEqual(series[0]["ratio"], 1.0)
+
+    def test_day_granularity_uses_range_counts_not_global(self):
+        # day 聚合也必须按网段：同一天两次，该网段取当天最大值，**不是**全局的 9。
+        day = time.time() - 120
+        rows = [
+            {"time": day, "total": 9, "online": 9, "ranges_json": json.dumps(
+                [{"range": "10.0.0.0/24", "total": 1, "online": 1}])},
+            {"time": day + 1, "total": 9, "online": 9, "ranges_json": json.dumps(
+                [{"range": "10.0.0.0/24", "total": 2, "online": 1}])},
+        ]
+        series = trend_store.online_ratio_series(
+            rows, granularity="day", range_name="10.0.0.0/24")
+        self.assertEqual(len(series), 1)
+        self.assertEqual(series[0]["total"], 2)
+        self.assertEqual(series[0]["ratio"], 0.5)
+
+
+class ScanTrendWiringTest(unittest.TestCase):
+    """生产扫描路径必须把趋势元数据传进 `save_snapshot`（v2.3 §3.2 接线）。
+
+    🔴 这是那条偏离的回归守卫：不接线时 `ranges_json` / `source` 永远是空的 ——
+    全局曲线看着正常，**按网段曲线却一张都画不出来**。
+    """
+
+    def test_cli_scan_passes_trend_metadata(self):
+        captured = {}
+
+        def _save(devices, **kw):
+            captured.update(kw)
+            return 1
+
+        args = argparse.Namespace(
+            ranges=["192.168.1.0/24"], save_snapshot=True, note=None,
+            online_only=False, fail_if_empty=False, db=None,
+            no_ports=True, ports=None, format="json", exposure=False,
+            notify=False, output=None)
+        with mock.patch.object(cli, "_run_scan", return_value=([object()], None)), \
+                mock.patch.object(cli, "_snapshot_devices",
+                                  return_value=[{"ip": "192.168.1.1",
+                                                 "status": "online"}]), \
+                mock.patch.object(cli, "result_to_record",
+                                  return_value={"ip": "192.168.1.1",
+                                                "status": "online"}), \
+                mock.patch.object(cli, "emit"), \
+                mock.patch.object(cli, "_deliver_report"), \
+                mock.patch.object(history_store, "save_snapshot", side_effect=_save):
+            rc = cli.cmd_scan(args)
+        self.assertEqual(rc, cli.EXIT_OK)
+        self.assertIn("trend", captured, "cmd_scan 必须把 trend= 传给 save_snapshot")
+        self.assertEqual(captured["trend"]["source"], "cli")
+        self.assertEqual(captured["trend"]["ranges"], ["192.168.1.0/24"])
+        self.assertIsNotNone(captured["trend"]["duration_s"], "应带上扫描用时")
+
+    def test_scan_trend_meta_shape(self):
+        args = argparse.Namespace(ranges=["10.0.0.0/24"], no_ports=True)
+        meta = cli._scan_trend_meta(args, elapsed=1.25)
+        self.assertEqual(sorted(meta),
+                         ["duration_s", "ports_scanned", "ranges", "source"])
+        self.assertEqual(meta["ranges"], ["10.0.0.0/24"])
+        self.assertIsNone(meta["ports_scanned"])
+        self.assertEqual(meta["duration_s"], 1.25)
+        self.assertEqual(meta["source"], "cli")
+
+    def test_gui_scan_trend_meta_shape(self):
+        from scan_mixin import ScanMixin
+
+        class _Chk:
+            def isChecked(self):
+                return True
+
+        class _Fake:
+            scan_level = "standard"
+            port_scan_check = _Chk()
+            ip_range_items = ["192.168.1.0/24"]
+            _scan_started_at = time.perf_counter()
+
+        meta = ScanMixin._scan_trend_meta(_Fake())
+        self.assertEqual(meta["source"], "gui")
+        self.assertEqual(meta["ranges"], ["192.168.1.0/24"])
+        self.assertIsNotNone(meta["ports_scanned"])
+        self.assertIsNotNone(meta["duration_s"])
+
+
 class CliTrendTest(unittest.TestCase):
     def _run(self, db, *extra):
         buf = io.StringIO()
@@ -508,11 +686,44 @@ class CliTrendTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(
             sorted(payload),
-            ["granularity", "new_devices", "points", "reason", "samples",
-             "stability", "window", "window_hours"])
+            ["granularity", "new_devices", "points", "range", "reason",
+             "samples", "stability", "window", "window_hours"])
         self.assertEqual(sorted(payload["points"][0]),
                          ["online", "ratio", "time", "total"])
         self.assertIsNone(payload["reason"])
+        self.assertIsNone(payload["range"], "不带 --range 时 range 为 null")
+
+    def test_range_filters_to_one_subnet(self):
+        # 🔴 按网段曲线靠写入端算好的每网段计数；三个口径必须互不相同，
+        #    否则断言"生效了"是假的（全局 75% / 网段 A 50% / 网段 B 100%）。
+        db = _new_db()
+        devs = [
+            {"ip": "192.168.1.1", "status": "online", "mac": "aa:00:00:00:00:01"},
+            {"ip": "192.168.1.2", "status": "offline", "mac": "aa:00:00:00:00:02"},
+            {"ip": "10.0.0.1", "status": "online", "mac": "aa:00:00:00:00:03"},
+            {"ip": "10.0.0.2", "status": "online", "mac": "aa:00:00:00:00:04"},
+        ]
+        _scan(db, devs, ts=time.time(),
+              ranges=["192.168.1.0/24", "10.0.0.0/24"], source="cli")
+        _, glob = self._run(db, "--window", "all")
+        self.assertIn("全部网段", glob)
+        self.assertIn("当前 75.0%", glob)
+        _, one = self._run(db, "--window", "all", "--range", "192.168.1.0/24")
+        self.assertIn("网段 192.168.1.0/24", one)
+        self.assertIn("当前 50.0%", one)
+        _, two = self._run(db, "--window", "all", "--range", "10.0.0.0/24")
+        self.assertIn("当前 100.0%", two)
+
+    def test_unknown_range_explains_and_lists_available(self):
+        # 🔴 拼错网段 / 旧数据没有每网段计数 —— 不能报成"窗外没数据"。
+        db = _new_db()
+        _scan(db, [_dev(1)], ts=time.time(), ranges=["192.168.1.0/24"])
+        rc, out = self._run(db, "--window", "all", "--range", "172.16.0.0/24")
+        self.assertEqual(rc, 0)
+        self.assertIn("没有按网段计数", out)
+        self.assertIn("192.168.1.0/24", out, "要列出窗口内可用的网段")
+        self.assertIn("下一步：", out)
+        self.assertNotIn("不在所选时间窗内", out)
 
     def test_table_output_includes_stability_and_new_devices(self):
         db = _new_db()
@@ -631,6 +842,65 @@ class TrendViewDialogTest(unittest.TestCase):
         self.assertEqual(set(_WINDOW_TEXT), set(trend_store.WINDOW_CHOICES))
         self.assertEqual(set(_GRANULARITY_TEXT),
                          set(trend_store.GRANULARITY_CHOICES))
+
+    def test_range_combo_lists_subnets_with_all_first(self):
+        _scan(self.db, [_dev(1)], ts=time.time(),
+              ranges=["192.168.1.0/24", "10.0.0.0/24"])
+        dlg = TrendViewDialog()
+        self.assertIsNone(dlg.range_combo.currentData(), "默认看全部网段")
+        data = [dlg.range_combo.itemData(i)
+                for i in range(dlg.range_combo.count())]
+        self.assertEqual(data, [None, "10.0.0.0/24", "192.168.1.0/24"])
+        self.assertEqual(dlg.range_combo.itemText(0), tr("全部网段"))
+        dlg.deleteLater()
+
+    def test_selecting_range_changes_the_curve(self):
+        devs = [
+            {"ip": "192.168.1.1", "status": "online", "mac": "aa:00:00:00:00:01"},
+            {"ip": "192.168.1.2", "status": "offline", "mac": "aa:00:00:00:00:02"},
+            {"ip": "10.0.0.1", "status": "online", "mac": "aa:00:00:00:00:03"},
+        ]
+        _scan(self.db, devs, ts=time.time(),
+              ranges=["192.168.1.0/24", "10.0.0.0/24"])
+        dlg = TrendViewDialog()
+        self.assertIn("66.7%", dlg.summary_label.text())        # 全局 2/3
+        dlg.range_combo.setCurrentIndex(
+            dlg.range_combo.findData("10.0.0.0/24"))
+        self.assertIn("100.0%", dlg.summary_label.text())       # 该网段 1/1
+        self.assertIn("10.0.0.0/24", dlg.summary_label.text())
+        dlg.deleteLater()
+
+    def test_no_per_range_counts_leaves_only_all_option(self):
+        # 旧数据（没传 ranges ⇒ 没有每网段计数）⇒ 下拉只有「全部网段」，不给假选项。
+        _scan(self.db, [_dev(1)], ts=time.time())
+        dlg = TrendViewDialog()
+        self.assertEqual(dlg.range_combo.count(), 1)
+        self.assertIsNone(dlg.range_combo.currentData())
+        dlg.deleteLater()
+
+    def test_switching_window_keeps_range_and_explains_when_empty(self):
+        # 🔴 选中的网段在新窗口里没有数据时：**保留选择**（不无声抹掉）+ 说清原因，
+        #    而不是把它静默切回「全部网段」让用户以为自己的选择没生效。
+        _scan(self.db, [_dev(1)], ts=time.time() - 10 * 86400,
+              ranges=["192.168.1.0/24"])
+        _scan(self.db, [_dev(2)], ts=time.time() - 60,
+              ranges=["10.0.0.0/24"])
+        dlg = TrendViewDialog()
+        dlg.window_combo.setCurrentIndex(
+            [i for i in range(dlg.window_combo.count())
+             if dlg.window_combo.itemData(i) == "all"][0])
+        dlg.range_combo.setCurrentIndex(
+            dlg.range_combo.findData("192.168.1.0/24"))
+        self.assertEqual(dlg.range_combo.currentData(), "192.168.1.0/24")
+        dlg.window_combo.setCurrentIndex(
+            [i for i in range(dlg.window_combo.count())
+             if dlg.window_combo.itemData(i) == "24h"][0])
+        self.assertEqual(dlg.range_combo.currentData(), "192.168.1.0/24",
+                         "选择必须保留，不能无声切回「全部网段」")
+        hint, action = _REASON_TEXT[trend_store.REASON_NO_RANGE_DATA]
+        self.assertEqual(dlg.summary_label.text(), tr(hint))
+        self.assertIn(tr(action), dlg.next_label.text())
+        dlg.deleteLater()
 
 
 def tearDownModule():

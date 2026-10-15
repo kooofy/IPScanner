@@ -188,6 +188,9 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 
 1. **在线率曲线**：读 `trend_observations` 按时间桶（`--granularity day` 时按天聚合），
    支持全局与按网段（网段从 `ranges_json` 拆）。
+   ⚠️ 落地时**改为**「写入端按网段各记一份计数」（`ranges_json` 存
+   `[{"range","total","online"}]`）—— 只存网段名的话，读端**拆不回**单网段，
+   按网段曲线根本无法实现。详见下方「落地要点」与 §10。
 2. **抖动与 MTBF**：基于 `asset_events` 的 `status_flip`。
    - 抖动 = 窗口内状态翻转**次数**；
    - MTBF = 相邻 `offline → online` 间隔的**均值**。
@@ -219,13 +222,25 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 **落地要点（2026-10-15）**：
 
 - 纯计算在 `trend_store.py`（零 DB / 零 PyQt / 零 i18n）：`stability()` /
-  `first_seen_devices()` / `duration_parts()`。
+  `first_seen_devices()` / `duration_parts()` / `row_range_counts()` /
+  `range_names()`。
 - CLI `trend` 增 `stability` / `new_devices` 两块（JSON 键固定英文）；表格分节打印，
   样本不足时明写「样本不足」+「不等于稳定」，🔴 **不显示 0 冒充结果**。
 - GUI 新 `ui_dialogs/trend_view.py`（照 `audit_activity.py` 结构：时间窗 + 粒度
-  下拉 + 刷新 + 表格 + 空态下一步）；分析菜单「在线率趋势...」+
+  + **范围** 三个下拉 + 刷新 + 表格 + 空态下一步）；分析菜单「在线率趋势...」+
   `HistoryMixin._show_trend_view()`。
-- 🔴 **两处偏离见 §10**：① 按网段曲线本轮未做；② 趋势元数据列生产路径不写。
+- ✅ **按网段曲线**（做法 #1 的后半）已补：写入端算每网段计数
+  （`history_store._range_counts()`，`ranges_json` 存
+  `[{"range","total","online"}]`），读端 `online_ratio_series(range_name=…)`；
+  CLI `trend --range`、GUI「范围」下拉。新增 `REASON_NO_RANGE_DATA` ——
+  "选了网段但窗口内没有它的计数"与"窗外没数据"**分开报**，并列出可用网段。
+- ✅ **趋势元数据接线**已补（即 §10 偏离 ①②，同一根因）：CLI
+  `_scan_trend_meta()`（`scan`/`diff` 带 ranges/ports/duration，`import`/`watch`
+  带 source）、GUI `scan_mixin._scan_trend_meta()`。回归守卫
+  `ScanTrendWiringTest`（mock 掉真扫描，断言 `trend=` 真传下去 —— 不接线时
+  全局曲线看着正常，只有按网段曲线是空的，肉眼极难发现）。
+- 🔴 新增验收口径：`--range` 的三个数必须**互不相同**（全局 75% / 网段 A 50% /
+  网段 B 100%），否则"断言按网段生效"是恒真的假测试。
 
 ### 3.3 端口长期暴露时长
 
@@ -443,3 +458,33 @@ GUI 新 `ui_dialogs/trend_view.py`（时间窗 + 粒度下拉 + 表格 + 空态�
 各自把 `ranges` / `ports_scanned` / `duration_s` / `source` 传进
 `save_snapshot(trend=…)`，之后按网段曲线才有数据基础。
 **不占 §3 四项名额**，可与 3.3 / 3.4 并行，或另开补丁轨道。
+
+### 2026-10-15 · §3.2 两处偏离收口（用户拍板「先处理那两处偏离」）
+
+**结论**：偏离 ① 与 ② 是**同一根因**（趋势写入端没拿到扫描上下文），
+所以一次收口；上一条的"处理"建议按原样执行，另把按网段曲线一并做完。
+
+**改了什么**：
+
+1. 🔴 `ranges_json` 的形状从「网段名列表」改成「每网段计数」
+   `[{"range", "total", "online"}]`（`history_store._range_counts()`）。
+   这是**必须**的：只写网段名，按网段曲线**根本无法实现**（读端拆不回单网段）。
+   因为是 JSON 列，**不需要迁移** —— `_SQL_V6` 的列定义不变，只是内容变。
+2. CLI `_scan_trend_meta()` / GUI `scan_mixin._scan_trend_meta()`：四条生产落库
+   路径全部带上 `trend=`（`scan` / `diff` 带 ranges + ports + duration；
+   `import` / `watch` 带 source）。
+3. `trend_store`：`row_range_counts()` / `range_names()` /
+   `online_ratio_series(range_name=…)`；新 `REASON_NO_RANGE_DATA`。
+4. CLI `trend --range`、GUI「范围」下拉（首项恒为「全部网段」）。
+
+**一处刻意的设计选择（记账）**：GUI 的「范围」下拉在**用户选的网段于新窗口
+消失时保留该选择**（而不是静默切回「全部网段」）。否则 `REASON_NO_RANGE_DATA`
+在 GUI 里是**不可达的死代码**；保留选择后用户能看到"这个网段在这个窗口内
+没有数据"的说明，选择也不会被无声抹掉。
+
+**验收**：`tests/test_trend.py` 74 例；`trend_store.py` 覆盖 **100%**；
+`ScanTrendWiringTest` 专门守住"元数据真的传下去了" —— 这是最容易悄悄退化的点
+（不接线时全局曲线照常，只有按网段曲线空着，肉眼极难发现）。
+
+**遗留**：无。原偏离 ① 的"宁可不做也不给会误导的曲线"从此刻起不再适用 ——
+现在给的是**按网段各算各的**真值，不是把全局合计贴上网段标签。

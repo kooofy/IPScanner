@@ -62,7 +62,15 @@ _REASON_TEXT = {
         "库里有趋势记录，但都不在所选时间窗内。",
         "把时间窗放大到「过去 30 天」或「全部历史」，或先跑一次扫描。",
     ),
+    trend_store.REASON_NO_RANGE_DATA: (
+        "所选网段在这个时间窗内没有按网段计数。",
+        "网段名可能写错了，或这些数据来自 v2.3 §3.2 之前（那时不记每网段计数）。"
+        "把范围切回「全部网段」看全局曲线，或换个网段。",
+    ),
 }
+
+#: 范围下拉的「全部」项（网段名本身是取值，不需要翻译）。
+_RANGE_ALL_TEXT = "全部网段"
 
 #: 时长单位（`trend_store.DURATION_UNIT_*`）→ 后缀。`insufficient` 单独处理。
 _UNIT_TEXT = {
@@ -135,6 +143,13 @@ class TrendViewDialog(QDialog):
         self.gran_combo.currentIndexChanged.connect(self._reload)
         top.addWidget(self.gran_combo)
 
+        top.addWidget(QLabel(tr("范围:")))
+        self.range_combo = QComboBox()
+        # 项在 `_reload()` 里按当前窗口出现过的网段重建（首项恒为「全部网段」）。
+        self.range_combo.setMinimumWidth(150)
+        self.range_combo.currentIndexChanged.connect(self._reload)
+        top.addWidget(self.range_combo)
+
         top.addStretch()
         btn_refresh = QPushButton(tr("刷新"))
         btn_refresh.clicked.connect(self._reload)
@@ -182,6 +197,32 @@ class TrendViewDialog(QDialog):
 
     # ── 数据加载 ──
 
+    def _sync_range_combo(self, names):
+        """把网段下拉重建为「全部网段」+ 当前窗口出现过的网段。
+
+        🔴 重建时必须 `blockSignals` —— 否则 `clear()` / `addItem()` 会触发
+        `currentIndexChanged` → 再次 `_reload()`，无限递归。
+        保留用户当前选择（还在列表里就用它，否则回到「全部网段」）。
+        """
+        wanted = self.range_combo.currentData()
+        names = list(names)
+        # 用户已选的网段若在当前窗口没出现，**保留它**（而不是悄悄切回「全部」）：
+        # 这样用户能看到"这个网段在这个窗口内没有数据"的说明，而不是选择被无声抹掉。
+        if wanted is not None and wanted not in names:
+            names.append(wanted)
+        items = [(tr(_RANGE_ALL_TEXT), None)] + [(n, n) for n in names]
+        current = [(self.range_combo.itemText(i), self.range_combo.itemData(i))
+                   for i in range(self.range_combo.count())]
+        if current == items:
+            return
+        blocked = self.range_combo.blockSignals(True)
+        self.range_combo.clear()
+        for label, data in items:
+            self.range_combo.addItem(label, data)
+        idx = self.range_combo.findData(wanted)
+        self.range_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.range_combo.blockSignals(blocked)
+
     def _reload(self):
         window = self.window_combo.currentData()
         granularity = self.gran_combo.currentData()
@@ -193,13 +234,18 @@ class TrendViewDialog(QDialog):
             msg_warn(self, tr("读取失败"), str(e))
             return
 
-        series = trend_store.online_ratio_series(rows, granularity=granularity)
+        self._sync_range_combo(trend_store.range_names(rows))
+        range_name = self.range_combo.currentData()
+        series = trend_store.online_ratio_series(rows, granularity=granularity,
+                                                 range_name=range_name)
         if not rows:
             reason = trend_store.REASON_OUT_OF_WINDOW
             if not history_store.read_scan_trend():
                 reason = trend_store.REASON_NO_RECORDS
         elif not series:
-            reason = trend_store.REASON_OUT_OF_WINDOW
+            # 有行没点：要么全在窗外，要么（选了网段时）该网段没有每网段计数。
+            reason = (trend_store.REASON_NO_RANGE_DATA if range_name
+                      else trend_store.REASON_OUT_OF_WINDOW)
         else:
             reason = None
 
@@ -231,9 +277,10 @@ class TrendViewDialog(QDialog):
                      mttr=_fmt_duration(stab["mttr_seconds"]),
                      m=stab["mttr_samples"])
             + "\n"
-            + tr("时间窗：{win} · 粒度：{gran}").format(
+            + tr("时间窗：{win} · 粒度：{gran} · 范围：{scope}").format(
                 win=_label(_WINDOW_TEXT, window),
-                gran=_label(_GRANULARITY_TEXT, granularity)))
+                gran=_label(_GRANULARITY_TEXT, granularity),
+                scope=(range_name if range_name else tr(_RANGE_ALL_TEXT))))
 
         self.table.setRowCount(len(series))
         for row, p in enumerate(series):

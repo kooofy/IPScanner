@@ -45,18 +45,24 @@ class HistoryMixin:
         return ui_logic.build_snapshot(results)
 
 
-    def _save_snapshot(self, results, max_keep: int = 20, switch_maps=None):
+    def _save_snapshot(self, results, max_keep: int = 20, switch_maps=None,
+                       trend=None):
         """保存历史快照。`switch_maps` 非空时，把交换机端口映射一并落库。
 
         `switch_maps` 由 `ScanThread` 在**扫描线程内**采集（见
         `topology_discovery.collect_switch_port_maps`）；这里只负责写库 ——
         采集放在主线程会冻住界面（每台交换机 5 次 SNMP walk）。
+
+        `trend` 是趋势观测的扫描元数据（`ranges` / `ports_scanned` /
+        `duration_s` / `source`，见 `history_store._record_trend`）。
+        不传也照写一行趋势（`total`/`online` 从 devices 现算），
+        只是**按网段曲线没数据可画**（v2.3 §3.2 接线）。
         """
         try:
             snap = self._build_snapshot(results)
             sid = history_store.save_snapshot(
                 snap["devices"], ts=snap["time"], max_keep=max_keep,
-                db_path=self.history_db,
+                db_path=self.history_db, trend=trend,
             )
             if switch_maps:
                 # 与设备列表分开存：端口映射不是每次扫描都有（要 SNMP + BRIDGE-MIB），

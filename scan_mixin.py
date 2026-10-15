@@ -4,6 +4,7 @@ import sys
 import re
 import socket
 import subprocess
+import time
 from PyQt5.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QSpinBox, QComboBox
 )
@@ -455,6 +456,9 @@ class ScanMixin:
         # 用时 / [停止]。计数在 `_on_scan_result` 里累加，这里只负责复位。
         self._scan_online = 0
         self._scan_services = 0
+        # 扫描计时（只给趋势观测的 duration_s 用；与界面展示无关）。
+        # `perf_counter` 而非 `monotonic`：Windows 上后者分辨率可能差到 15.6ms。
+        self._scan_started_at = time.perf_counter()
         self.scan_status.start(total_ips)
         # 切到结果页：让用户立刻看到表格在填充（空状态页只服务于"尚无结果"）
         self._show_results_page(True)
@@ -633,6 +637,30 @@ class ScanMixin:
             self._scan_services += 1
         self.scan_status.set_counts(self._scan_online, self._scan_services)
 
+    def _scan_trend_meta(self):
+        """趋势观测的扫描元数据（v2.3 §3.2 接线）。
+
+        与 `_audit_scan_summary()` 同源（都用 `ip_range_items` / `scan_level`），
+        但**不是**同一份：那个进审计库（合规自查），这个进趋势库（画曲线）。
+        没有它，`ranges_json` / `source` 等列就永远是空的，按网段曲线画不出来。
+        """
+        try:
+            ports = (get_ports_for_level(self.scan_level)
+                     if self.port_scan_check.isChecked() else None)
+            started = getattr(self, "_scan_started_at", None)
+            duration = (time.perf_counter() - started
+                        if started is not None else None)
+            return {
+                "ranges": list(self.ip_range_items or []),
+                "ports_scanned": len(ports) if ports else None,
+                "duration_s": duration,
+                "source": "gui",
+            }
+        except Exception as e:  # noqa: BLE001
+            # 趋势是旁路：元数据取不到就不带，绝不拖累一次已完成的扫描。
+            _log.warning("构造趋势元数据失败（本次不带）: %s", e)
+            return None
+
     def _on_scan_finished(self, results):
         try:
             self.all_results = results
@@ -642,7 +670,8 @@ class ScanMixin:
             # 端口映射（若本次扫描采集过）随快照一并落库，供「定位查询」使用
             self._save_snapshot(
                 results,
-                switch_maps=getattr(self.scan_thread, "switch_maps", None))
+                switch_maps=getattr(self.scan_thread, "switch_maps", None),
+                trend=self._scan_trend_meta())
 
             # 先关闭排序，避免批量添加时的性能问题
             self.table.setSortingEnabled(False)

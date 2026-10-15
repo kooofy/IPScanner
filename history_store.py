@@ -1400,12 +1400,58 @@ def _build_asset_events(pairs, states):
     return events
 
 
+def _range_counts(pairs, ranges):
+    """每个被扫网段一行 `{"range": …, "total": …, "online": …}`（v2.3 §3.2 按网段曲线）。
+
+    🔴 **按网段计数只能在写入端算**：`trend_observations` 一行是"这次扫描的全局
+    聚合"，读的时候已经拆不回单网段了（见 `docs/ROADMAP_V2.3.md` §10 偏离 ①）。
+
+    IP 归属**逐网段独立判断**：重叠网段各自计数（同一台设备会同时出现在两个
+    网段里）。这比"首个匹配"可预测 —— 每个网段都得到"扫它时它里面有多少台在线"。
+
+    解析不了的网段名**跳过**（不抛）：本函数在 `save_snapshot()` 的事务里跑，
+    一个坏网段字符串不该让整次扫描的落库失败。
+    """
+    nets = []
+    for name in ranges or []:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            nets.append((name, ipaddress.ip_network(name, strict=False)))
+        except ValueError:
+            continue
+    if not nets:
+        return []
+    counts = {name: [0, 0] for name, _net in nets}
+    for _key, d in pairs:
+        ip = str(d.get("ip") or "").strip()
+        if not ip:
+            continue
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        is_online = (d.get("status") or "").strip() == "online"
+        for name, net in nets:
+            if addr in net:
+                counts[name][0] += 1
+                if is_online:
+                    counts[name][1] += 1
+    return [{"range": name, "total": counts[name][0], "online": counts[name][1]}
+            for name, _net in nets]
+
+
 def _record_trend(conn, ts, pairs, meta):
     """写一行 `trend_observations` + 若干 `asset_events`。
 
     🔴 只在 `save_snapshot()` 的事务内调用，且**被 try/except 包着**：
     趋势是增强，不是前提 —— 写入失败**绝不**升级成扫描失败
     （与 v2.2 三项的失败口径同一条）。
+
+    `meta` 的键（都可省）：`ranges`（被扫网段名列表，会被算成每网段计数）、
+    `ports_scanned`、`duration_s`、`source`（`cli` / `gui` / `import` / `watch`）。
+    🔴 `ranges_json` 存的是 `[{"range", "total", "online"}, …]`（见 `_range_counts`）——
+    **不是**网段名列表：只有带每网段计数，按网段曲线才画得出来。
 
     返回写入的事件条数（便于日志与测试）。
     """
@@ -1419,7 +1465,8 @@ def _record_trend(conn, ts, pairs, meta):
         " duration_s, source) VALUES (?,?,?,?,?,?,?,?)",
         (
             ts, total, online, total - online,
-            json.dumps(meta.get("ranges") or [], ensure_ascii=False, sort_keys=True),
+            json.dumps(_range_counts(pairs, meta.get("ranges")),
+                       ensure_ascii=False, sort_keys=True),
             meta.get("ports_scanned"),
             meta.get("duration_s"),
             meta.get("source") or "",
