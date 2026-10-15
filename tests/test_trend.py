@@ -791,6 +791,7 @@ from tests._qt_app import ensure_qt_app  # noqa: E402
 
 ensure_qt_app()
 
+import i18n  # noqa: E402
 from i18n import tr  # noqa: E402
 from ui_dialogs.trend_view import (  # noqa: E402
     TrendViewDialog, _COLUMN_LABELS, _GRANULARITY_TEXT, _REASON_TEXT,
@@ -1183,8 +1184,30 @@ class CliPortExposureTest(unittest.TestCase):
         self.assertNotIn("至少，自首次观测起算", out)
 
 
+from ui_utils import format_duration  # noqa: E402
+
+
+def _plain_exposure_line(port, seconds):
+    """「端口 N 已开放 X」在当前语言下的**确切**文本（断言用）。"""
+    return tr("端口 {port} 已开放 {dur}").format(
+        port=port, dur=format_duration(seconds))
+
+
+def _baseline_exposure_line(port, seconds):
+    """「端口 N **至少**已开放 X」在当前语言下的确切文本（断言用）。"""
+    return tr("端口 {port} 至少已开放 {dur}"
+              "（自首次观测起算，真实开放时刻更早）").format(
+                  port=port, dur=format_duration(seconds))
+
+
 class DetailPanelExposureTest(unittest.TestCase):
-    """详情面板的「端口暴露」分区（v2.3 §3.3）。"""
+    """详情面板的「端口暴露」分区（v2.3 §3.3）。
+
+    🔴 **断言一律经 `tr()` 推导，绝不钉中文字面量**：CI runner 的 locale 是
+    `en-US`，`tr()` 在那里返回英文。2026-10-15 实际踩过 ——
+    `assertIn("至少", text)` 本机（zh）必过、CI 必挂：
+    `AssertionError: '至少' not found in ... 'open for at least 1.0 h'`。
+    """
 
     def setUp(self):
         self.p = DeviceDetailPanel()
@@ -1206,15 +1229,33 @@ class DetailPanelExposureTest(unittest.TestCase):
             {"port": 23, "since": 0.0, "seconds": 3600.0, "baseline": True}])
         text = self.p._plain_text()
         self.assertIn(tr("端口暴露"), text)
-        self.assertIn("至少", text)
-        self.assertIn("23", text)
+        self.assertIn(_baseline_exposure_line(23, 3600.0), text)
 
     def test_plain_row_does_not_say_at_least(self):
         self.p.set_device(self._result(), exposure=[
             {"port": 445, "since": 0.0, "seconds": 90.0, "baseline": False}])
         text = self.p._plain_text()
-        self.assertIn("445", text)
-        self.assertNotIn("至少", text)
+        self.assertIn(_plain_exposure_line(445, 90.0), text)
+        self.assertNotIn(_baseline_exposure_line(445, 90.0), text,
+                         "真正的开事件不该被说成「至少」")
+
+    def test_baseline_wording_holds_in_both_languages(self):
+        """🔴 这条**两种语言都跑** —— 让上面那个 CI-only 的坑在本机就能复现。
+
+        CI runner 的 locale 是 `en-US`；只在本机（zh）跑一遍是**测不出**
+        语言相关缺陷的。这里显式切一次语言再断言，跑完还原。
+        """
+        rows = [{"port": 23, "since": 0.0, "seconds": 3600.0, "baseline": True}]
+        previous = i18n.current_lang()
+        try:
+            for lang in ("zh-CN", "en-US"):
+                i18n.init(lang)
+                self.p.set_device(self._result(), exposure=rows)
+                self.assertIn(_baseline_exposure_line(23, 3600.0),
+                              self.p._plain_text(),
+                              "语言 %s 下的措辞对不上" % lang)
+        finally:
+            i18n.init(previous)
 
     def test_rows_without_a_usable_duration_are_dropped(self):
         # 🔴 不显示「端口 23 已开放 样本不足」这种读不通的句子。

@@ -554,5 +554,17 @@ JSON 键 + 表格一节）；GUI 在**设备详情面板**加「端口暴露」�
 `cli._fmt_duration` **刻意不共享** —— CLI 不 import `i18n`、输出恒为中文，
 共享会让 CLI 的输出随界面语言漂移。
 
-**验收**：`tests/test_trend.py` 135 例全绿；全量 **2684 OK**；
+**验收**：`tests/test_trend.py` **105** 例全绿（+31）；全量 **2685 OK**；
 `trend_store.py` 覆盖 **100%**（门禁 90）、`history_store.py` **96%**（门禁 95）。
+
+**⚠️ 一次 CI-only 红（已修，记账）**：本机 `run_tests.py` 2684 OK 全绿，
+推上去 CI **7 个 job 全红**（ubuntu / macos / Windows 3.10–3.13 / 覆盖率门禁）——
+`DetailPanelExposureTest` 里 `assertIn("至少", text)` 钉了**中文字面量**，
+而 CI runner 的 locale 是 **en-US**（`i18n.init(None)` 解析成英文），
+`tr()` 在那里返回 `at least`。触发链比"locale 不同"更具体：
+`CliPortExposureTest` 调了 `cli.main()`，而 **`cli.main()` 会
+`i18n.init(None)`**，把**整个进程**的语言切成 en-US。
+修法：断言改成经 `tr()` 推导的**确切**文本，并补一条**两种语言都跑**的守卫
+（`test_baseline_wording_holds_in_both_languages`）让本机就能复现。
+🔴 教训：本机 zh-CN + CI en-US ⇒ 语言相关的缺陷**本机测不出来**，
+与「只在别的平台上错」是同一类；GUI 断言一律 `tr("…")` 或语言无关量。
