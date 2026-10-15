@@ -102,8 +102,18 @@ class SilentExceptDocumentedTest(unittest.TestCase):
 
     def test_silent_handler_count_does_not_grow(self):
         """棘轮：静默吞异常的数量只能降不能升。"""
-        # 2026-09 治理后基线（治理前为 53）。下降时请同步下调本数字。
-        BASELINE = 10
+        # 2026-09 治理后基线（治理前为 53）。
+        # v2.2 §3.4-c 再降到 7 —— 三处**真消掉**了 handler（不是加注释糊弄）：
+        #   * `scanner/constants.py` 反查块：`canonical()` 本就是全函数，
+        #     去掉 try/except 直接调用；
+        #   * `scanner/wmi.py` 内存字段：改纯类型判断 `_total_memory_gb()`，
+        #     连异常都不产生（还能区分"没拿到"与"是 0"）；
+        #   * `network_tool_mixin.py` IP 字面量判定：提成谓词
+        #     `_is_ip_literal()`，handler 里 `return False` 而不是 `pass`。
+        # 剩下 7 处全是**日志/语言包/路径系统自身**的兜底（那时没有任何可用
+        # 的落盘通道），或测试脚手架 —— 它们没有可用的记录渠道，不该再降。
+        # 下降时请同步下调本数字。
+        BASELINE = 7
         total = sum(len(_silent_handlers(p)) for p in _project_py_files())
         self.assertLessEqual(
             total, BASELINE,

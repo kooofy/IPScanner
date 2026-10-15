@@ -331,6 +331,15 @@ python cli.py scan -r 192.168.1.0/24 --save-snapshot --notify --no-policy  # 忽
 python cli.py locate --mac AA:BB:CC:DD:EE:FF
 python cli.py locate --ip 192.168.1.50 --format json
 
+# 扫描活动自查：过去 24h / 7 天 / 全部历史，向哪些网段发起了多少次扫描
+# （只读本机审计库，不联网；空数据会说明原因而不是给一张空表）
+python cli.py audit --window 168
+python cli.py audit --format json
+
+# Nagios / Icinga 插件：一次性执行，退出码 0/1/2/3 = OK/WARNING/CRITICAL/UNKNOWN
+# （不常驻、不开端口；数据过期或没有快照时报 UNKNOWN，不猜成 OK）
+python cli.py nagios --crit-new 3
+
 # 被动发现：不发任何网络包地看"最近谁在我身边出现过"
 python cli.py watch                       # 读 ARP 表 + 只听 mDNS，单次轮询
 python cli.py watch --no-mdns             # 只读 ARP 表（最快，几十毫秒）

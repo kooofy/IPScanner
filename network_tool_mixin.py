@@ -27,6 +27,22 @@ _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SAFE_USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,62}$")
 
 
+def _is_ip_literal(t: str) -> bool:
+    """`t` 是否是 IPv4 / IPv6 字面量。
+
+    ⚠️ `ipaddress` 没有"是不是 IP"的谓词接口，只能靠 `ip_address()` 抛
+    `ValueError` 来判定 —— 所以这里**显式 `return False`**，而不是在调用点
+    写 `except ValueError: pass`：后者语义是"吞掉异常继续往下走"，会被
+    `tests/test_logging_policy.py` 的静默吞异常棘轮记一笔，且读代码的人
+    分不清"预期内"与"漏处理"（v2.2 §3.4-c）。
+    """
+    try:
+        ipaddress.ip_address(t)
+        return True
+    except ValueError:
+        return False
+
+
 def validate_target(target):
     """校验网络工具目标，返回 ``(ok, cleaned, reason)``。
 
@@ -45,13 +61,8 @@ def validate_target(target):
         if ch.isspace() or ord(ch) < 32 or ord(ch) == 127:
             return False, "", "目标不能包含空白或控制字符"
     # IP 字面量（IPv6 含冒号，必须先于主机名白名单判断）
-    try:
-        ipaddress.ip_address(t)
+    if _is_ip_literal(t):
         return True, t, ""
-    except ValueError:
-        # 不是 IP 字面量 → 继续按主机名白名单校验。
-        # 这是**预期内的控制流**而非错误，刻意不记日志（每次校验都会走到这里）。
-        pass
     # 主机名：白名单字符集，且不能以连字符开头（避免被 ping/ssh 当成选项）
     if not _SAFE_HOSTNAME_RE.match(t):
         return False, "", "目标只能包含字母、数字、点、连字符和下划线"

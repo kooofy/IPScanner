@@ -510,6 +510,37 @@ class ScanMixin:
             self._audit(audit_log.CAT_SCAN, tr("停止扫描"), tr("用户手动中止扫描"))
             self.scan_thread.wait(3000)
 
+    def _audit_scan_summary(self, status_counts=None):
+        """写一条**结构化**扫描汇总事件（v2.2 §3.3 自查视图的唯一数据源）。
+
+        与 `_audit(CAT_SCAN, tr("开始扫描"/"扫描完成"), ...)` 那两条本地化
+        事件并存、互不替代：老 viewer 读人话，自查视图只读这条
+        action=规范码 / detail=语言无关 JSON 的汇总。
+
+        与 `cli._audit_scan_summary()` 同口径（键完全一致），
+        GUI 与 CLI 两条扫描路径汇入同一张视图。
+
+        任何异常只 warning：审计是旁路，不该让一次已完成的扫描判失败。
+        """
+        try:
+            ranges = [
+                {"range": r, "ips": count_ip_range(r)}
+                for r in self.ip_range_items
+            ]
+            ports = (get_ports_for_level(self.scan_level)
+                     if self.port_scan_check.isChecked() else None)
+            audit_log.log_scan_summary({
+                "ranges": ranges,
+                "ips": sum(item["ips"] for item in ranges),
+                "online": int((status_counts or {}).get("online", 0) or 0),
+                "protocols": list(self.selected_protocols or []),
+                "ports_scanned": len(ports) if ports else None,
+                "throttle": self.throttle_policy or "",
+                "source": "gui",
+            })
+        except Exception as e:  # noqa: BLE001
+            _log.warning("写入扫描汇总审计失败（不影响本次扫描）: %s", e)
+
     def _toggle_protocol(self, proto, checked):
         """菜单勾选/取消协议，实时更新 selected_protocols 并提示。"""
         if checked:
@@ -664,6 +695,12 @@ class ScanMixin:
                 f"共 {_st['total']} 个IP · 在线 {_st['online']} · 离线 {_st['offline']} · "
                 f"未知 {_st['unknown']}",
             )
+            # v2.2 §3.3：自查视图用的**结构化**汇总事件。上面那条是给人看的
+            # 本地化文本（tr() 结果入库），不能拿来聚合 —— 拿 tr() 结果作
+            # 比较，切一次语言聚合就裂行。汇总事件 action 是规范码、
+            # detail 是语言无关 JSON；记账失败被 _audit 系列吞掉，不拖累
+            # 一次已完成的扫描。
+            self._audit_scan_summary(_st)
             # 扫描完成后自动执行冲突检测（静默，仅更新标记和状态栏）
             self._run_conflict_detection(silent=True)
             # 概览页可见时同步刷新（不可见则跳过，避免白算一遍全量统计）

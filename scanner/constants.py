@@ -4,7 +4,7 @@ import locale
 import platform
 import re
 import threading
-from i18n import tr
+from i18n import canonical, tr
 
 # v2.2 §3.2：常用端口表（quick 级）与端口显示名已外置为顶层
 # port_services.json（由顶层模块 port_services 三层加载：data_dir() →
@@ -255,20 +255,17 @@ def service_code(value) -> str:
     for code, text in SERVICE_LABELS.items():
         if low == text.lower():          # 是源串
             return code
-    # 再尝试按「当前语言下的翻译」反查：翻译 -> 源串 -> 规范代码
-    try:
-        from i18n import canonical
-        src = canonical(v)
-        if src != v:
-            if src in SERVICE_LABELS:
-                return src
-            for code, text in SERVICE_LABELS.items():
-                if src == text:
-                    return code
-    except Exception:
-        # 反查失败 → 原样返回入参。这是"查不到"而非错误：
-        # 调用方拿到未识别的值时按字面量展示即可。
-        pass
+    # 再尝试按「当前语言下的翻译」反查：翻译 -> 源串 -> 规范代码。
+    # 🔴 `canonical()` 是**全函数**（空串 / 未知文本原样返回，不抛），所以这里
+    # 不需要 try/except —— 原来的 `except: pass` 是纯静默吞异常，被
+    # `tests/test_logging_policy.py` 的棘轮记了一处（v2.2 §3.4-c 已消掉）。
+    src = canonical(v)
+    if src != v:
+        if src in SERVICE_LABELS:
+            return src
+        for code, text in SERVICE_LABELS.items():
+            if src == text:
+                return code
     return v
 
 

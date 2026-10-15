@@ -84,6 +84,31 @@ class AspectRatioAcceptanceTest(unittest.TestCase):
                     self._aspect(n_sw, hosts), self.MAX_ASPECT,
                     f"{n_sw} 交换机 / {hosts} 终端 的宽高比超标（v1.9 #9）")
 
+    def test_fifty_devices_stay_within_three_to_one(self):
+        """路线图 v2.2 §3.4-d 字面要求：**50 台设备以内，画布宽高比 ≤ 3:1**。
+
+        与上面的 `test_scales_are_within_acceptance` 是**同一条不变量的字面
+        可追溯版**：那个用例按「交换机台数 × 终端数」铺开（最大 50×100 =
+        5050 个节点），没有一条正好落在「50 台设备以内」这个区间，验收时没法
+        直接指着某一行说"这条就是建议书 §10 第 8 件"。
+
+        ⚠️ 节点数 = 1 网关 + N 交换机 + N×M 终端（见 `_build_topology`）。
+        """
+        for n_sw, hosts in ((2, 9), (3, 9), (5, 8)):     # 19 / 28 / 46 台
+            with self.subTest(switches=n_sw, hosts=hosts):
+                topo = _build_topology(n_sw, hosts)
+                self.assertLessEqual(len(topo.nodes), 50)
+                positions = layout_real_topology(topo, _GATEWAY)
+                xs = [x for x, _ in positions.values()]
+                ys = [y for _, y in positions.values()]
+                width, height = max(xs) - min(xs), max(ys) - min(ys)
+                self.assertGreater(height, 0)
+                self.assertLessEqual(
+                    width / height, self.MAX_ASPECT,
+                    f"{len(topo.nodes)} 台设备（{n_sw} 交换机 / {hosts} 终端）"
+                    f"的画布宽高比 {width / height:.2f} 超过 "
+                    f"{self.MAX_ASPECT}:1")
+
     def test_canvas_stays_within_pixel_budget(self):
         """1000 台以内：最长边 ≤ 4000px、最短边 ≥ 600px。"""
         for n_sw, hosts in ((1, 1000), (4, 100), (10, 100)):

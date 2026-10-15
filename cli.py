@@ -27,6 +27,8 @@
     python cli.py diff --from 3 --to 4
     python cli.py history --list
     python cli.py history --query --device-class 打印机 --format csv
+    python cli.py audit --window 168
+    python cli.py nagios --crit-new 3          # Nagios/Icinga 插件（退出码 0/1/2/3）
 
 SNMPv3（USM）
 -------------
@@ -528,6 +530,38 @@ def _audit_throttle(policy, args=None, db_path=None) -> None:
         warn(f"记录礼貌档到审计日志失败（不影响本次扫描）: {e}")
 
 
+def _audit_scan_summary(args, ranges, total_ips, online, ports, protocols,
+                        policy=None, db_path=None) -> None:
+    """把本次扫描写入**结构化**审计汇总（v2.2 §3.3 自查视图的数据源）。
+
+    与 GUI `ScanMixin._audit_scan_summary()` **同口径**（键完全一致）——
+    CLI 与 GUI 两条扫描路径汇入同一张视图。
+
+    🔴 detail 只放**语言无关值**（网段串 / 计数 / 协议规范码）。既有扫描
+    事件的 action/detail 是 `tr()` 结果（给人看的），拿它们聚合就是拿
+    tr() 结果作比较 —— 切一次界面语言，聚合结果随语言漂移。
+
+    写审计失败只告警：审计是旁路，不该让一次已经成功的扫描判失败。
+    """
+    if db_path is None:
+        db_path = _db_path(args)
+    try:
+        from scanner.range import count_ip_range
+        import audit_log
+        audit_log.log_scan_summary({
+            "ranges": [{"range": r, "ips": count_ip_range(r)}
+                       for r in ranges or []],
+            "ips": total_ips,
+            "online": online,
+            "protocols": list(protocols or []),
+            "ports_scanned": len(ports) if ports else None,
+            "throttle": policy.name if policy is not None else "",
+            "source": "cli",
+        }, db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        warn(f"记录扫描汇总到审计日志失败（不影响本次扫描）: {e}")
+
+
 def _run_scan(args):
     """执行一次扫描，返回 (results, scanner)。
 
@@ -660,6 +694,11 @@ def _run_scan(args):
 
     elapsed = time.monotonic() - t0
     online = sum(1 for r in results if r.status == "online")
+    # v2.2 §3.3：自查视图的结构化汇总。放在这里（而非 _audit_throttle 旁）
+    # 是因为要等 online 数算出来；记录的是**实际用过**的协议列表
+    # （可能被 SNMPv3 / 凭据档追加过），不是用户原话。
+    _audit_scan_summary(args, args.ranges, total_ips, online, ports,
+                        protocols, policy=policy)
     log(f"扫描完成：{len(results)} 个地址，{online} 台在线，耗时 {elapsed:.1f}s")
     return results, scanner
 
@@ -1725,6 +1764,111 @@ _PORT_UTIL_REASON = {
 }
 
 
+# ────────────────────────── 扫描活动自查（v2.2 §3.3） ──────────────────────────
+
+#: 自查「没有数据」的原因（`audit_log.REASON_NO_RECORDS` 规范值，语言无关）
+#: → (说明, 下一步动作)。🔴 **必须**给下一步：只说「没有记录」会让用户以为
+#: 「这段时间没扫过网」，而真相可能只是「汇总从 v2.2 才开始记录」。
+_AUDIT_REASON_TEXT = {
+    "no_records": (
+        "所选时间窗内没有任何扫描汇总记录。",
+        "结构化汇总自 v2.2 起才随每次扫描自动写入 —— 更早的扫描不在其内。"
+        "先跑一次 `ipscanner scan -r <网段>`，再回来查就有数据了。",
+    ),
+}
+
+
+def cmd_audit(args) -> int:
+    """扫描活动自查：过去一段时间向哪些网段发起过多少次扫描（v2.2 §3.3）。
+
+    数据源是 `audit_log` 里**结构化**的扫描汇总（`SUM_ACTION` 行），不是给人
+    看的自由文本 detail —— 后者的 action/detail 是 `tr()` 结果，拿它聚合等于
+    拿 `tr()` 结果作比较，切一次界面语言结论就漂移（铁律）。
+
+    退出码恒为 0：自查命令里「没记录」不是失败，是要说清的事实。
+
+    ⚠ 审计库与历史快照库是**两个文件**，所以本命令**不认** `--db`（那个是
+    历史快照库）——避免把审计查询指到 scan_history.db 上得出空结论。
+    """
+    import audit_log
+
+    if getattr(args, "db", None):
+        # common 父解析器带来的 --db 指的是**历史快照库**；审计库是另一个
+        # 文件。 silently 忽略会让用户以为查的是他指定的库 ⇒ 明说不采纳。
+        warn("--db 只对历史快照类命令有效；审计库固定用程序数据目录下的 "
+             "audit_log.db，本参数已忽略。")
+
+    window = getattr(args, "window", "24")
+    hours = None if window == "all" else int(window)
+    s = audit_log.activity_summary(hours)
+
+    if args.format == "json":
+        emit(render_json(s), args.output)
+        return EXIT_OK
+
+    if s["reason"]:
+        hint, action = _AUDIT_REASON_TEXT.get(
+            s["reason"], ("没有可用的扫描活动数据。", ""))
+        lines = [hint]
+        if action:
+            lines.append("下一步：" + action)
+        emit("\n".join(lines) + "\n", args.output)
+        return EXIT_OK
+
+    win = ("全部历史" if s["window_hours"] is None
+           else "过去 %g 小时" % s["window_hours"])
+    lines = ["扫描活动自查（%s）" % win]
+    lines.append("  扫描 %d 次 · 涉及 %d 个网段 · 累计覆盖 %d 个地址 · "
+                 "在线设备 %d 台次" % (
+                     s["scan_count"], s["range_count"], s["total_ips"],
+                     s["total_online"]))
+    lines.append("  其中扫了端口 %d 次 · 发包估算约 %d 个（下限）" % (
+        s["port_scan_count"], s["estimated_probes"]))
+    lines.append("  协议：" + ("、".join(
+        "%s ×%d" % (p, c) for p, c in sorted(
+            s["protocols"].items(), key=lambda kv: (-kv[1], kv[0])))
+        if s["protocols"] else "均未指定（只做默认主机发现）"))
+    lines.append("  礼貌档：" + ("、".join(
+        "%s ×%d" % (t, c) for t, c in sorted(
+            s["throttles"].items(), key=lambda kv: (-kv[1], kv[0])))
+        if s["throttles"] else "未记录"))
+    lines.append("  网段（按最近一次倒序）：")
+    for a in s["ranges"]:
+        lines.append("    %s  %d 次  累计 %d 个地址  发包估算约 %d 个" % (
+            a["range"], a["scans"], a["ips"], a["estimated_probes"]))
+    lines.append("⚠ 发包数是**估算下限**（主机发现 + 在线设备端口探测），"
+                 "不含 ARP / mDNS / 按需 enrich，不是包计数器读数。")
+    emit("\n".join(lines) + "\n", args.output)
+    return EXIT_OK
+
+
+# ────────────────────────── Nagios 插件契约（v2.2 §3.4-a） ──────────────────────────
+
+def cmd_nagios(args) -> int:
+    """Nagios / Icinga / Zabbix / Checkmk 插件入口（v2.2 §3.4-a）。
+
+    🔴 **本子命令的退出码是 Nagios 语义**（0 OK / 1 WARNING / 2 CRITICAL /
+    3 UNKNOWN），与其它子命令的 0/1/2/3（成功/错误/有变更/环境错）**不同** ——
+    这是插件规范的硬要求，不能两全；因此**独立子命令**、绝不改既有语义。
+    详见 `nagios_check` 模块文档。
+
+    一次性执行、不常驻、不开端口：被监控系统按需拉起一个短命进程。
+    """
+    import nagios_check
+
+    result = nagios_check.check_once(
+        db_path=_db_path(args),
+        max_age_hours=args.max_age_hours,
+        warn_new=args.warn_new, crit_new=args.crit_new,
+        warn_identity=args.warn_identity, crit_identity=args.crit_identity,
+    )
+    if args.format == "json":
+        emit(render_json(result), args.output)
+    else:
+        emit(nagios_check.render_plugin_line(result) + "\n", args.output)
+    return result["code"]
+
+
 # ────────────────────────── CVE 快照 / 暴露面（v2.1 §2.3） ──────────────────────────
 
 #: 快照 state 规范值 → (状态说明, 下一步动作)。规范值来自
@@ -2780,6 +2924,53 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("-o", "--output", metavar="文件",
                     help="写到文件（省略则写 stdout）")
     pp.set_defaults(func=cmd_ports)
+
+    # ── audit（v2.2 §3.3 扫描活动自查） ──
+    aup = sub.add_parser(
+        "audit", parents=[common],
+        help="扫描活动自查：过去向哪些网段发起过多少次扫描",
+        description="只读审计日志里的**结构化**扫描汇总，回答"
+                    "「过去这段时间我向哪些网段发起过多少次扫描」。"
+                    "🔴 汇总自 v2.2 起才随每次扫描自动写入；时间窗内没有记录时"
+                    "会说明原因并给出下一步命令，不会给一张会误导的空表。"
+                    "⚠ 不认 --db（那是历史快照库）—— 审计库固定用程序数据目录。")
+    aup.add_argument("--window", choices=("24", "168", "all"), default="24",
+                     help="时间窗：24 / 168（=7 天）/ all（全部历史），默认 24")
+    aup.add_argument("-f", "--format", choices=("table", "json"),
+                     default="table", help="输出格式（默认 table）")
+    aup.add_argument("-o", "--output", metavar="文件",
+                     help="写到文件（省略则写 stdout）")
+    aup.set_defaults(func=cmd_audit)
+
+    # ── nagios（v2.2 §3.4-a 插件契约） ──
+    np_ = sub.add_parser(
+        "nagios", parents=[common],
+        help="Nagios/Icinga 插件：一次性检查，用退出码表达状态",
+        description="把「有新设备 / 设备身份变了」做成符合 Nagios 插件规范的检查："
+                    "一次性执行、单行输出（`STATUS - 说明 | perfdata`）、"
+                    "退出码 0/1/2/3 = OK/WARNING/CRITICAL/UNKNOWN，"
+                    "可直接 drop-in 到 Nagios / Icinga / Zabbix / Checkmk。"
+                    "🔴 本子命令的退出码是 **Nagios 语义**，与其它子命令不同。"
+                    "🔴 不常驻、不开端口、不联网 —— 数据源是本机历史快照库。"
+                    "⚠ 数据过期或没有快照时报 UNKNOWN（**不猜成 OK**）；"
+                    "只有一次快照时报 OK 并说明「尚无基线」。")
+    np_.add_argument("--max-age-hours", type=float, default=24.0,
+                     metavar="小时",
+                     help="最近快照超过这个年龄即 UNKNOWN（默认 24；数据不可信时不猜）")
+    np_.add_argument("--warn-new", type=int, default=1, metavar="台",
+                     help="新增设备达到该数量报 WARNING（默认 1）")
+    np_.add_argument("--crit-new", type=int, default=5, metavar="台",
+                     help="新增设备达到该数量报 CRITICAL（默认 5，优先于 WARNING）")
+    np_.add_argument("--warn-identity", type=int, default=1, metavar="台",
+                     help="设备身份变动（MAC 变更 / 随机 MAC）达到该数量报 WARNING（默认 1）")
+    np_.add_argument("--crit-identity", type=int, default=3, metavar="台",
+                     help="设备身份变动达到该数量报 CRITICAL（默认 3）")
+    np_.add_argument("-f", "--format", choices=("plugin", "json"),
+                     default="plugin",
+                     help="输出格式：plugin（Nagios 单行，默认）/ json")
+    np_.add_argument("-o", "--output", metavar="文件",
+                     help="写到文件（省略则写 stdout）")
+    np_.set_defaults(func=cmd_nagios)
 
     # ── cve（v2.1 §2.3） ──
     cvp = sub.add_parser("cve", help="CVE 快照诊断 / 候选查询（全程不联网）",

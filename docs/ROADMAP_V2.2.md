@@ -11,7 +11,7 @@
 >
 > | 项    | 值                                                                                                                       |
 > | ---- | ----------------------------------------------------------------------------------------------------------------------- |
-> | 状态   | **定稿** · 2026-10-14（四项已定案；**3.1 / 3.2 已落地**，3.3 / 3.4 待排）                                                  |
+> | 状态   | **定稿** · 2026-10-14（四项已定案；**3.1 / 3.2 / 3.3 / 3.4 均已落地**，3.4 仅剩「SignPath 申请」等外部审批） |
 > | 基线   | `kooofy/IPScanner` @ `dbe7726`（v2.1.0 已发布）                                                                              |
 > | 来源   | `ROADMAP_V2.1.md` §3/§5、`docs/PRODUCT_ADVISORY.md` §4/§5/§9/§10、`docs/CVE_SNAPSHOT_MODEL.md` §10.3、`TRAPS.md` §「已知未修问题」 |
 > | 事实核验 | 本文所有「现状」栏均经**本次实测**（`grep` / 读源码 / 数行数），非引述                                                                             |
@@ -412,16 +412,56 @@ CI（run 38495188819）**10/10 全绿**。
 
 **验收标准**：
 
-- [ ] 按网段聚合、按协议/端口分类计数；空数据显示"**没有记录**"而**不是空表**
+- [x] 按网段聚合、按协议/端口分类计数；空数据显示"**没有记录**"而**不是空表**
       （照抄 `port_utilization()` 的教训：绝不返回空表让用户得出反结论）
-- [ ] 时间窗可调（24h / 7d / 全部），聚合**在 SQL 侧**，不捞全表到内存
-- [ ] 与 `audit_log` 的实际内容**逐条对得上**（一条交叉验证用例）
-- [ ] CLI 输出 JSON 键**固定英文**；GUI 走 `ui_msg` + i18n 惰性表
+- [x] 时间窗可调（24h / 7d / 全部），聚合**在 SQL 侧**，不捞全表到内存
+- [x] 与 `audit_log` 的实际内容**逐条对得上**（一条交叉验证用例）
+- [x] CLI 输出 JSON 键**固定英文**；GUI 走 `ui_msg` + i18n 惰性表
 
 **风险**：
 
 - ⚠️ 审计库可能很大 —— 聚合下推是必须的，别在主线程 `SELECT *`。
 - ⚠️ 这是 P3 项，**若 3.1–3.2 已吃满排期，它是最先可以砍的**。
+
+#### 落地记录（3.3）
+
+**交付**（`audit_log.py` 聚合层 + CLI `audit` 子命令 + `ui_dialogs/audit_activity.py` 对话框）：
+
+1. **写入端：一次扫描多写一行结构化汇总**（`action=SUM_ACTION`、`detail` 是
+   **语言无关 JSON**）。`SUM_SCHEMA_KEYS` = ranges / ips / online / protocols /
+   ports_scanned / throttle / source；`_normalize_summary()` 逐项兜底（畸形入参
+   不抛、绝不留 `"None"` 这类假值）。两条写入路径同口径：GUI
+   `ScanMixin._audit_scan_summary()`（扫描完成时）与 CLI
+   `cli._audit_scan_summary()`（`_run_scan` 完成路径）—— 测试断言**两边写出的键
+   集合都等于 `SUM_SCHEMA_KEYS`**，且能被同一张视图读出。
+   🔴 **不新增采集机制**：仍是既有 `log_event()` 管道，只是同一管道多写一行；
+   既有的「开始扫描 / 扫描完成」本地化事件**原样保留**（老 viewer 读人话）。
+2. **读取端：聚合下推到 SQL**。`read_scan_summaries(since_ts=…)` 用
+   `WHERE category=? AND action=? AND ts>=?` 过滤（不把全表捞进内存），
+   `activity_summary(window_hours)` 再在**行数 = prune 上限**的规模上做直方图。
+   空数据返回 `reason="no_records"` + 全零字段（**不是空表**）。
+3. **出口两个**：CLI `audit --window {24,168,all} [-f table|json] [-o 文件]`；
+   GUI 分析菜单「扫描活动自查...」→ `AuditActivityDialog`（时间窗下拉 + 刷新，
+   切换只换 SQL 的 `since`，不触发任何扫描）。
+4. **`estimated_probes()` 只给下限**：主机发现（每地址一发 ICMP）+ 端口探测
+   （**只对在线设备**）× `ports_scanned`；ARP / mDNS / 按需 enrich **不计入**。
+   界面与 CLI 都就地标注"估算下限"，不冒充包计数器读数。
+
+**偏离记账（一处，有意为之）**：
+
+- 验收第 1 条写的是「按协议/**端口**分类计数」。**协议**做了直方图
+  （`protocols`）；**逐端口**直方图**没有做** —— 端口档位 `all` = **65535 个端口**
+  （实测 `get_ports_for_level("all")`），把端口清单逐行入库会让每行几十 KB ×
+  prune 上限 1000 行。端口维度改记**规模**：`ports_scanned`（本次扫了多少个端口，
+  22 / 1023 / 65535 恰好区分 quick / standard / all）+ 由它算出的发包估算。
+  这已经能回答自查真正要问的问题「**我这次发了多少探测**」。
+  ⇒ 若将来确实需要逐端口直方图，正确做法是**另建一张汇总表**（端口数 × 扫描数
+  的稀疏表），而不是往审计行里塞清单。
+
+**测试**：`tests/test_audit_activity.py` 29 例 —— 交叉验证（聚合 == 手工按行算）、
+窗口边界精确（48h/3h/now × 24h/168h/all）、本地化自由文本**一行都不许混入**、
+畸形 detail 跳过、两条写入路径同口径、CLI 三态（table/json/无记录）、
+GUI 空态与窗口切换、标签表英文译文齐全。
 
 ---
 
@@ -434,6 +474,75 @@ CI（run 38495188819）**10/10 全绿**。
 | **`excel_handler` 导出提示语本地化** | 4 处 `f"已导出 {n} 条记录到 {path}"` + 1 处 `f"模板已生成: {path}"` → `tr("… {n} …").format(n=…)`；补 `en-US.json` | 英文界面下导出提示**无 CJK**；裸 f-string 计数归零 |
 | **静默 `except: pass` 棘轮** | 基线 10 → 真消掉 handler（**加注释不算**） | 棘轮计数下降 |
 | **拓扑 50 台 ≤3:1 宽高比测试** | 建议书 §10 第 8 件指定的那条（不是现有的 `test_pack_scene_keeps_aspect_ratio`） | 测试存在且**当前会失败**（这正是它该成为待办的理由 —— 要么修布局让它过，要么登记为已知限制） |
+
+#### 落地记录（3.4-a ~ 3.4-d，2026-10-15）
+
+**3.4-a Nagios 插件契约 —— ✅ 新增 `nagios_check.py` + CLI `nagios`**
+
+- 一次性执行、单行输出（`STATUS - 说明 | perfdata`）、退出码
+  **0/1/2/3 = OK/WARNING/CRITICAL/UNKNOWN** —— 不常驻、不开端口、不装 agent、
+  零第三方，三条铁律一条不破（裁定见 `ROADMAP_V2.1.md` §3 adv #7）。
+- 数据源只有本机历史快照库：把**最近两次快照**喂给 `change_detector.detect_changes()`。
+  规则：新增设备 ≥ `--warn-new`（默认 1）→ WARNING，≥ `--crit-new`（默认 5）→
+  CRITICAL；身份变动（MAC 变更 / 随机 MAC）≥ `--warn-identity`（默认 1）/
+  `--crit-identity`（默认 3）同理。
+- 🔴 **数据不可信时报 UNKNOWN，绝不猜成 OK**：没有快照 / 最近快照超过
+  `--max-age-hours`（默认 24）→ UNKNOWN(3) + 下一步动作。
+  ⚠️ **只有一次快照时**报 OK + 说明「尚无基线」而不是 UNKNOWN —— 新部署一上线
+  就告警是噪声；但也**不编造**「新增 0 台」。
+- ⚠️ **消失设备只计数不告警**（perfdata 里给 `'gone'`）：快照间隔 + ARP 过期会让
+  「没扫到」看起来像「设备没了」（与 `watch` 的立场一致）。
+- 🔴 **本子命令的退出码是 Nagios 语义**，与其它子命令的 0/1/2/3（成功/错误/
+  有变更/环境错）**不同** —— 这是插件规范的硬要求，不能两全，所以独立子命令、
+  既有语义一个字没动（`cmd_diff` 的 `EXIT_CHANGES=2` 仍是「有变更」）。
+- 🔴 **插件行一律 ASCII 英文**：这行是给监控系统解析、告警短信携带的，非 ASCII
+  在部分 NMS / 短信网关会乱码或被截断；`OK/WARNING/CRITICAL/UNKNOWN` 本身也是
+  规范固定词。与 CLI 其它子命令的中文输出**有意不同**（人读的报告走
+  `--format json` 或 GUI）。
+- 测试：`tests/test_nagios_check.py` 18 例 —— 四态齐全、阈值可配、身份变动告警、
+  消失不告警、perfdata 分号位正确（含 `age` 的 `s` 单位）、**插件行单行纯 ASCII**、
+  CLI 退出码 == 插件退出码。
+
+**3.4-b `excel_handler` 导出提示语本地化 —— ✅**
+
+- 5 处 `f"已导出 {n} 条记录到 {path}"` / `f"模板已生成: {path}"` **加上**同类的
+  4 处失败提示（`f"导出失败: {e}"` ×4、`f"生成模板失败: {e}"`）全部改成
+  `tr("… {占位} …").format(...)`，收进四个具名小函数
+  （`_exported_text` / `_export_failed_text` / `_template_created_text` /
+  `_template_failed_text`）。
+- **顺手补掉同类漏翻**：`export_html()` 的 `<h2>局域网扫描结果</h2>` 与
+  `<p>共 {n} 条记录，{m} 台在线，导出时间 {t}</p>` 原本也是裸 f-string ——
+  那是**用户会打开的文件**，英文界面下同样漏中文，一并走 `tr().format()`；
+  `<html lang>` 改为跟随 `i18n.current_lang()`（原来写死 `zh-CN`）。
+- 裸 f-string 计数（`excel_handler.py` 中含中文的 f-string）：**9 + 2 = 11 → 0**。
+- 测试：`test_i18n_lazy.py::ExcelHandlerMessageTest` —— AST 扫描断言含中文的
+  f-string 为 0；英文界面下四类提示语一个中文字符都没有，且路径/条数原样带出。
+
+**3.4-c 静默 `except: pass` 棘轮 —— ✅ 10 → 7（真消掉 handler，不是加注释）**
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `scanner/constants.py` 反查块 | `try: from i18n import canonical … except Exception: pass` | `canonical()` 本就是**全函数**（空/未知输入原样返回，不抛）⇒ 去掉 try/except，`canonical` 提到模块级 import |
+| `scanner/wmi.py` 内存字段 | `try: int(mem)…except (TypeError, ValueError): pass` | 改**纯类型判断** `_total_memory_gb()`，连异常都不产生；顺带能区分「没拿到」(`None`) 与「是 0」（0 字节内存不存在） |
+| `network_tool_mixin.py` IP 判定 | `try: ipaddress.ip_address(t); return True except ValueError: pass` | 提成谓词 `_is_ip_literal()`，handler 里 **`return False`** 而不是 `pass`（`ipaddress` 没有"是不是 IP"的谓词接口，异常是唯一途径，所以保留 handler 但语义明确） |
+
+- 棘轮基线同步下调为 **7**（`tests/test_logging_policy.py`），并在注释里写明
+  剩下 7 处**为什么不该再降**：全是日志系统 / 语言包 / 数据目录探测**自身**的
+  兜底（那时没有任何可用的落盘通道），外加 1 处测试脚手架。
+
+**3.4-d 拓扑 50 台 ≤3:1 宽高比测试 —— ✅（本条前提已过时，如实记账）**
+
+- ⚠️ 路线图写的是「测试存在且**当前会失败**」——**这个前提是错的**：
+  `tests/test_topology_layout_pure.py::AspectRatioAcceptanceTest` 早在 v1.9 #9
+  「过宽折行」落地时就已存在（那时两条 `@unittest.expectedFailure` 因布局修好而
+  「意外成功」，于是装饰器被摘掉、转正为回归守卫）。
+- 本次**补的是"字面可追溯性"**：原用例按「交换机台数 × 终端数」铺开
+  （最大 50×100 = 5050 节点），**没有一条正好落在「50 台设备以内」**这个区间，
+  验收时没法指着某一行说"这条就是建议书 §10 第 8 件"。新增
+  `test_fifty_devices_stay_within_three_to_one`：19 / 28 / 46 台设备三档，
+  断言节点数 ≤ 50 **且**宽高比 ≤ 3:1（实测通过）。
+- ⇒ 本条按路线图允许的第二条路收口：**修布局让它过**（已由 v1.9 #9 完成），
+  本次只补字面用例 + 记账，**不需要**登记为已知限制。
 
 #### 3.4.1 原 3.1「可信分发」降级后的剩余工作
 

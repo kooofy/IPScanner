@@ -3,8 +3,8 @@
 from PyQt5.QtWidgets import QProgressDialog
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from ui_dialogs import (
-    AuditLogDialog, HistoryCompareDialog, HistoryQueryDialog,
-    LocateDeviceDialog, TopologyDialog
+    AuditActivityDialog, AuditLogDialog, HistoryCompareDialog,
+    HistoryQueryDialog, LocateDeviceDialog, TopologyDialog
 )
 from ui_utils import _detect_gateway
 import audit_log
@@ -20,6 +20,11 @@ class HistoryMixin:
     def _show_audit_log(self):
         """弹出审计日志查看器。"""
         dlg = AuditLogDialog(parent=self, dark=self.dark_mode)
+        dlg.exec_()
+
+    def _show_audit_activity(self):
+        """弹出扫描活动自查（v2.2 §3.3）：按时间窗看聚合，不看流水。"""
+        dlg = AuditActivityDialog(parent=self, dark=self.dark_mode)
         dlg.exec_()
 
     def _audit(self, category, action, detail=""):

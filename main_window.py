@@ -828,6 +828,13 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         act_audit_log.triggered.connect(self._show_audit_log)
         analysis_menu.addAction(act_audit_log)
 
+        act_audit_activity = QAction(tr("扫描活动自查..."), self)
+        act_audit_activity.setIcon(_mi(QStyle.SP_FileDialogListView))
+        act_audit_activity.setToolTip(tr(
+            "过去这段时间向哪些网段发起过多少次扫描（按时间窗聚合，只读审计库）"))
+        act_audit_activity.triggered.connect(self._show_audit_activity)
+        analysis_menu.addAction(act_audit_activity)
+
         # ── 设置菜单 ──
         settings_menu = menubar.addMenu(tr("设置(&O)"))
         settings_menu.setStyleSheet("")

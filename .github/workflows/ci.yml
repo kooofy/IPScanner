@@ -338,6 +338,16 @@ jobs:
           python -m coverage report --include="./scanner/exposure.py" --fail-under=85
           python -m coverage report --include="./scanner/wifi.py" --fail-under=85
           python -m coverage report --include="./port_services.py" --fail-under=95
+          # v2.2 §3.3 / §3.4-a 新增：
+          #   audit_log.py    90%（聚合层落地时实测 93%：只跑 audit_activity +
+          #                        audit_log_categories 两个模块的下界，
+          #                        全量跑只会更高。缺的 14 行是 prune / clear_logs /
+          #                        query_logs 等未被这两个模块覆盖的分支）
+          #   nagios_check.py 90%（2026-10-15 实测 96%，缺 4 行 = 快照被并发删掉的
+          #                        None 分支 + NaN/inf 分支）
+          # ⚠ 两个 basename 全仓库唯一；仍按惯例带 `./` 防未来撞名。
+          python -m coverage report --include="./audit_log.py" --fail-under=90
+          python -m coverage report --include="./nagios_check.py" --fail-under=90
 
   quality-types:
     name: 类型门禁（pyright）

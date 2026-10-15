@@ -311,6 +311,13 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             _CURRENT_FIELDS, _MATCH_TEXT, _NOTE_TEXT, _REASON_TEXT as _WIFI_REASON,
             _ROAM_TEXT, _SOURCE_TEXT as _WIFI_SOURCE,
         )
+        from ui_dialogs.audit_activity import (
+            _COLUMN_LABELS as _ACTIVITY_COLS,
+            _HINT_ESTIMATE,
+            _HINT_SCOPE,
+            _REASON_TEXT as _ACTIVITY_REASON,
+            _WINDOW_TEXT as _ACTIVITY_WINDOW,
+        )
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
@@ -363,6 +370,16 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "ui_dialogs.wifi._SOURCE_TEXT": list(_WIFI_SOURCE.values()),
             "ui_dialogs.wifi._MATCH_TEXT": list(_MATCH_TEXT.values()),
             "ui_dialogs.wifi._CURRENT_FIELDS": [lbl for lbl, _get in _CURRENT_FIELDS],
+            # ui_dialogs.audit_activity（v2.2 §3.3 扫描活动自查）的三张表 +
+            # 估算下限提示：同是字面量表，`_REASON_TEXT` 的值是 (说明, 下一步)
+            # 二元组，要摊平再逐个校验。
+            "ui_dialogs.audit_activity._WINDOW_TEXT":
+                list(_ACTIVITY_WINDOW.values()),
+            "ui_dialogs.audit_activity._REASON_TEXT": [
+                text for pair in _ACTIVITY_REASON.values() for text in pair],
+            "ui_dialogs.audit_activity._COLUMN_LABELS": list(_ACTIVITY_COLS),
+            "ui_dialogs.audit_activity._HINT_ESTIMATE": [_HINT_ESTIMATE],
+            "ui_dialogs.audit_activity._HINT_SCOPE": [_HINT_SCOPE],
         }
 
     def test_all_table_labels_are_translated(self):
@@ -467,6 +484,61 @@ class MatchTablePurityTest(unittest.TestCase):
         finally:
             i18n.init("zh-CN")
         self.assertEqual(zh, en, msg="_PHONE_BRAND_DISPLAY 的键随语言变化了")
+
+
+class ExcelHandlerMessageTest(unittest.TestCase):
+    """v2.2 §3.4-b：导出提示语必须走 `tr("… {占位} …").format(...)`。
+
+    🔴 裸 f-string 里的中文是**字面量** —— AST 的完整性测试收集不到，于是英文
+    界面下漏出中文而**没有任何告警**。这里直接扫源码兜底：`excel_handler.py`
+    里**含中文的 f-string 必须为 0**（导出成功/失败、模板成功/失败、HTML 标题
+    与摘要行全部算在内）。
+    """
+
+    def _cjk_fstrings(self):
+        import ast
+
+        with io.open(os.path.join(ROOT, "excel_handler.py"),
+                     encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        bad = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.JoinedStr):
+                continue
+            text = "".join(
+                v.value for v in node.values
+                if isinstance(v, ast.Constant) and isinstance(v.value, str))
+            if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+                bad.append((node.lineno, text))
+        return bad
+
+    def test_no_cjk_fstring_left(self):
+        bad = self._cjk_fstrings()
+        self.assertEqual(
+            bad, [],
+            msg="excel_handler 里还有含中文的裸 f-string（英文界面会漏中文）：\n  "
+                + "\n  ".join("%d: %r" % (ln, t) for ln, t in bad))
+
+    def test_export_messages_have_no_cjk_in_english(self):
+        """英文界面下四类提示语一个中文字符都不许有。"""
+        import excel_handler
+
+        i18n.init("en-US")
+        try:
+            msgs = [
+                excel_handler._exported_text(3, "out.xlsx"),
+                excel_handler._export_failed_text("boom"),
+                excel_handler._template_created_text("t.xlsx"),
+                excel_handler._template_failed_text("boom"),
+            ]
+        finally:
+            i18n.init("zh-CN")
+        for m in msgs:
+            self.assertFalse(
+                any("\u4e00" <= ch <= "\u9fff" for ch in m),
+                msg="英文界面下仍出现中文: %r" % m)
+        self.assertIn("out.xlsx", msgs[0])          # 路径要原样带出
+        self.assertIn("3", msgs[0])                 # 条数要原样带出
 
 
 class NoImportTimeTrTest(unittest.TestCase):

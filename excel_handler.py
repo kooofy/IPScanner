@@ -15,6 +15,7 @@ from typing import Dict, List, Tuple
 import re
 import csv
 from i18n import tr
+import i18n
 
 
 # 列名别名映射：这是**匹配表**，必须语言无关，因此全部写成字面量，绝不能包 tr()。
@@ -57,6 +58,33 @@ COLUMN_ALIASES = {
         "备注", "remark", "说明", "description", "描述", "note", "notes", "comment"
     ],
 }
+
+
+# ── 面向用户的提示语（v2.2 §3.4-b）──────────────────────────────────────
+#
+# 🔴 这些**必须**走 `tr("… {占位} …").format(...)`，不能写成裸 f-string：
+# 裸 f-string 里的中文是**字面量**，AST 的 i18n 完整性测试收集不到它，
+# 于是英文界面下会漏出中文（"已导出 3 条记录到 …"）而**没有任何告警**。
+# 占位符用 `{n}` / `{path}` / `{err}` 命名（翻译时语序可以调整）。
+
+def _exported_text(n: int, path: str) -> str:
+    """导出成功提示：`已导出 3 条记录到 D:\\out.xlsx`。"""
+    return tr("已导出 {n} 条记录到 {path}").format(n=n, path=path)
+
+
+def _export_failed_text(err) -> str:
+    """导出失败提示（保留原始异常文本，便于用户自查）。"""
+    return tr("导出失败: {err}").format(err=err)
+
+
+def _template_created_text(path: str) -> str:
+    """模板生成成功提示。"""
+    return tr("模板已生成: {path}").format(path=path)
+
+
+def _template_failed_text(err) -> str:
+    """模板生成失败提示。"""
+    return tr("生成模板失败: {err}").format(err=err)
 
 
 def _cell_to_str(val) -> str:
@@ -195,9 +223,9 @@ def export_results(results: list, file_path: str) -> Tuple[bool, str]:
 
         wb.save(file_path)
         wb.close()
-        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+        return True, _exported_text(len(results), file_path)
     except Exception as e:
-        return False, f"导出失败: {e}"
+        return False, _export_failed_text(e)
 
 
 def _result_to_row(result) -> dict:
@@ -226,9 +254,9 @@ def export_csv(results: list, file_path: str) -> Tuple[bool, str]:
                 d = _result_to_row(result)
                 row = [d.get(h, "") for h in headers]
                 writer.writerow(row)
-        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+        return True, _exported_text(len(results), file_path)
     except Exception as e:
-        return False, f"导出失败: {e}"
+        return False, _export_failed_text(e)
 
 
 def export_html(results: list, file_path: str) -> Tuple[bool, str]:
@@ -265,17 +293,23 @@ def export_html(results: list, file_path: str) -> Tuple[bool, str]:
             f"<tbody>{''.join(rows_html)}</tbody></table>"
         )
         online_count = sum(1 for r in results if _result_to_row(r).get(tr("状态")) == tr("在线"))
+        # 🔴 标题 / 摘要行也走 tr(...).format(...)：这是**用户会打开的文件**，
+        # 英文界面下导出的 HTML 里出现中文，与"导出提示"是同一类漏翻
+        # （裸 f-string 是字面量，AST 完整性测试收集不到）。
         html = (
-            "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>" + tr("<title>IPScanner 扫描结果</title></head><body>") + f"<h2>局域网扫描结果</h2>"
-            f"<p>共 {len(results)} 条记录，{online_count} 台在线，"
-            f"导出时间 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>"
-            f"{table}</body></html>"
+            "<!DOCTYPE html><html lang='%s'><head><meta charset='utf-8'>" % i18n.current_lang()
+            + tr("<title>IPScanner 扫描结果</title></head><body>")
+            + "<h2>" + tr("局域网扫描结果") + "</h2>"
+            + "<p>" + tr("共 {n} 条记录，{m} 台在线，导出时间 {t}").format(
+                n=len(results), m=online_count,
+                t=datetime.now().strftime("%Y-%m-%d %H:%M:%S")) + "</p>"
+            + table + "</body></html>"
         )
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(html)
-        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+        return True, _exported_text(len(results), file_path)
     except Exception as e:
-        return False, f"导出失败: {e}"
+        return False, _export_failed_text(e)
 
 
 def export_json(results: list, file_path: str) -> Tuple[bool, str]:
@@ -290,9 +324,9 @@ def export_json(results: list, file_path: str) -> Tuple[bool, str]:
             rows.append(d)
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(rows, f, ensure_ascii=False, indent=2)
-        return True, f"已导出 {len(results)} 条记录到 {file_path}"
+        return True, _exported_text(len(results), file_path)
     except Exception as e:
-        return False, f"导出失败: {e}"
+        return False, _export_failed_text(e)
 
 
 def create_template(file_path: str) -> Tuple[bool, str]:
@@ -346,6 +380,6 @@ def create_template(file_path: str) -> Tuple[bool, str]:
 
         wb.save(file_path)
         wb.close()
-        return True, f"模板已生成: {file_path}"
+        return True, _template_created_text(file_path)
     except Exception as e:
-        return False, f"生成模板失败: {e}"
+        return False, _template_failed_text(e)

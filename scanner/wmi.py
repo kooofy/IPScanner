@@ -203,6 +203,34 @@ def _clean_stderr(text: str) -> str:
     return re.sub(r"\s{2,}", " ", joined).strip()
 
 
+def _total_memory_gb(value):
+    """WMI 的 `TotalPhysicalMemory`（字符串/整数/浮点）→ GB（保留 1 位）。
+
+    缺失 / 非数值 / 负数返回 `None`（调用方保持默认 0.0）。
+
+    🔴 **刻意不用 try/except**：WMI 缺字段是常态，抛了再 `pass` 既是慢路径，
+    又会被 `tests/test_logging_policy.py` 的静默吞异常棘轮记一笔。这里改成
+    显式的类型判断 —— 控制流一眼可见，且"不是数值"与"是 0"能区分开
+    （0 字节内存是不存在的，`None` 才是"没拿到"）。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.lstrip("+-").isdigit():
+            return None
+        value = int(text)
+    elif isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None          # NaN / inf：`int()` 会抛，直接判掉
+        value = int(value)
+    elif not isinstance(value, int):
+        return None
+    if value <= 0:
+        return None
+    return round(value / (1024 ** 3), 1)
+
+
 def _flatten(raw: dict) -> dict:
     """把 PowerShell 返回的嵌套对象拍平为统一字段。"""
     out = {
@@ -244,14 +272,9 @@ def _flatten(raw: dict) -> dict:
     out["wmi_domain"] = (cs.get("Domain") or "").strip()
     out["wmi_user"] = (cs.get("UserName") or "").strip()
     out["wmi_hostname"] = (cs.get("Name") or "").strip()
-    try:
-        mem = cs.get("TotalPhysicalMemory")
-        if mem:
-            out["wmi_ram_gb"] = round(int(mem) / (1024 ** 3), 1)
-    except (TypeError, ValueError):
-        # 内存字段缺失或非数值：保持默认 0.0，不影响其余字段。
-        # 这里刻意不记日志 —— WMI 返回缺字段是常态，记了只会刷屏。
-        pass
+    mem_gb = _total_memory_gb(cs.get("TotalPhysicalMemory"))
+    if mem_gb is not None:
+        out["wmi_ram_gb"] = mem_gb
 
     out["wmi_serial"] = (bios.get("SerialNumber") or "").strip()
     out["wmi_bios"] = (bios.get("SMBIOSBIOSVersion") or "").strip()
