@@ -30,6 +30,7 @@ import history_store
 import trend_store
 from i18n import tr
 from ui_msg import msg_warn
+from ui_utils import format_duration
 
 # ── 规范值 → 文案（**待翻译字面量**，取用时必须过 `tr()`） ──────────────
 #
@@ -72,15 +73,6 @@ _REASON_TEXT = {
 #: 范围下拉的「全部」项（网段名本身是取值，不需要翻译）。
 _RANGE_ALL_TEXT = "全部网段"
 
-#: 时长单位（`trend_store.DURATION_UNIT_*`）→ 后缀。`insufficient` 单独处理。
-_UNIT_TEXT = {
-    trend_store.DURATION_UNIT_SECOND: "秒",
-    trend_store.DURATION_UNIT_MINUTE: "分钟",
-    trend_store.DURATION_UNIT_HOUR: "小时",
-    trend_store.DURATION_UNIT_DAY: "天",
-}
-_UNIT_INSUFFICIENT = "样本不足"
-
 #: 曲线表列名。**列数与本表长度必须一致**（自本表派生，不写第二份字面量 ——
 #: 第二份字面量会导致 `resizeSection` 越界，进而写坏堆）。
 _COLUMN_LABELS = ("时间", "总数", "在线", "在线率")
@@ -96,18 +88,10 @@ def _label(table, value, fallback=""):
     return tr(text)
 
 
-def _fmt_duration(seconds):
-    """秒 → 人话。`None` / 非法一律说「样本不足」，🔴 不拿 0 冒充结果。
-
-    分档逻辑在 `trend_store.duration_parts()`（**只有一份**），
-    避免 CLI 与这里各写一套而漂移。
-    """
-    value, unit = trend_store.duration_parts(seconds)
-    if unit == trend_store.DURATION_UNIT_NONE:
-        return tr(_UNIT_INSUFFICIENT)
-    if unit == trend_store.DURATION_UNIT_SECOND:
-        return "%.0f %s" % (value, _label(_UNIT_TEXT, unit))
-    return "%.1f %s" % (value, _label(_UNIT_TEXT, unit))
+#: 🔴 时长单位表与分档**不在这个模块** —— 已提到 `ui_utils`
+#: （v2.3 §3.3 起 `detail_panel` 也要显示时长，两份实现必然漂移）。
+#: 留一个别名，调用点不必改。
+_fmt_duration = format_duration
 
 
 class TrendViewDialog(QDialog):

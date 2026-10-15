@@ -324,9 +324,12 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             _HINT_SAMPLING,
             _RANGE_ALL_TEXT,
             _REASON_TEXT as _TREND_REASON,
-            _UNIT_INSUFFICIENT,
-            _UNIT_TEXT as _TREND_UNIT,
             _WINDOW_TEXT as _TREND_WINDOW,
+        )
+        # v2.3 §3.3：时长单位表已从 `ui_dialogs.trend_view` 提到 `ui_utils`
+        # （`detail_panel` 的「端口暴露」分区也要显示时长，两份实现必然漂移）。
+        from ui_utils import (
+            DURATION_INSUFFICIENT_TEXT, DURATION_UNIT_TEXT,
         )
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
@@ -397,11 +400,13 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             "ui_dialogs.trend_view._GRANULARITY_TEXT": list(_TREND_GRAN.values()),
             "ui_dialogs.trend_view._REASON_TEXT": [
                 text for pair in _TREND_REASON.values() for text in pair],
-            "ui_dialogs.trend_view._UNIT_TEXT": list(_TREND_UNIT.values()),
-            "ui_dialogs.trend_view._UNIT_INSUFFICIENT": [_UNIT_INSUFFICIENT],
             "ui_dialogs.trend_view._COLUMN_LABELS": list(_TREND_COLS),
             "ui_dialogs.trend_view._HINT_SAMPLING": [_HINT_SAMPLING],
             "ui_dialogs.trend_view._RANGE_ALL_TEXT": [_RANGE_ALL_TEXT],
+            # ui_utils（v2.3 §3.3）：时长单位表与「样本不足」兜底词 ——
+            # `trend_view` 与 `detail_panel` 共用这一份（见上方的 import 注释）。
+            "ui_utils.DURATION_UNIT_TEXT": list(DURATION_UNIT_TEXT.values()),
+            "ui_utils.DURATION_INSUFFICIENT_TEXT": [DURATION_INSUFFICIENT_TEXT],
         }
 
     def test_all_table_labels_are_translated(self):

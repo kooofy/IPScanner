@@ -260,10 +260,44 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 
 **验收标准**：
 
-- [ ] 端口从开到关再开 ⇒ 时长**从最近一次 open 起算**，不是从首次
-- [ ] 已关闭的端口**不报"正在暴露"**
-- [ ] 只对实际开放端口写事件：**全关设备不产生任何 `port_*` 事件**
-- [ ] 时长单位明确（天/小时），JSON 输出**语言无关**
+- [x] 端口从开到关再开 ⇒ 时长**从最近一次 open 起算**，不是从首次
+      —— `PortExposureTest.test_reopen_counts_from_the_latest_open_not_the_first`
+      （开→关→再开，断言 `seconds == 50` 而不是 2050）
+- [x] 已关闭的端口**不报"正在暴露"**
+      —— `test_closed_port_is_not_reported_as_exposed`；CLI 走另一分支说
+      「当前没有仍开放着的端口」（`CliPortExposureTest`）
+- [x] 只对实际开放端口写事件：**全关设备不产生任何 `port_*` 事件**
+      —— `TrendWriteTest.test_all_ports_closed_device_writes_no_port_event`
+- [x] 时长单位明确（天/小时），JSON 输出**语言无关**
+      —— `CliPortExposureTest.test_json_keys_are_language_neutral`（只出秒数）；
+      分档仍**只有一份**（`trend_store.duration_parts()`），
+      单位文案在 `ui_utils.format_duration()`
+
+**落地要点（2026-10-15）**：
+
+- 纯计算 `trend_store.port_exposure(events, now=, identity_key=, top=)`：
+  按设备、按端口重放 `port_open` / `port_close`；`close` 收一段闭合区间，
+  窗口结束时仍未闭合的 `seconds = now − since`。
+- 🔴 **新增 `baseline` 端口事件**（`history_store._build_asset_events`）：
+  首次观测时**已经开着**的端口也记一条 `port_open`，带 `baseline: true`。
+  没有它，长期不动的端口（**正是这一项要回答的那一类**）在事件流里
+  完全没有记录，「这个端口开了多久」永远答不出来。
+  ⚠️ 它的时间戳是"我们第一次看到它"，**不是**"端口真的开了" ⇒ 消费方
+  必须显示成「**至少** N」（`ui_utils.format_exposure_rows()`）。
+  重复 `open`（中间没有 `close`）**不覆盖**起点 —— 保留更早的 = 更保守。
+- CLI 挂在 `trend` 下，**不新开 `exposure` 子命令**：`scanner/exposure.py`
+  已经是「banner → 候选 CVE 匹配」，同名会让两件事混淆；且 `trend` 本就是
+  「这段时间网络变成了什么样」的入口。JSON 加 `port_exposure` 键。
+- GUI：**设备详情面板**加「端口暴露」分区（照路线图原文），数据由
+  `MainWindow._port_exposure_for()` 经 `history_store.asset_identity_key()`
+  解析身份键后取；与「历史轨迹」同款缓存、**同点失效**
+  （`history_mixin._save_snapshot`）。
+- ⚠️ 时长单位表从 `ui_dialogs.trend_view` 提到 **`ui_utils`**
+  （`detail_panel` 也要显示时长，两份实现必然漂移）；
+  `cli._fmt_duration` **刻意不共享**（CLI 不 import `i18n`，输出恒为中文）。
+- `asset_identity_key()` 用 **MAC 优先**匹配 `assets`，与 `device_timeline()`
+  同规则；🔴 **不能**用 `identity_key(mac, ip)` 现算 —— 真正的键由写入端的
+  `resolve_identity()` 决定（LAA 随机 MAC 走指纹降级），现算会与库里的对不上。
 
 ### 3.4 资产生命周期字段 + EOL 提醒
 
@@ -348,10 +382,10 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-10-15 四选一选定）
    为什么：资产表 v2.0 就建好了，建议书点名的「趋势类果实」一直没收
 
-├─ 3.1 趋势观测层（独立表 + 事件流，不参与 prune）        P0 ← 主题项
-├─ 3.2 在线率曲线与稳定性（MTBF / 抖动 / 首现告警）       P1
-├─ 3.3 端口长期暴露时长                                P1
-└─ 3.4 资产生命周期字段 + EOL 提醒                      P2
+├─ 3.1 趋势观测层（独立表 + 事件流，不参与 prune）        P0 ← 主题项  ✅ 已落地
+├─ 3.2 在线率曲线与稳定性（MTBF / 抖动 / 首现告警）       P1         ✅ 已落地
+├─ 3.3 端口长期暴露时长                                P1         ✅ 已落地
+└─ 3.4 资产生命周期字段 + EOL 提醒                      P2         ⏳ 进行中
 
 🔴 前置（已答清）：prune(max_keep=20) ⇒ devices 会被删
    ⇒ 趋势必须建在不参与 prune 的新表上（trend_observations + asset_events）
@@ -365,7 +399,7 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
   PySide6 迁移                                 →  维持 v2.0 裁定，代价继续记账
   SNMPv1 · DES · IPv6 扫描                     →  维持现状（现行为正确）
 
-状态：§3 四项已定案 · 落地中 —— 3.1 趋势观测层   ← 现在在这里
+状态：§3 四项已定案 · 落地中 —— 3.1 / 3.2 / 3.3 已落地，3.4 进行中   ← 现在在这里
 ```
 
 ---
@@ -488,3 +522,37 @@ GUI 新 `ui_dialogs/trend_view.py`（时间窗 + 粒度下拉 + 表格 + 空态�
 
 **遗留**：无。原偏离 ① 的"宁可不做也不给会误导的曲线"从此刻起不再适用 ——
 现在给的是**按网段各算各的**真值，不是把全局合计贴上网段标签。
+
+### 2026-10-15 · §3.3 端口长期暴露时长落地
+
+**落地**：`trend_store.port_exposure()`（纯计算，事件重放）+
+`history_store.asset_identity_key()`；CLI 挂在 `trend` 下（新 `port_exposure`
+JSON 键 + 表格一节）；GUI 在**设备详情面板**加「端口暴露」分区
+（`MainWindow._port_exposure_for()`）。测试 `tests/test_trend.py` 105 → **135** 例。
+
+**🔴 一处对 §3.1 的有意修改（记账）：首次观测时会补一条 `baseline` 端口事件。**
+`_build_asset_events()` 原先对"首次见到的设备"只写 `first_seen` 就 `continue`，
+端口一行不写。这样**长期不动的端口**（**正是 §3.3 要回答的那一类** ——
+「这个 23 端口开了两年」）在事件流里完全没有记录，功能等于空的。
+现在改成：首次观测时**已经开着**的端口也记一条 `port_open`，
+但 `detail_json` 里带 `baseline: true` —— 语义是
+**「我们第一次看到它时它就是开着的」，不是「端口此刻开了」**。
+所以消费方必须显示成「**至少** N」（真实开放时刻只会更早）。
+⚠️ 这条改动**动了 §3.1 已落地的写入行为**，连带改掉 3 个 §3.1 的断言
+（`test_first_seen_written_once_per_device` /
+`test_port_close_and_open_only_cover_real_ports` /
+`test_no_port_event_when_nothing_changed`）—— 它们原先钉的正是"首扫只写一行"。
+
+**一处刻意的放置选择（记账）**：CLI **没有**新开 `exposure` 子命令。
+`scanner/exposure.py` 已经是「banner → 候选 CVE 匹配」，叫 `exposure`
+会让「端口暴露时长」和「漏洞暴露面」两件事在用户脑子里混在一起；
+`trend` 本就是「这段时间网络变成了什么样」的入口，挂它下面语义连贯。
+
+**一处顺带的提取（记账）**：时长单位表从 `ui_dialogs.trend_view` 提到
+`ui_utils`（`DURATION_UNIT_TEXT` / `format_duration()` / `format_exposure_rows()`）。
+理由：`detail_panel` 现在也要显示时长，两份实现必然漂移。
+`cli._fmt_duration` **刻意不共享** —— CLI 不 import `i18n`、输出恒为中文，
+共享会让 CLI 的输出随界面语言漂移。
+
+**验收**：`tests/test_trend.py` 135 例全绿；全量 **2684 OK**；
+`trend_store.py` 覆盖 **100%**（门禁 90）、`history_store.py` **96%**（门禁 95）。

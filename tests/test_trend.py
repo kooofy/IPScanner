@@ -179,11 +179,40 @@ class TrendWriteTest(unittest.TestCase):
         db = _new_db()
         _scan(db, [_dev(1)], ts=time.time())
         first = history_store.read_asset_events(db_path=db)
+        # 首扫两行：`first_seen` + 那条 `baseline` 的 `port_open`
+        # （见 `test_first_seen_records_open_ports_as_baseline`）。
         self.assertEqual([e["event_type"] for e in first],
-                         [trend_store.EVENT_FIRST_SEEN])
+                         [trend_store.EVENT_FIRST_SEEN,
+                          trend_store.EVENT_PORT_OPEN])
         _scan(db, [_dev(1)], ts=time.time() + 10)
         again = history_store.read_asset_events(db_path=db)
-        self.assertEqual(len(again), 1, "第二次扫描不该再报 first_seen")
+        self.assertEqual(len(again), 2, "第二次扫描不该再报 first_seen")
+
+    def test_first_seen_records_open_ports_as_baseline(self):
+        """🔴 首次观测时**已经开着**的端口必须留一条 `baseline` 记录。
+
+        没有它，长期不动的端口（正是 §3.3 要回答的那一类）在事件流里
+        **完全没有记录** —— 「这个端口是昨天开的还是开了两年」永远答不出来。
+        ⚠️ 它的时间戳是"我们第一次看到它"，**不是**"端口真的开了"，
+        所以带 `baseline: true`，消费方必须显示成「至少 N」。
+        """
+        db = _new_db()
+        _scan(db, [_dev(1, "online", "22,445")], ts=time.time())
+        opened = history_store.read_asset_events(
+            db_path=db, event_type=trend_store.EVENT_PORT_OPEN)
+        self.assertEqual(len(opened), 1)
+        detail = json.loads(opened[0]["detail_json"])
+        self.assertEqual(detail["ports"], [22, 445])
+        self.assertTrue(detail["baseline"], "起点是首次观测，不是端口真的开了")
+        self.assertEqual(detail["ip"], "192.168.1.1", "带 IP 才好在列表里认设备")
+
+    def test_all_ports_closed_device_writes_no_port_event(self):
+        # 🔴 §3.3 验收：只对**实际开放**的端口写事件 —— 全关设备一行都不写。
+        db = _new_db()
+        _scan(db, [_dev(1, "offline", "")], ts=time.time())
+        for et in (trend_store.EVENT_PORT_OPEN, trend_store.EVENT_PORT_CLOSE):
+            self.assertEqual(len(history_store.read_asset_events(
+                db_path=db, event_type=et)), 0)
 
     def test_identical_scan_writes_no_new_event(self):
         # 🔴 防膨胀的关键：连续两轮结果完全相同 ⇒ 一行都不写。
@@ -224,16 +253,20 @@ class TrendWriteTest(unittest.TestCase):
         opened = history_store.read_asset_events(
             db_path=db, event_type=trend_store.EVENT_PORT_OPEN)
         self.assertEqual(json.loads(closed[0]["detail_json"])["ports"], [443])
-        self.assertEqual(json.loads(opened[0]["detail_json"])["ports"], [8080])
+        # `opened[0]` 是首扫的 baseline（80,443），`opened[1]` 才是真的新开。
+        self.assertEqual(json.loads(opened[0]["detail_json"])["ports"], [80, 443])
+        self.assertTrue(json.loads(opened[0]["detail_json"])["baseline"])
+        self.assertEqual(json.loads(opened[1]["detail_json"])["ports"], [8080])
+        self.assertNotIn("baseline", json.loads(opened[1]["detail_json"]),
+                         "真正的开事件不该被标成基线")
 
     def test_no_port_event_when_nothing_changed(self):
         db = _new_db()
         _scan(db, [_dev(1, "online", "80,443")], ts=time.time())
+        base = len(history_store.read_asset_events(db_path=db))
         _scan(db, [_dev(1, "online", "443,80")], ts=time.time() + 10)  # 顺序不同
-        self.assertEqual(len(history_store.read_asset_events(
-            db_path=db, event_type=trend_store.EVENT_PORT_OPEN)), 0)
-        self.assertEqual(len(history_store.read_asset_events(
-            db_path=db, event_type=trend_store.EVENT_PORT_CLOSE)), 0)
+        self.assertEqual(len(history_store.read_asset_events(db_path=db)), base,
+                         "端口集合没变就不该再写 port_open / port_close")
 
     def test_trend_failure_does_not_fail_the_scan(self):
         # 趋势是增强，不是前提：写入失败只 warning，快照照常落、退出码不变。
@@ -686,8 +719,8 @@ class CliTrendTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(
             sorted(payload),
-            ["granularity", "new_devices", "points", "range", "reason",
-             "samples", "stability", "window", "window_hours"])
+            ["granularity", "new_devices", "points", "port_exposure", "range",
+             "reason", "samples", "stability", "window", "window_hours"])
         self.assertEqual(sorted(payload["points"][0]),
                          ["online", "ratio", "time", "total"])
         self.assertIsNone(payload["reason"])
@@ -901,6 +934,306 @@ class TrendViewDialogTest(unittest.TestCase):
         self.assertEqual(dlg.summary_label.text(), tr(hint))
         self.assertIn(tr(action), dlg.next_label.text())
         dlg.deleteLater()
+
+
+from detail_panel import DeviceDetailPanel  # noqa: E402
+from scanner.models import ScanResult  # noqa: E402
+
+
+# ─────────────── 端口长期暴露时长（v2.3 §3.3） ───────────────
+
+def _ev(ts, etype, ports, key="k1", baseline=False, ip="10.0.0.1"):
+    """构造一条事件行（形状与 `history_store.read_asset_events()` 一致）。"""
+    detail = {"ports": list(ports), "ip": ip}
+    if baseline:
+        detail["baseline"] = True
+    return {"ts": ts, "identity_key": key, "event_type": etype,
+            "detail_json": json.dumps(detail, sort_keys=True)}
+
+
+class PortExposureTest(unittest.TestCase):
+    """纯计算：事件重放 → 「这个端口开了多久」。"""
+
+    def test_open_and_still_open_counts_from_that_open(self):
+        out = trend_store.port_exposure(
+            [_ev(1000.0, trend_store.EVENT_PORT_OPEN, [23])], now=1090.0)
+        self.assertEqual(out["open_count"], 1)
+        r = out["open"][0]
+        self.assertEqual((r["port"], r["seconds"], r["since"]), (23, 90.0, 1000.0))
+        self.assertFalse(r["baseline"])
+        self.assertEqual(r["ip"], "10.0.0.1")
+
+    def test_reopen_counts_from_the_latest_open_not_the_first(self):
+        """🔴 验收：开 → 关 → 再开 ⇒ 从**最近一次** open 起算。"""
+        events = [
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [23]),
+            _ev(2000.0, trend_store.EVENT_PORT_CLOSE, [23]),
+            _ev(3000.0, trend_store.EVENT_PORT_OPEN, [23]),
+        ]
+        out = trend_store.port_exposure(events, now=3050.0)
+        self.assertEqual(out["open_count"], 1)
+        self.assertEqual(out["open"][0]["seconds"], 50.0, "不是 2050")
+        self.assertEqual(out["open"][0]["since"], 3000.0)
+        self.assertEqual(out["closed_count"], 1)
+        self.assertEqual(out["closed"][0]["seconds"], 1000.0)
+
+    def test_closed_port_is_not_reported_as_exposed(self):
+        """🔴 验收：已关闭的端口**不报"正在暴露"**。"""
+        events = [
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [23]),
+            _ev(2000.0, trend_store.EVENT_PORT_CLOSE, [23]),
+        ]
+        out = trend_store.port_exposure(events, now=9999.0)
+        self.assertEqual(out["open"], [])
+        self.assertEqual(out["open_count"], 0)
+        self.assertEqual(out["closed_count"], 1)
+        # 有事件、只是都闭合了 ⇒ 那是事实（"当前没有暴露中的端口"），
+        # **不是**"没数据" —— 两者必须能分开。
+        self.assertIsNone(out["reason"])
+
+    def test_no_port_events_gives_reason_not_an_empty_table(self):
+        self.assertEqual(trend_store.port_exposure([])["reason"],
+                         trend_store.REASON_NO_PORT_EVENTS)
+        self.assertEqual(trend_store.port_exposure(
+            [_ev(1.0, trend_store.EVENT_STATUS_FLIP, [])])["reason"],
+            trend_store.REASON_NO_PORT_EVENTS,
+            "别的事件类型不算端口事件")
+
+    def test_baseline_row_is_flagged(self):
+        out = trend_store.port_exposure(
+            [_ev(1000.0, trend_store.EVENT_PORT_OPEN, [22], baseline=True)],
+            now=4600.0)
+        self.assertTrue(out["open"][0]["baseline"],
+                        "起点是首次观测 ⇒ 消费方要显示「至少」")
+        self.assertEqual(out["open"][0]["seconds"], 3600.0)
+
+    def test_duplicate_open_keeps_the_earlier_start(self):
+        # 重复 open（中间没有 close）不覆盖起点：保留更早的 = 更保守的判断
+        # （`baseline` 重放时最容易出现，把时长改短是错的方向）。
+        events = [
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [22], baseline=True),
+            _ev(1500.0, trend_store.EVENT_PORT_OPEN, [22]),
+        ]
+        out = trend_store.port_exposure(events, now=2000.0)
+        self.assertEqual(out["open"][0]["since"], 1000.0)
+        self.assertTrue(out["open"][0]["baseline"])
+
+    def test_close_without_open_is_ignored(self):
+        out = trend_store.port_exposure(
+            [_ev(1000.0, trend_store.EVENT_PORT_CLOSE, [23])], now=2000.0)
+        self.assertEqual(out["open_count"], 0)
+        self.assertEqual(out["closed_count"], 0)
+
+    def test_duration_never_goes_negative(self):
+        # `now` 早于 open（时钟回拨 / 调用方给错值）时夹到 0，不给负数时长。
+        out = trend_store.port_exposure(
+            [_ev(5000.0, trend_store.EVENT_PORT_OPEN, [23])], now=1000.0)
+        self.assertEqual(out["open"][0]["seconds"], 0.0)
+
+    def test_longest_exposure_comes_first(self):
+        events = [
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [23], key="k1"),
+            _ev(1900.0, trend_store.EVENT_PORT_OPEN, [445], key="k2"),
+        ]
+        out = trend_store.port_exposure(events, now=2000.0)
+        self.assertEqual([r["identity_key"] for r in out["open"]], ["k1", "k2"])
+
+    def test_top_truncates_but_counts_stay_true(self):
+        events = [_ev(1000.0 + k, trend_store.EVENT_PORT_OPEN, [k + 1],
+                      key="k%d" % k) for k in range(5)]
+        out = trend_store.port_exposure(events, now=2000.0, top=2)
+        self.assertEqual(len(out["open"]), 2)
+        self.assertEqual(out["open_count"], 5, "count 是**截断前**的真实条数")
+
+    def test_identity_key_filter_selects_one_device(self):
+        events = [
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [23], key="k1"),
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [445], key="k2"),
+        ]
+        out = trend_store.port_exposure(events, now=2000.0, identity_key="k2")
+        self.assertEqual([r["port"] for r in out["open"]], [445])
+        self.assertEqual(trend_store.port_exposure(
+            events, now=2000.0, identity_key="nope")["reason"],
+            trend_store.REASON_NO_PORT_EVENTS)
+
+    def test_latest_ip_wins_for_display(self):
+        events = [
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [23], ip="10.0.0.1"),
+            _ev(2000.0, trend_store.EVENT_PORT_OPEN, [445], ip="10.0.0.9"),
+        ]
+        out = trend_store.port_exposure(events, now=3000.0)
+        self.assertEqual({r["ip"] for r in out["open"]}, {"10.0.0.9"})
+
+    def test_missing_ip_falls_back_to_empty(self):
+        out = trend_store.port_exposure(
+            [{"ts": 1.0, "identity_key": "k",
+              "event_type": trend_store.EVENT_PORT_OPEN,
+              "detail_json": '{"ports": [80]}'}], now=61.0)
+        self.assertEqual(out["open"][0]["ip"], "")
+
+    def test_string_ports_are_accepted(self):
+        out = trend_store.port_exposure(
+            [{"ts": 1.0, "identity_key": "k",
+              "event_type": trend_store.EVENT_PORT_OPEN,
+              "detail_json": '{"ports": ["80"]}'}], now=61.0)
+        self.assertEqual([r["port"] for r in out["open"]], [80])
+
+    def test_malformed_rows_are_skipped_not_raised(self):
+        events = [
+            {"ts": 1.0, "identity_key": "k",
+             "event_type": trend_store.EVENT_PORT_OPEN, "detail_json": "{not json"},
+            {"ts": 1.0, "identity_key": "k",
+             "event_type": trend_store.EVENT_PORT_OPEN, "detail_json": "[1, 2]"},
+            {"ts": 1.0, "identity_key": "k",
+             "event_type": trend_store.EVENT_PORT_OPEN,
+             "detail_json": '{"ports": "80"}'},
+            {"ts": "x", "identity_key": "k",
+             "event_type": trend_store.EVENT_PORT_OPEN,
+             "detail_json": '{"ports": [80]}'},
+            {"ts": 1.0, "identity_key": "k",
+             "event_type": trend_store.EVENT_PORT_OPEN,
+             "detail_json": '{"ports": ["abc", null]}'},
+            _ev(1000.0, trend_store.EVENT_PORT_OPEN, [23]),
+        ]
+        out = trend_store.port_exposure(events, now=1000.0)
+        self.assertEqual([r["port"] for r in out["open"]], [23])
+
+
+class AssetIdentityKeyTest(unittest.TestCase):
+    """`history_store.asset_identity_key()` —— 详情面板靠它把设备对上事件流。"""
+
+    def test_found_by_mac_case_insensitive(self):
+        db = _new_db()
+        _scan(db, [_dev(1)], ts=time.time())
+        self.assertEqual(
+            history_store.asset_identity_key(mac="AA:BB:CC:DD:EE:01", db_path=db),
+            "aa:bb:cc:dd:ee:01")
+
+    def test_found_by_ip_when_mac_missing(self):
+        db = _new_db()
+        _scan(db, [_dev(1)], ts=time.time())
+        self.assertEqual(
+            history_store.asset_identity_key(ip="192.168.1.1", db_path=db),
+            "aa:bb:cc:dd:ee:01")
+
+    def test_unknown_device_and_empty_input_give_empty_string(self):
+        db = _new_db()
+        _scan(db, [_dev(1)], ts=time.time())
+        self.assertEqual(history_store.asset_identity_key(
+            mac="ff:ff:ff:ff:ff:ff", db_path=db), "")
+        self.assertEqual(history_store.asset_identity_key(db_path=db), "")
+
+    def test_mac_wins_over_a_recycled_ip(self):
+        # 🔴 IP 会被 DHCP 回收后分给另一台机器 —— 有 MAC 时必须按 MAC 认，
+        #    否则详情面板会拿别人的暴露时长给这台设备（v2.2 §3.3 同类教训）。
+        db = _new_db()
+        _scan(db, [{"ip": "192.168.1.5", "status": "online",
+                    "mac": "aa:bb:cc:dd:ee:01"}], ts=time.time())
+        _scan(db, [{"ip": "192.168.1.5", "status": "online",
+                    "mac": "aa:bb:cc:dd:ee:02"}], ts=time.time() + 1)
+        self.assertEqual(
+            history_store.asset_identity_key(
+                mac="aa:bb:cc:dd:ee:02", ip="192.168.1.5", db_path=db),
+            "aa:bb:cc:dd:ee:02")
+
+
+class CliPortExposureTest(unittest.TestCase):
+    """CLI 的端口暴露一节：JSON 键固定英文，表格里说清「至少」。"""
+
+    def _run(self, db, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["trend", "--db", db] + list(extra))
+        return rc, buf.getvalue()
+
+    def test_json_keys_are_language_neutral(self):
+        db = _new_db()
+        _scan(db, [_dev(1, "online", "23")], ts=time.time() - 100000)
+        _, out = self._run(db, "--window", "all", "-f", "json")
+        exp = json.loads(out)["port_exposure"]
+        self.assertEqual(sorted(exp),
+                         ["closed", "closed_count", "devices", "open",
+                          "open_count", "reason"])
+        self.assertEqual(sorted(exp["open"][0]),
+                         ["baseline", "identity_key", "ip", "port", "seconds",
+                          "since"])
+        self.assertGreater(exp["open"][0]["seconds"], 99000)
+        self.assertTrue(exp["open"][0]["baseline"])
+
+    def test_table_says_at_least_for_baseline_rows(self):
+        db = _new_db()
+        _scan(db, [_dev(1, "online", "23")], ts=time.time() - 100000)
+        _, out = self._run(db, "--window", "all")
+        self.assertIn("端口暴露", out)
+        self.assertIn("至少，自首次观测起算", out)
+
+    def test_table_explains_when_no_port_events(self):
+        db = _new_db()
+        _scan(db, [_dev(1, "offline", "")], ts=time.time())  # 全关设备
+        _, out = self._run(db, "--window", "all")
+        self.assertIn("没有任何端口开关记录", out)
+
+    def test_closed_ports_are_reported_as_closed(self):
+        db = _new_db()
+        base = time.time() - 100000
+        _scan(db, [_dev(1, "online", "23")], ts=base)
+        _scan(db, [_dev(1, "online", "")], ts=base + 10)   # 23 关了
+        _, out = self._run(db, "--window", "all")
+        self.assertIn("当前没有仍开放着的端口", out)
+        self.assertNotIn("至少，自首次观测起算", out)
+
+
+class DetailPanelExposureTest(unittest.TestCase):
+    """详情面板的「端口暴露」分区（v2.3 §3.3）。"""
+
+    def setUp(self):
+        self.p = DeviceDetailPanel()
+
+    def tearDown(self):
+        self.p.deleteLater()
+
+    @staticmethod
+    def _result():
+        return ScanResult(ip="192.168.1.9", mac="AA:BB:CC:DD:EE:09",
+                          status="online")
+
+    def test_section_is_absent_without_rows(self):
+        self.p.set_device(self._result())
+        self.assertNotIn(tr("端口暴露"), self.p._plain_text())
+
+    def test_baseline_row_says_at_least(self):
+        self.p.set_device(self._result(), exposure=[
+            {"port": 23, "since": 0.0, "seconds": 3600.0, "baseline": True}])
+        text = self.p._plain_text()
+        self.assertIn(tr("端口暴露"), text)
+        self.assertIn("至少", text)
+        self.assertIn("23", text)
+
+    def test_plain_row_does_not_say_at_least(self):
+        self.p.set_device(self._result(), exposure=[
+            {"port": 445, "since": 0.0, "seconds": 90.0, "baseline": False}])
+        text = self.p._plain_text()
+        self.assertIn("445", text)
+        self.assertNotIn("至少", text)
+
+    def test_rows_without_a_usable_duration_are_dropped(self):
+        # 🔴 不显示「端口 23 已开放 样本不足」这种读不通的句子。
+        self.p.set_device(self._result(), exposure=[
+            {"port": 23, "seconds": None, "baseline": False},
+            {"port": 0, "seconds": 10.0, "baseline": False},
+            {"port": "x", "seconds": 10.0, "baseline": False},
+            "not-a-dict",
+            {"port": 8080, "seconds": 10.0, "baseline": False},
+        ])
+        text = self.p._plain_text()
+        self.assertIn("8080", text)
+        self.assertNotIn(tr("样本不足"), text)
+
+    def test_clear_resets_exposure(self):
+        self.p.set_device(self._result(), exposure=[
+            {"port": 23, "seconds": 60.0, "baseline": False}])
+        self.p.clear()
+        self.assertEqual(self.p._exposure, [])
 
 
 def tearDownModule():

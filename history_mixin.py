@@ -72,7 +72,10 @@ class HistoryMixin:
             # 新快照入库后，详情面板缓存的"历史轨迹"就过期了（见
             # MainWindow._device_timeline_for）。不清的话本次扫描新增的这条
             # 永远不会出现在轨迹里，直到重启程序。
+            # 端口暴露（`_port_exposure_for`）读的是同一批 `asset_events`，
+            # 同一时刻失效 —— 这次扫描刚开的端口必须立刻出现在详情面板里。
             getattr(self, "_timeline_cache", {}).clear()
+            getattr(self, "_exposure_cache", {}).clear()
         except Exception as e:
             print(tr("保存历史快照失败:"), e)
 

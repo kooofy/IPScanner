@@ -19,6 +19,7 @@ from scanner import (
 from scanner import throttle
 from mac_library import MacLibrary
 import history_store
+import trend_store
 
 from ui_icons import (
     _build_dark_palette, _gray_icon, _make_tool_icon, _make_pause_icon,
@@ -208,6 +209,7 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         self._changes: list = []         # 最近一次资产变更检测结果
         self._change_map: dict = {}      # {ip: [变更类型, ...]} 供行内角标与「变更」筛选
         self._timeline_cache: dict = {}  # {设备键: 历史轨迹} 写入新快照后失效
+        self._exposure_cache: dict = {}  # {设备键: 端口暴露行} 同一时刻失效
 
         # 配置持久化 (QSettings, Ini 格式, 存于项目目录便于查看/重置)
         self.settings = QSettings(
@@ -1838,7 +1840,47 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
             self._conflict_notes_for(ip),
             self._change_notes_for(ip),
             self._device_timeline_for(result),
+            self._port_exposure_for(result),
         )
+
+    def _port_exposure_for(self, result, limit: int = 8) -> list:
+        """该设备**当前仍开放**的端口暴露行（v2.3 §3.3）。
+
+        数据源是 `asset_events` 的 `port_open` / `port_close` ——
+        `assets.open_ports` 只存"此刻开放的端口"，答不出
+        「这个 23 端口是昨天开的还是开了两年」。
+
+        与 `_device_timeline_for()` 同款缓存：同一台设备常被反复点开，
+        而事件流只在**写入新快照后**才可能变（`_timeline_cache` 同点失效，
+        见 `history_mixin._save_snapshot`）。
+        """
+        if result is None:
+            return []
+        key = (result.mac or "").upper().strip() or f"ip:{(result.ip or '')}"
+        if not key:
+            return []
+        cache = getattr(self, "_exposure_cache", None)
+        if cache is None:
+            cache = self._exposure_cache = {}
+        if key in cache:
+            return cache[key]
+        rows = []
+        try:
+            ident = history_store.asset_identity_key(
+                mac=result.mac, ip=result.ip, db_path=self.history_db)
+            if ident:
+                events = history_store.read_asset_events(
+                    identity_key=ident, db_path=self.history_db)
+                rows = trend_store.port_exposure(
+                    events, identity_key=ident)["open"][:limit]
+        except Exception as exc:
+            # 暴露时长是"锦上添花"：历史库损坏/被占用不该让详情面板整体打不开
+            # （与 `_device_timeline_for()` 同一条）。
+            app_logging.get_logger(__name__).warning(
+                "读取端口暴露时长失败（%s）: %s", result.ip, exc)
+            rows = []
+        cache[key] = rows
+        return rows
 
     def _conflict_notes_for(self, ip) -> list:
         """该 IP 命中的冲突描述（供详情面板「风险」分区展示）。"""

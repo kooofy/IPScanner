@@ -1072,5 +1072,8 @@
   "时间窗：{win} · 粒度：{gran} · 范围：{scope}": "Window: {win} · Granularity: {gran} · Scope: {scope}",
   "所选网段在这个时间窗内没有按网段计数。": "The selected subnet has no per-subnet counts in this window.",
   "网段名可能写错了，或这些数据来自 v2.3 §3.2 之前（那时不记每网段计数）。把范围切回「全部网段」看全局曲线，或换个网段。": "The subnet name may be misspelled, or the data predates v2.3 §3.2 (no per-subnet counts were recorded then). Set the scope back to \"All subnets\" for the global curve, or pick another subnet.",
-  "⚠ MTBF / MTTR 是**扫描采样**近似：只看到扫描那一刻的状态，短于扫描间隔的抖动看不到。「翻转 0 次」= 没看见，不等于稳定。": "⚠ MTBF / MTTR are scan-sampling approximations: only the state at each scan is seen, so flapping shorter than the scan interval is invisible. \"0 flips\" means unseen, not stable."
+  "⚠ MTBF / MTTR 是**扫描采样**近似：只看到扫描那一刻的状态，短于扫描间隔的抖动看不到。「翻转 0 次」= 没看见，不等于稳定。": "⚠ MTBF / MTTR are scan-sampling approximations: only the state at each scan is seen, so flapping shorter than the scan interval is invisible. \"0 flips\" means unseen, not stable.",
+  "端口暴露": "Port Exposure",
+  "端口 {port} 已开放 {dur}": "Port {port} has been open for {dur}",
+  "端口 {port} 至少已开放 {dur}（自首次观测起算，真实开放时刻更早）": "Port {port} has been open for at least {dur} (measured from first observation; it may have opened earlier)"
 }

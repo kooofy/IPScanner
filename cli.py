@@ -1956,12 +1956,13 @@ def cmd_trend(args) -> int:
     else:
         reason = None
 
-    # 事件流：稳定性（抖动 / MTBF / MTTR）与首现设备。
+    # 事件流：稳定性（抖动 / MTBF / MTTR）、首现设备、端口长期暴露。
     # 它们读 `asset_events`，曲线读 `trend_observations` —— 两张表，
     # 但都**不参与 prune**，所以时间窗口径一致。
     events = history_store.read_asset_events(since_ts=since, db_path=db_path)
     stab = trend_store.stability(events)
     newcomers = trend_store.first_seen_devices(events, limit=10)
+    exposure = trend_store.port_exposure(events, top=10)
     payload = {
         "window": window,
         "window_hours": trend_store.normalize_hours(window),
@@ -1971,6 +1972,7 @@ def cmd_trend(args) -> int:
         "points": series,
         "stability": stab,
         "new_devices": newcomers,
+        "port_exposure": exposure,
         "reason": reason,
     }
     if args.format == "json":
@@ -2017,6 +2019,25 @@ def cmd_trend(args) -> int:
             lines.append("    %-16s %-20s %s" % (
                 d["ip"] or d["identity_key"], d["mac"] or "-",
                 _fmt_trend_ts(d["ts"])))
+    # ── 端口长期暴露时长（v2.3 §3.3）──
+    # 🔴 与「在线率」是**两个不同的问题**：那个看网络整体，这个看"哪个端口
+    #    一直开着"。数据源同为 `asset_events`（`port_open` / `port_close`）——
+    #    `assets.open_ports` 只存"此刻"，答不出"这个 23 端口开了多久"。
+    if exposure["reason"] == trend_store.REASON_NO_PORT_EVENTS:
+        lines.append("  端口暴露：窗口内没有任何端口开关记录 —— "
+                     "长期不动的端口只会记一条「首次观测」基线，"
+                     "所以刚接入观测时这里通常是空的。")
+    elif exposure["open"]:
+        lines.append("  端口暴露 %d 个（最多列 10 个，最久的在前）："
+                     % exposure["open_count"])
+        for r in exposure["open"]:
+            lines.append("    %-16s %5d  %s%s" % (
+                (r["ip"] or r["identity_key"])[:16], r["port"],
+                _fmt_duration(r["seconds"]),
+                "（至少，自首次观测起算）" if r["baseline"] else ""))
+    else:
+        lines.append("  端口暴露：窗口内 %d 段已闭合，当前没有仍开放着的端口。"
+                     % exposure["closed_count"])
     emit("\n".join(lines) + "\n", args.output)
     return EXIT_OK
 

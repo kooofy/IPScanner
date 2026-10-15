@@ -863,6 +863,35 @@ def device_timeline(mac="", ip="", db_path=None, limit=None) -> list:
     return out
 
 
+def asset_identity_key(mac="", ip="", db_path=None) -> str:
+    """按 MAC（优先）/ IP 找这台设备在 `assets` 里的身份键；找不到返回 `""`。
+
+    匹配规则与 `device_timeline()` **一致**（MAC 优先，没有 MAC 才用 IP）——
+    IP 会被 DHCP 回收后分给另一台机器，按 IP 认设备会把两台串在一起。
+
+    详情面板拿它去 `read_asset_events(identity_key=…)` 取这台设备的端口暴露
+    （v2.3 §3.3）。
+
+    ⚠️ **不能**在这里用 `identity_key(mac, ip)` 现算：真正的键由写入端的
+    `resolve_identity()` 决定（LAA 随机 MAC 走指纹降级），现算会与库里的
+    键对不上，于是"这台设备的端口暴露"永远是空的。
+    """
+    _mac = (mac or "").strip().upper()
+    _ip = (ip or "").strip()
+    if not _mac and not _ip:
+        return ""
+    with _conn(db_path) as conn:
+        if _mac:
+            row = conn.execute(
+                "SELECT identity_key FROM assets WHERE mac = ? COLLATE NOCASE "
+                "LIMIT 1", (_mac,)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT identity_key FROM assets WHERE ip = ? LIMIT 1",
+                (_ip,)).fetchone()
+    return (row["identity_key"] if row else "") or ""
+
+
 def save_port_map(snapshot_id, switches, db_path=None) -> int:
     """把一次扫描中各交换机的端口映射写入 switch_map / port_map。
 
@@ -1376,6 +1405,19 @@ def _build_asset_events(pairs, states):
             events.append((key, trend_store.EVENT_FIRST_SEEN, json.dumps(
                 {"ip": d.get("ip", ""), "mac": d.get("mac", "")},
                 ensure_ascii=False, sort_keys=True)))
+            # 🔴 首次观测时**已经开着**的端口也记一条 `port_open`，但带
+            #    `baseline: true` —— 它的时间戳是"我们第一次看到它"，
+            #    **不是**"端口真的开了"。
+            #    没有这一条，长期不动的端口（正是 §3.3「端口长期暴露时长」
+            #    要回答的那一类）在事件流里**完全没有记录**，
+            #    「这个端口开了多久」永远答不出来。
+            #    ⚠️ 消费方必须把它显示成「**至少** N」：真实开放时刻只会更早。
+            fresh = _port_set(d.get("open_ports"))
+            if fresh:
+                events.append((key, trend_store.EVENT_PORT_OPEN, json.dumps(
+                    {"ports": sorted(fresh), "ip": d.get("ip", ""),
+                     "baseline": True},
+                    ensure_ascii=False, sort_keys=True)))
             continue
         old_status = (old["status"] or "").strip()
         new_status = (d.get("status", "") or "").strip()

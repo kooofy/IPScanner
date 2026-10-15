@@ -89,6 +89,10 @@ REASON_NO_RECORDS = "no_records"
 REASON_OUT_OF_WINDOW = "out_of_window"
 REASON_NO_RANGE_DATA = "no_range_data"
 REASON_INSUFFICIENT_SAMPLES = "insufficient_samples"
+#: 窗口内**一条 `port_open` / `port_close` 都没有**（v2.3 §3.3）。
+#: ⚠️ 与 `REASON_NO_RECORDS` **分开**：趋势行有、曲线画得出，但端口事件没有，
+#: 这两件事的下一步动作不同（前者去跑扫描，后者只说明"窗口内端口没开关过"）。
+REASON_NO_PORT_EVENTS = "no_port_events"
 
 
 def window_start(now: Optional[float] = None, window: str = "24h") -> Optional[float]:
@@ -436,3 +440,139 @@ def first_seen_devices(events, limit=None):
                     "ip": detail.get("ip", ""), "mac": detail.get("mac", "")})
     out.sort(key=lambda d: -d["ts"])
     return out[:limit] if limit else out
+
+
+# ── 端口长期暴露时长（v2.3 §3.3）─────────────────────────────────────
+#
+# 🔴 为什么必须重放 `asset_events` 而不是读 `assets.open_ports`：
+#    后者只存**此刻**开放的端口串，没有时间维度 ——
+#    「这个 23 端口是昨天开的还是开了两年」答不上来。
+#
+# 🔴 为什么只记**实际开放**的端口（新旧差集）而不是"扫过的全部端口"：
+#    `all` 档有 65535 个端口，逐端口落库会胀爆（v2.2 §3.3 的教训）。
+#    两侧都是"开着的端口"，差集天然很小。
+
+
+def _port_events_by_device(events):
+    """`port_open` / `port_close` 按设备分组 → `{key: [(ts, 类型, 端口, baseline, ip), …]}`。
+
+    每组按 `ts` 升序；同 `ts` 时保持调用方给的顺序（即 `id` 序 —— `list.sort`
+    是稳定的），所以「同一次扫描写下的 open 与 close」次序不会被打乱。
+
+    `detail_json` 坏掉 / 不是对象 / `ports` 不是列表 / 端口不是整数 的行**跳过**
+    （不抛）：一行坏数据不该让整张暴露表消失。
+    """
+    out = {}
+    for e in events:
+        etype = e.get("event_type")
+        if etype not in (EVENT_PORT_OPEN, EVENT_PORT_CLOSE):
+            continue
+        try:
+            detail = json.loads(e.get("detail_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(detail, dict):
+            continue
+        ports = detail.get("ports")
+        if not isinstance(ports, list):
+            continue
+        try:
+            ts = float(e.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        key = e.get("identity_key", "")
+        ip = str(detail.get("ip") or "")
+        baseline = bool(detail.get("baseline"))
+        for p in ports:
+            try:
+                port = int(p)
+            except (TypeError, ValueError):
+                continue
+            out.setdefault(key, []).append((ts, etype, port, baseline, ip))
+    for seq in out.values():
+        seq.sort(key=lambda row: row[0])
+    return out
+
+
+def port_exposure(events, now=None, identity_key=None, top=None):
+    """端口长期暴露时长：按设备、按端口重放 `port_open` / `port_close`。
+
+    `open` 记下起点，`close` 收一段闭合区间；窗口结束时仍未闭合的，
+    暴露时长 = `now − 起点`。
+
+    🔴 **从最近一次 open 起算**：`close` 会把起点清掉，所以
+    「开 → 关 → 再开」报的是**再开那一刻**起的时长，不是首次。
+
+    🔴 **`baseline` 为真的行，起点是"我们第一次观测到它"，不是"端口真的开了"**：
+    那类端口的真实开放时刻只会**更早** ⇒ 它给的是时长**下界**，调用方必须
+    显示成「**至少** N」。当成准确起点会**低估**暴露时长 —— 而低估暴露时长
+    恰好是**危险**的那个方向（照 §3.2 的「只陈述事实」红线）。
+
+    参数：
+    * `now` —— 算时长的"当前时刻"（默认 `time.time()`；测试传固定值）；
+    * `identity_key` —— 只算这一台（设备详情面板用），`None` 表示全部；
+    * `top` —— 两个列表各截断到前 N 条。⚠️ `open_count` / `closed_count`
+      仍是**截断前**的真实条数（与 `stability(top=…)` 同口径）。
+
+    返回键：`devices` / `open` / `closed` / `open_count` / `closed_count` / `reason`。
+    * `open` —— 仍在暴露的 `(设备, 端口)`，按 `seconds` 降序（最久的在最前）；
+    * `closed` —— 已闭合区间，按 `end` 降序；
+    * `reason` —— 一条 `port_*` 事件都没有 ⇒ `REASON_NO_PORT_EVENTS`（**不给空表**）；
+      有事件但都已闭合 ⇒ `None` + `open_count == 0`，那是事实
+      「当前没有暴露中的端口」，**不是**"没数据"。
+    """
+    current = time.time() if now is None else now
+    by_dev = _port_events_by_device(events)
+    if identity_key is not None:
+        by_dev = {identity_key: by_dev.get(identity_key, [])}
+
+    open_rows, closed_rows = [], []
+    devices = 0
+    for key, seq in by_dev.items():
+        if not seq:
+            continue
+        devices += 1
+        # 设备最近一次被看到的 IP（取序列里最后一个非空值）—— 展示用。
+        ip = ""
+        for _ts, _et, _port, _base, row_ip in reversed(seq):
+            if row_ip:
+                ip = row_ip
+                break
+        started: Dict[int, tuple] = {}   # port -> (since_ts, baseline)
+        for ts, etype, port, baseline, _row_ip in seq:
+            if etype == EVENT_PORT_OPEN:
+                # 🔴 重复 open（中间没有 close）**不覆盖**起点：保留更早的那个
+                #    = 更长的暴露时长 = 更保守的判断。`baseline` 重放时最容易
+                #    出现（状态缺失 / 库被清过），那时把时长改短是错的方向。
+                started.setdefault(port, (ts, baseline))
+                continue
+            prev = started.pop(port, None)
+            if prev is None:
+                continue   # 没见过 open 的 close：忽略（不猜）
+            closed_rows.append({
+                "identity_key": key, "ip": ip, "port": port,
+                "start": prev[0], "end": ts,
+                "seconds": max(ts - prev[0], 0.0),
+                "baseline": prev[1],
+            })
+        for port, (since, baseline) in started.items():
+            open_rows.append({
+                "identity_key": key, "ip": ip, "port": port,
+                "since": since,
+                "seconds": max(current - since, 0.0),
+                "baseline": baseline,
+            })
+
+    open_rows.sort(key=lambda r: (-r["seconds"], r["identity_key"], r["port"]))
+    closed_rows.sort(key=lambda r: (-r["end"], r["identity_key"], r["port"]))
+    open_count, closed_count = len(open_rows), len(closed_rows)
+    if top:
+        open_rows, closed_rows = open_rows[:top], closed_rows[:top]
+    return {
+        "devices": devices,
+        "open": open_rows,
+        "closed": closed_rows,
+        "open_count": open_count,
+        "closed_count": closed_count,
+        "reason": None if devices else REASON_NO_PORT_EVENTS,
+    }

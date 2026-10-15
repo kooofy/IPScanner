@@ -31,6 +31,7 @@ from scanner import (
 )
 from scanner.wmi import transport_label
 from i18n import tr
+from ui_utils import format_exposure_rows
 
 
 class DeviceDetailPanel(QWidget):
@@ -49,6 +50,9 @@ class DeviceDetailPanel(QWidget):
         self._conflict_notes = []
         self._change_notes = []
         self._timeline = []
+        #: 该设备**当前仍开放**的端口暴露行（`trend_store.port_exposure()['open']`）。
+        #: 由 `set_device(exposure=…)` 传入 —— 本面板**不碰数据库**。
+        self._exposure = []
         self._build()
 
     # ── 构建 ──────────────────────────────────────────────
@@ -110,13 +114,14 @@ class DeviceDetailPanel(QWidget):
         self._conflict_notes = []
         self._change_notes = []
         self._timeline = []
+        self._exposure = []
         self.title.setText("")
         self._clear_rows()
         self._set_actions_visible(False)
         self.hint.setVisible(True)
 
     def set_device(self, result, conflict_notes=None, change_notes=None,
-                   timeline=None):
+                   timeline=None, exposure=None):
         """展示一台设备的完整信息。
 
         :param result: `scanner.models.ScanResult`
@@ -125,6 +130,11 @@ class DeviceDetailPanel(QWidget):
         :param timeline:       该设备在历史快照中的出现轨迹（来自 history_store
                                .device_timeline），每项形如
                                `{"time", "status", "ip", "mac"}`
+        :param exposure:       该设备**当前仍开放**的端口暴露行（来自
+                               `trend_store.port_exposure()['open']`），每项形如
+                               `{"port", "since", "seconds", "baseline"}`。
+                               🔴 `baseline` 为真的行必须显示成「**至少** N」
+                               —— 见 `ui_utils.format_exposure_rows()`。
         """
         if result is None:
             self.clear()
@@ -134,6 +144,7 @@ class DeviceDetailPanel(QWidget):
         self._conflict_notes = list(conflict_notes or [])
         self._change_notes = list(change_notes or [])
         self._timeline = list(timeline or [])
+        self._exposure = list(exposure or [])
 
         self.hint.setVisible(False)
         self._set_actions_visible(True)
@@ -213,6 +224,12 @@ class DeviceDetailPanel(QWidget):
 
         risk = [(tr("冲突"), note) for note in conflict_notes]
 
+        # 端口暴露（v2.3 §3.3）：**整行文本** —— 一行就是一句
+        # 「端口 23 已开放 40.2 天」。起点是"首次观测"的行由
+        # `ui_utils.format_exposure_rows()` 加上「至少」，
+        # 🔴 绝不把它说成"端口就是那时候开的"。
+        exposure = format_exposure_rows(self._exposure)
+
         # 变更与轨迹同样用「整行文本」渲染：内容本身就是一句话，拆成
         # 标签/值两栏只会让右栏被压窄、长句反复折行。
         # 轨迹按时间倒序（最近的在上）—— 用户关心"最近一次在不在"。
@@ -231,6 +248,7 @@ class DeviceDetailPanel(QWidget):
             (tr("服务"), service, True),
             (tr("变更"), change, True),
             (tr("历史轨迹"), history, True),
+            (tr("端口暴露"), exposure, True),
             (tr("风险"), risk, False),
         ]
         visible = []
