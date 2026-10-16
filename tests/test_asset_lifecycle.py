@@ -36,6 +36,7 @@ import asset_lifecycle  # noqa: E402
 import cli  # noqa: E402
 import db_util  # noqa: E402
 import history_store  # noqa: E402
+import i18n  # noqa: E402
 
 
 def _new_db():
@@ -736,19 +737,47 @@ class CliAssetsTest(unittest.TestCase):
 
     def _run(self, *extra):
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = cli.main(["assets", "--db", self.db] + list(extra))
+        lang = i18n.current_lang()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main(["assets", "--db", self.db] + list(extra))
+        finally:
+            # 🔴 `cli.main()` 内部会 `i18n.init(None)` —— 在 en-US 的 CI 上
+            # 会把**整个进程**的语言切成英文且不还原，后续测试模块的 `tr()`
+            # 期望值全变英文（而 CLI 输出恒为中文）⇒ 2026-10-16 CI 实测
+            # `test_audit_activity` 两个用例就是这么挂的。照
+            # `test_audit_activity._run()` 的做法保存恢复。
+            i18n.init(lang)
         return rc, buf.getvalue()
 
     def _run_split(self, *extra):
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = cli.main(["assets", "--db", self.db] + list(extra))
+        lang = i18n.current_lang()
+        try:
+            with (contextlib.redirect_stdout(out),
+                  contextlib.redirect_stderr(err)):
+                rc = cli.main(["assets", "--db", self.db] + list(extra))
+        finally:
+            i18n.init(lang)
         return rc, out.getvalue(), err.getvalue()
 
     @staticmethod
     def _days(n):
         return (datetime.date.today() + datetime.timedelta(days=n)).isoformat()
+
+    def test_cli_call_does_not_leak_process_language(self):
+        """🔴 守卫：CLI 调用不得把进程语言切走（2026-10-16 CI 实测）。
+
+        `cli.main()` 内部会 `i18n.init(None)` —— 在 en-US 的 CI 上把**整个
+        进程**的语言切成英文且不还原。本模块按字母序排在 `test_audit_activity`
+        前面，那里两个用例用 `tr()` 现算期望值（CLI 输出恒为中文），语言一旦
+        泄漏就全挂。这条钉住 `_run` / `_run_split` 的保存恢复语义。
+        """
+        before = i18n.current_lang()
+        self._run("-f", "json")
+        self.assertEqual(i18n.current_lang(), before)
+        self._run_split("-f", "json")
+        self.assertEqual(i18n.current_lang(), before)
 
     # ── 写入路径 ─────────────────────────────────────────────────────
 
