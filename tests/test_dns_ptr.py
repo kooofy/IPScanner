@@ -15,6 +15,7 @@
 - ``_FakeExecutor`` 记录每次 ``submit``，用来断言「该跳过时**真的没提交**」——
   这是本组用例的核心：短路的价值就在于**不提交**，只断言返回值是测不出来的。
 """
+import concurrent.futures
 import os
 import sys
 import unittest
@@ -51,12 +52,25 @@ class _ScriptedFuture:
         else:
             kind, payload = self._script[0]
         if kind == "timeout":
-            # 抛**内置 TimeoutError**（= 真实 ``future.result(timeout=...)`` 在
-            # 超时那一刻抛的东西，见 ``concurrent.futures.TimeoutError``）。
-            # 刻意不写 ``concurrent.futures.TimeoutExpired`` —— 那个名字在
+            # 🔴 必须抛 ``concurrent.futures.TimeoutError`` —— 这是
+            # ``future.result(timeout=...)`` 超时时**在各版本上**实际抛的东西，
+            # 也是生产代码捕获的名字。
+            #
+            # 踩过的坑（2026-10-16 CI run 38850878342）：一开始写成内置
+            # ``TimeoutError``，本机（3.13）全绿、**CI 的 3.10 job 红**。
+            # 原因是 ``concurrent.futures.TimeoutError`` 在 **3.11 才被改成
+            # 内置 ``TimeoutError`` 的别名**（见 CPython 文档 "Deprecated since
+            # version 3.11"）；3.10 及更早它是 ``concurrent.futures._base`` 里
+            # 另一个**独立**的类 ⇒ 抛内置的那个不会被
+            # ``except concurrent.futures.TimeoutError`` 捕获，超时分支永不触发。
+            # 写 ``concurrent.futures.TimeoutError`` 则在所有版本上都与真实
+            # futures 抛的**是同一个对象**（3.11+ 恰好等价，3.10 恰好正确）。
+            #
+            # 同理**不能**写 ``concurrent.futures.TimeoutExpired``：那个名字在
             # ``concurrent.futures`` 里**不存在**（它是 ``subprocess`` 的），
             # 用了会让"源码 catch 了错误的名字"这类缺陷测不出来。
-            raise TimeoutError("gethostbyaddr timed out")
+            # 版本保真性由 ``TimeoutClassFidelityTest`` 钉死。
+            raise concurrent.futures.TimeoutError("gethostbyaddr timed out")
         if kind == "error":
             raise payload
         return payload
@@ -228,6 +242,46 @@ class ShortCircuitTest(_PtrTestCase):
         self.assertGreater(dns._PTR_DISABLE_TTL, 0.0)
         self.assertLessEqual(dns._PTR_DISABLE_TTL, 600.0)
         self.assertGreaterEqual(dns._PTR_TIMEOUT_LIMIT, 1)
+
+
+class TimeoutClassFidelityTest(_PtrTestCase):
+    """🔴 钉死「超时异常类」的版本保真性 —— 本机（3.13）测不出来的一类坑。
+
+    `concurrent.futures.TimeoutError` 在 **3.11 才被改成内置 `TimeoutError`
+    的别名**；3.10 及更早它是 `concurrent.futures._base` 里另一个**独立**的类。
+    而 `future.result(timeout=...)` 超时抛的**始终是这个名字**。所以：
+    假 future 必须抛它、生产代码必须捕获它 —— 两者只要有一方写成内置的
+    `TimeoutError`，本机（3.13，两者同一个对象）全绿而 **3.10 必红**。
+    """
+
+    def test_fake_future_raises_the_class_real_futures_raise(self):
+        """假 future 抛的类必须**就是** `concurrent.futures.TimeoutError`。"""
+        with self.assertRaises(concurrent.futures.TimeoutError):
+            _ScriptedFuture([_timeout()]).result(timeout=1.0)
+
+    def test_timeout_branch_survives_a_distinct_futures_timeout_class(self):
+        """在 3.13 上**复现 3.10 的语义**：把 `concurrent.futures.TimeoutError`
+        临时换成一个与内置无关的新类。
+
+        若生产代码改成捕获内置 `TimeoutError`（或假 future 抛内置那个），
+        超时分支就不再触发 ⇒ `timeout_streak` 停在 0 ⇒ 本用例红。
+        """
+
+        class _DistinctFuturesTimeout(Exception):
+            """模拟 3.10 的 `concurrent.futures.TimeoutError`：非内置子类。"""
+
+        self.assertFalse(issubclass(_DistinctFuturesTimeout, TimeoutError),
+                         "假类必须与内置 TimeoutError 无关，否则模拟不出 3.10")
+
+        ex = _FakeExecutor([_timeout()])
+        with mock.patch.object(concurrent.futures, "TimeoutError",
+                               _DistinctFuturesTimeout):
+            with mock.patch.object(dns, "_get_resolve_executor", return_value=ex):
+                self.assertEqual(
+                    dns.resolve_hostname("10.193.24.30", timeout=1.5), "")
+        self.assertEqual(dns.ptr_state()["timeout_streak"], 1.0,
+                         "超时没被计入 —— 生产代码多半捕获了内置 TimeoutError，"
+                         "或假 future 抛的不是 futures 那个类")
 
 
 class RobustnessTest(_PtrTestCase):
