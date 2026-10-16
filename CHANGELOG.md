@@ -14,6 +14,82 @@
 
 ---
 
+## [2.3.0] - 2026-10-16
+
+> **v2.3 四项全部落地**。依据是 [`docs/ROADMAP_V2.3.md`](docs/ROADMAP_V2.3.md)
+> 的 3.1 / 3.2 / 3.3 / 3.4 全部 ✅。v2.3 的主题是「**能看清变化**」——
+> 资产表两层模型 v2.0 就建好了，而「趋势类果实」一直没收；本版把工具从
+> 「只能看此刻」变成「能看一段时间」。
+>
+> | 项 | 内容 |
+> |---|---|
+> | 3.1 | **趋势观测层**（独立表 + 事件流，不参与 prune）—— 数据基础 |
+> | 3.2 | **在线率曲线与稳定性**（MTBF / 抖动 / 首现告警 / 按网段） |
+> | 3.3 | **端口长期暴露时长**（「这个 23 端口开了多久」） |
+> | 3.4 | **资产生命周期字段 + 保修到期提醒**（采购/保修/负责人/序列号/位置/自定义） |
+>
+> ⚠ 三项**未修**如实保留：`P2-13` 代码签名 = **申请中**（等 SignPath 审批）；
+> SNMPv1/DES 不支持；IPv6 **扫描**仍不支持（只做可见性）。
+
+### 新增
+
+- **趋势观测层 —— v2.3 路线图 3.1（主题项 · 数据基础）**。
+  快照上限 20 条、旧快照会被 prune 连同 `devices` 一起删 ⇒
+  趋势数据**必须建在不参与 prune 的新表上**，否则曲线随时间自己变短。
+  - 新模块 `trend_store.py`（纯计算：零 DB / 零 PyQt / 零 i18n）；
+  - `history_store._SQL_V6` 新增两张表：`trend_observations`
+    （一行/扫描，**无外键**、不参与 prune、保留 365 天）与 `asset_events`
+    （**只在变化时写行**：首见 / 端口开/关 / 消失）；
+  - `save_snapshot()` 挂写入，四条落库路径（`scan`/`diff`/`import`/`watch`）
+    全部带上趋势元数据（网段计数 / 端口摘要 / 耗时 / 来源）；
+  - 数据库迁移到 `SCHEMA_VERSION = 6`，老库平滑升级。
+
+- **在线率曲线与稳定性 —— v2.3 路线图 3.2**。
+  - CLI `trend` 子命令（时间窗 24h/7d/30d/全部 × 粒度小时/天 × **按网段**
+    三个筛选）+ GUI「在线率趋势...」对话框（`ui_dialogs/trend_view.py`）；
+  - `online_ratio_series()` / `stability()` 给出 MTBF、抖动、首现告警；
+  - 🔴 `ranges_json` 存**每网段计数** `[{"range","total","online"}]`
+    （只存网段名的话读端拆不回单网段，按网段曲线根本无法实现；
+    JSON 列不改结构 ⇒ 不需迁移）；
+  - 样本不足时给 `reason` + 下一步，**不给空表**（「不猜」原则）。
+
+- **端口长期暴露时长 —— v2.3 路线图 3.3**（合规视角）。
+  `assets.open_ports` 只存「此刻」，答不出「这个 23 端口开了多久」——
+  现在由 `asset_events` 的 `port_open`/`port_close` **事件重放**得出：
+  - `trend_store.port_exposure()`：开→关→再开从**最近一次 open** 起算；
+  - CLI `trend` 输出加 `port_exposure` 一节（Top N）；
+  - GUI 详情面板「端口暴露」分区；
+  - 🔴 首扫会把**已经开着**的端口也记一条 `port_open`（`baseline: true`
+    = 「首次观测时它就开着」，**不是**「此刻开了」）⇒ 显示成「**至少** N」。
+    没有它，长期不动的端口在事件流里毫无记录，功能等于空的。
+
+- **资产生命周期字段 + 保修到期提醒 —— v2.3 路线图 3.4**。
+  - `history_store._SQL_V7`（`SCHEMA_VERSION = 7`）给 `assets` 加 6 列：
+    `purchase_date` / `warranty_end` / `owner` / `serial` /
+    `location_tree` / `custom_json`；
+  - 新模块 `asset_lifecycle.py`（纯计算：零 DB / 零 PyQt / 零 i18n / 零三方）：
+    日期解析（读宽松 / 写严格，非法**当场报错**不静默存空）、保修状态
+    规范值 `unset`/`expired`/`expiring`/`ok`、`custom_json` 键名**原样**
+    归一（不翻译）；
+  - CLI：`assets --warranty-days N`（只列已过期或 N 天内到期；
+    未填的**不进结果**但报跳过台数）+ `assets --set <身份键/MAC/IP>
+    --field K=V`；
+  - GUI：详情面板「资产信息」分区 +「编辑资产信息...」按钮；
+  - 🔴 生命周期字段与扫描 UPSERT 的列**严格分离** —— 例行扫描
+    永远不会覆盖用户填的台账；未填保修显示「未填」，**绝不**误报「已过期」。
+
+### 内部 / 质量
+
+- 测试：`tests/test_trend.py`（135 例）、`tests/test_asset_lifecycle.py`
+  （88 例）、`tests/test_asset_edit_dialog.py`（27 例）新增；
+  全量 **2800** 例通过；`trend_store.py` 与 `asset_lifecycle.py`
+  覆盖率 **100%**（CI per-file 门禁）。
+- 详情面板取数走 `history_store.asset_identity_key()`（MAC 优先、查库），
+  不用 `identity_key(mac, ip)` 现算 —— 真键由写入端决定
+  （LAA 随机 MAC 走指纹降级），现算会对不上、面板永远空白。
+
+---
+
 ## [2.2.0] - 2026-10-15
 
 > **v2.2 四项全部落地**。依据是 [`docs/ROADMAP_V2.2.md`](docs/ROADMAP_V2.2.md)
@@ -763,7 +839,8 @@ v1.8 路线图的四项全部落地（定位查询 / 被动发现 / 历史查询
 
 ---
 
-[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/kooofy/IPScanner/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/kooofy/IPScanner/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/kooofy/IPScanner/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/kooofy/IPScanner/compare/v1.9.0...v2.0.0
