@@ -1864,6 +1864,122 @@ def cmd_import(args) -> int:
 
 # ────────────────────────── 端口利用率 ──────────────────────────
 
+def cmd_arp_mac(args) -> int:
+    """用 SNMP 读三层设备的 ARP 表，输出 IP → MAC（跨网段取 MAC 的正路）。
+
+    🔴 **为什么需要它**：MAC 是二层概念，只能靠 ARP 在同一个广播域里学到。
+    本机与目标不在同一网段时，ICMP 能通（经网关三层转发），但本机 ARP 表里
+    永远只有网关的 MAC。改读**持有目标网段三层接口的那台设备**（通常就是本机
+    默认网关）的 ARP 表 —— 它要转发数据包，就必须自己 ARP 出目标的 MAC。
+
+    ⚠ 只读（GETNEXT），不写任何设备配置。失败就如实报错，**不做猜测式回退**
+    （不猜「本机网段 .1」当网关 —— 猜错会静默查一台不相干的设备）。
+    """
+    import ipaddress
+
+    from arp_mapper import detect_default_gateway, fetch_arp_table, source_label
+
+    user, err = _resolve_snmp_v3(args)
+    if err:
+        log(f"错误: {err}")
+        return EXIT_ERROR
+
+    host = (getattr(args, "host", "") or "").strip()
+    if not host:
+        host = detect_default_gateway()
+        if not host:
+            log("错误: 未检测到默认网关。请用 --host 指定「持有目标网段三层接口」"
+                "的那台设备（路由器 / 三层交换机）。")
+            return EXIT_ENV
+        log(f"未指定 --host，已自动探测到默认网关: {host}")
+
+    nets = []
+    for r in (getattr(args, "ranges", None) or []):
+        try:
+            nets.append(ipaddress.ip_network(r, strict=False))
+        except ValueError:
+            log(f"错误: 无法解析范围: {r}")
+            return EXIT_ERROR
+
+    res = fetch_arp_table(
+        host,
+        communities=getattr(args, "community", None) or None,
+        timeout=getattr(args, "timeout", 1.5),
+        progress_cb=log,
+        snmp_v3_user=user,
+    )
+
+    def _in_scope(ip: str) -> bool:
+        if not nets:
+            return True
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(addr in n for n in nets)
+
+    def _ip_key(kv):
+        # 索引后缀已由 arp_mib 校验过是 4 段 0-255，这里再兜一层，
+        # 保证任何脏数据都不会让排序抛异常（宁可排在最后也不崩）。
+        try:
+            return (0,) + tuple(int(x) for x in kv[0].split("."))
+        except ValueError:
+            return (1, kv[0])
+
+    entries = sorted(((ip, mac) for ip, mac in res.entries.items() if _in_scope(ip)),
+                     key=_ip_key)
+
+    payload = {
+        "host": host,
+        "sys_name": res.sys_name,
+        "sys_descr": res.sys_descr,
+        # JSON 键固定英文（与其它子命令一致）：CLI 输出恒为中文，键不能跟着语言漂。
+        "source": res.source,
+        "count": len(entries),
+        "total_entries": len(res.entries),
+        "entries": [{"ip": ip, "mac": mac} for ip, mac in entries],
+        "error": res.error,
+    }
+
+    if args.format == "json":
+        emit(json.dumps(payload, ensure_ascii=False, indent=2), args.output)
+    elif args.format == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["ip", "mac"])
+        for ip, mac in entries:
+            w.writerow([ip, mac])
+        emit(buf.getvalue(), args.output)
+    else:
+        lines = []
+        if res.sys_name or res.sys_descr:
+            lines.append(f"设备: {res.sys_name or host} ({host})")
+        if res.error:
+            # 失败原因已经是可操作的整段说明（见 arp_mapper._build_error）
+            lines.append(res.error)
+        elif not entries:
+            # 🔴 区分「表是空的」与「表有内容但都不在范围内」—— 两者下一步动作不同
+            lines.append(
+                f"从 {host} 读到 {len(res.entries)} 条 ARP 记录，"
+                "但没有任何一条落在指定范围内。")
+            lines.append("请确认 --range 与目标网段一致；"
+                         "若目标网段还挂在下一台路由器后面，"
+                         "要查的是那台路由器（本设备只是它的上一跳）。")
+        else:
+            lines.append(f"来源: {source_label(res.source)} · "
+                         f"命中 {len(entries)} / 共 {len(res.entries)} 条")
+            lines.append("")
+            width = max(len(ip) for ip, _ in entries)
+            for ip, mac in entries:
+                lines.append(f"  {ip.ljust(width)}  {mac}")
+            lines.append("")
+            lines.append("⚠ 表项会老化（思科默认 4 小时、华为华三常 20 分钟）："
+                         "要拿「此刻在线」的设备，请在扫描之后立刻执行本命令。")
+        emit("\n".join(lines) + "\n", args.output)
+
+    return EXIT_ERROR if res.error else EXIT_OK
+
+
 def cmd_ports(args) -> int:
     """每台交换机各端口的接入设备数 / 空闲口（「还有几个口可用」）。
 
@@ -3506,6 +3622,33 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("-q", "--quiet", action="store_true", help="定时任务静默运行")
     cp.set_defaults(func=cmd_schedule)
 
+    # ── arp-mac（跨网段取 MAC）──
+    amp = sub.add_parser(
+        "arp-mac", parents=[common],
+        help="用 SNMP 读三层设备的 ARP 表，得到 IP → MAC（跨网段取 MAC 的正路）",
+        description="MAC 是二层概念。扫描机与目标不在同一网段时，本机 ARP 表里"
+                    "只有网关的 MAC（ICMP 能通是因为经网关三层转发）。本命令改读"
+                    "**持有目标网段三层接口的那台设备**（通常 = 本机默认网关）的"
+                    "ARP 表，得到完整的 IP → MAC。"
+                    "⚠ 只对目标网段的最后一跳有效 —— 目标网段若还挂在下一台路由器"
+                    "后面，读到的只是那台路由器的 MAC。"
+                    "⚠ 表项会老化（思科默认 4 小时），要**扫完立刻读**。"
+                    "⚠ 全程只读（GETNEXT），不写任何设备配置。")
+    amp.add_argument("--host", metavar="IP", default="",
+                     help="持有目标网段三层接口的设备 IP；省略则自动探测本机默认网关"
+                          "（探测不到就如实报错，不会猜「本机网段 .1」）")
+    amp.add_argument("-r", "--range", action="append", dest="ranges", metavar="范围",
+                     help="只输出落在该范围内的条目，如 10.193.24.0/24（可重复）")
+    amp.add_argument("-c", "--community", action="append", metavar="团体字",
+                     help="SNMP v2c 团体字，可重复（默认依次试 public / 空串）")
+    amp.add_argument("--timeout", type=float, default=1.5, metavar="秒",
+                     help="每次 GETNEXT 的超时（默认 1.5）")
+    amp.add_argument("-f", "--format", choices=("table", "json", "csv"),
+                     default="table", help="输出格式（默认 table）")
+    amp.add_argument("-o", "--output", metavar="文件",
+                     help="写到文件（省略则写 stdout）")
+    amp.set_defaults(func=cmd_arp_mac)
+
     # ── topology ──
     tp = sub.add_parser("topology",
                         help="发现并导出网络拓扑为可读文本",
@@ -3547,7 +3690,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # scan / diff / topology 都会真正发起扫描，因此都需要 SNMPv3 参数。
     # 放在最后统一挂载，避免两处 add_argument 各写一遍、日后再漂移。
-    for _sub in (sp, dp, tp):
+    for _sub in (sp, dp, tp, amp):
         _add_snmp_v3_args(_sub)
         _add_credentials_arg(_sub)
 

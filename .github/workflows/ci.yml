@@ -359,6 +359,20 @@ jobs:
           #                        不是当前有缺口。）
           # ⚠ basename 全仓库唯一；仍带 `./` 防未来撞名。
           python -m coverage report --include="./asset_lifecycle.py" --fail-under=95
+          # 跨网段补齐 MAC 新增：
+          #   scanner/arp_mib.py 95%（纯解析模块：OID 后缀 → IP、6 字节 → MAC。
+          #                        2026-10-16 实测 **100%** —— 只跑 test_arp_mib
+          #                        一个模块就满了。下界留 95 是给"将来补防御分支"
+          #                        的余量，不是当前有缺口。）
+          #   arp_mapper.py      90%（传输分叉 + 回填；实测 **100%**。
+          #                        下界压到 90 是明账：`detect_default_gateway()`
+          #                        有 Windows / POSIX 两条互斥分支，本机只能真跑
+          #                        一条，另一条靠打桩 `platform.system` 覆盖 ——
+          #                        将来若有人加分支而忘了补打桩测试，这条下界
+          #                        不该把整个 job 卡住，但缺口会体现在数字上。）
+          # ⚠ 两个 basename 全仓库唯一；仍按惯例带 `./` 防未来撞名。
+          python -m coverage report --include="./scanner/arp_mib.py" --fail-under=95
+          python -m coverage report --include="./arp_mapper.py" --fail-under=90
 
   quality-types:
     name: 类型门禁（pyright）

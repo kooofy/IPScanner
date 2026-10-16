@@ -27,6 +27,7 @@ from ui_icons import (
 from version import __version__
 from conflict_detector import SEVERITY_HIGH, SEVERITY_WARNING
 import ui_logic
+from arp_mapper import GATEWAY_AUTO
 
 from styles import STYLE_SHEET, DARK_STYLE_SHEET
 from theme_tokens import token
@@ -501,6 +502,18 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
             tr("扫描末尾编一个不存在的主机名，查一次 LLMNR/NBNS，"
                "记录谁给肯定应答（会发送组播/广播包；默认关）"))
 
+        # 跨网段补齐 MAC：扫描末尾用 SNMP 读**三层设备**的 ARP 表，给「在线但
+        # 拿不到 MAC」的设备回填。为什么需要：MAC 是二层概念，本机与目标不在
+        # 同一网段时本机 ARP 表里只有网关的 MAC（ICMP 能通是经网关三层转发）。
+        # **默认关**：需要 SNMP，且会在网络里产生额外 SNMP 流量。
+        # 查哪台设备由 `self.arp_gateway` 决定：GATEWAY_AUTO = 自动探测本机默认
+        # 网关；也可以填一个具体 IP（探测不到时**不猜**，见 arp_mapper）。
+        self.arp_gateway = GATEWAY_AUTO
+        self.arp_mac_check = QAction(tr("读取网关 ARP 表补齐 MAC"), self, checkable=True)
+        self.arp_mac_check.setToolTip(
+            tr("扫描末尾用 SNMP 读三层设备（默认本机网关）的 ARP 表，"
+               "给跨网段「在线但拿不到 MAC」的设备回填（需要 SNMP；默认关）"))
+
         # 筛选已由常驻的 FilterChipBar 承担（见上方 tb2），
         # 「视图 > 筛选」菜单与 chip 共用 _set_filter() 这一个入口。
 
@@ -869,6 +882,11 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         # 会发组播/广播，见 responder_check 的注释），所以也放这里。
         self.responder_check.setIcon(_mi(QStyle.SP_MessageBoxQuestion))
         settings_menu.addAction(self.responder_check)
+
+        # 跨网段补齐 MAC：同属"会碰网络的采集行为"这一组（需要 SNMP）。
+        # 排在最末是因为它针对的场景（跨网段看不到 MAC）比前几项更专门。
+        self.arp_mac_check.setIcon(_mi(QStyle.SP_DriveNetIcon))
+        settings_menu.addAction(self.arp_mac_check)
 
         settings_menu.addSeparator()
 
@@ -1285,6 +1303,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
             "mdns": self.mdns_check.isChecked(),
             "switch_map": self.switch_map_check.isChecked(),
             "name_responder": self.responder_check.isChecked(),
+            "arp_mac": self.arp_mac_check.isChecked(),
+            # 预设里连**查哪台三层设备**一起存：换了网段往往就要换设备，
+            # 只存开关不存地址的话每次套预设都得再手动改一遍。
+            "arp_gateway": getattr(self, "arp_gateway", GATEWAY_AUTO),
         }
 
     def _apply_scan_preset(self, name: str):
@@ -1310,6 +1332,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         self.mdns_check.setChecked(bool(cfg.get("mdns", True)))
         self.switch_map_check.setChecked(bool(cfg.get("switch_map", False)))
         self.responder_check.setChecked(bool(cfg.get("name_responder", False)))
+        self.arp_mac_check.setChecked(bool(cfg.get("arp_mac", False)))
+        # 空串是**非法值**（在 ScanThread 里表示"不做补齐"），回落 AUTO
+        _pg = str(cfg.get("arp_gateway", GATEWAY_AUTO) or "").strip()
+        self.arp_gateway = _pg or GATEWAY_AUTO
         protos = [p for p in (cfg.get("protocols") or []) if p in PROTOCOL_PORTS]
         if protos:
             self.selected_protocols = protos
@@ -1554,6 +1580,14 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         self.watch_check.setChecked(s.value("scan/watch", False, type=bool))
         self.responder_check.setChecked(
             s.value("scan/name_responder", False, type=bool))
+        # 跨网段补齐 MAC：同样默认关（见控件创建处注释）
+        self.arp_mac_check.setChecked(
+            s.value("scan/arp_mac", False, type=bool))
+        # 三层设备地址：GATEWAY_AUTO = 扫描时自动探测本机默认网关，也可填具体 IP。
+        # ⚠ 空串在这里是**非法值**（它在 ScanThread 里表示"不做补齐"），所以必须
+        # 回落到 AUTO —— 否则用户把配置清空一次，这个选项就永久静默失效了。
+        _arp_gw = (s.value("scan/arp_gateway", GATEWAY_AUTO, type=str) or "").strip()
+        self.arp_gateway = _arp_gw or GATEWAY_AUTO
         self.tcp_scan_mode = s.value("scan/tcp_mode", "connect", type=str)
         if self.tcp_scan_mode not in ("connect", "syn", "udp"):
             self.tcp_scan_mode = "connect"
@@ -1671,6 +1705,10 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         s.setValue("scan/switch_map", self.switch_map_check.isChecked())
         s.setValue("scan/watch", self.watch_check.isChecked())
         s.setValue("scan/name_responder", self.responder_check.isChecked())
+        s.setValue("scan/arp_mac", self.arp_mac_check.isChecked())
+        # 存**当前值**而不是字面量 GATEWAY_AUTO —— 写字面量会把用户填的三层设备
+        # IP 每次启动重置掉（列布局 / view/row_density 都踩过这个坑）。
+        s.setValue("scan/arp_gateway", getattr(self, "arp_gateway", GATEWAY_AUTO))
         s.setValue("scan/tcp_mode", self.tcp_scan_mode)
         # 存**当前值**而不是字面量 fast：写成字面量会把用户选的档位每次启动
         # 重置掉（列布局那次就是这么静默重置的）。

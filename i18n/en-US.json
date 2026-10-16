@@ -1099,4 +1099,37 @@
   "资产信息已保存": "Asset info saved",
   "写入失败，详情见日志。": "Write failed; see the log for details.",
   "没有找到这台设备的台账行（可能刚被清理）。": "No asset record found for this device (it may have just been pruned)."
+,
+
+  "读取网关 ARP 表补齐 MAC": "Read gateway ARP table to fill in MAC",
+
+  "扫描末尾用 SNMP 读三层设备（默认本机网关）的 ARP 表，给跨网段「在线但拿不到 MAC」的设备回填（需要 SNMP；默认关）": "At the end of the scan, use SNMP to read the ARP table of the layer-3 device (default: this machine's gateway) and back-fill MACs for cross-subnet devices that are online but have no MAC (requires SNMP; off by default)",
+
+  "网关 ARP 表（SNMP）": "Gateway ARP table (SNMP)",
+
+  "MAC 来源": "MAC source",
+
+  "正在读取网关 ARP 表...": "Reading gateway ARP table...",
+
+  "ARP 表读取完成：{n} 条": "ARP table read complete: {n} entries",
+
+  "无法从 {host} 读取 ARP 表。": "Cannot read the ARP table from {host}.",
+
+  "该设备对 SNMP 查询没有响应。请确认：\n  1. 三层设备（路由器 / 三层交换机）已开启 SNMP，且团体字 / v3 用户正确\n  2. 本机到它的 UDP 161 可达（没有被 ACL 或防火墙拦）\n  3. 它确实是**持有目标网段三层接口**的那台设备": "The device did not respond to SNMP queries. Please check:\n  1. The layer-3 device (router / layer-3 switch) has SNMP enabled and the community string / v3 user is correct\n  2. UDP 161 from this machine to it is reachable (not blocked by an ACL or firewall)\n  3. It really is the device that holds the layer-3 interface for the target subnet",
+
+  "能取到设备信息但取不到 ARP 表，常见原因：\n  1. 这是一台**纯二层交换机** —— 它只有 BRIDGE-MIB（MAC→端口，没有 IP），\n     请改查持有目标网段三层接口的路由器 / 三层交换机\n  2. 该设备的 MIB 视图把 ipNetToMediaTable 排除了（部分设备默认只暴露子集）\n  3. ARP 表刚好为空（设备刚重启，或与目标网段尚无通信）": "Device info is available but the ARP table is not. Common causes:\n  1. This is a **pure layer-2 switch** — it only has BRIDGE-MIB (MAC to port, no IP); query the router / layer-3 switch that holds the layer-3 interface for the target subnet instead\n  2. The device's MIB view excludes ipNetToMediaTable (some devices expose only a subset by default)\n  3. The ARP table happens to be empty (the device just rebooted, or it has not talked to the target subnet yet)",
+
+  "SNMPv3 认证或配置失败，未回退到 v2c 团体字。": "SNMPv3 authentication or configuration failed; did not fall back to the v2c community string.",
+
+  "ipNetToMediaTable（RFC 1213）": "ipNetToMediaTable (RFC 1213)",
+
+  "ipNetToPhysicalTable（RFC 4293）": "ipNetToPhysicalTable (RFC 4293)",
+
+  "未检测到默认网关，跳过 ARP 表补齐 MAC": "No default gateway detected; skipping ARP-table MAC back-fill",
+
+  "读取网关 ARP 表失败: {err}": "Failed to read the gateway ARP table: {err}",
+
+  "未能从网关读到 ARP 表": "Could not read the ARP table from the gateway",
+
+  "已从网关 {host} 的 ARP 表补齐 {n} 台设备的 MAC": "Back-filled MACs for {n} device(s) from the ARP table of gateway {host}"
 }

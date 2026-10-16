@@ -335,7 +335,12 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         # `tr()`），漏登记就会在英文界面显示中文状态。
         # ⚠️ 键是 `asset_lifecycle.WARRANTY_*` 规范值，这里只收集值（中文那些）。
         from ui_utils import WARRANTY_STATUS_TEXT
+        # 跨网段补齐 MAC 的**来源显示名表**（`arp_mapper.MAC_SOURCE_TEXT`）：
+        # 同上是字面量表（`mac_source_label()` 取用时过 tr()），漏登记就会在
+        # 英文界面把「网关 ARP 表（SNMP）」原样显示成中文。
+        from arp_mapper import MAC_SOURCE_TEXT as _MAC_SOURCE_TEXT
         return {
+            "arp_mapper.MAC_SOURCE_TEXT": list(_MAC_SOURCE_TEXT.values()),
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
             "main_window.COLUMN_LABELS": list(COLUMN_LABELS),

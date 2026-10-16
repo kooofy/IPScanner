@@ -30,7 +30,7 @@ class ScanThread(QThread):
     def __init__(self, ip_ranges, timeout_ms=1000, max_threads=100, scan_ports=False,
                  protocols=None, tcp_scan_mode="connect", mdns_discovery=True, ports=None,
                  library=None, snmp_v3_user=None, switch_map=False, name_responder=False,
-                 throttle_policy=None):
+                 throttle_policy=None, arp_gateway=""):
         super().__init__()
         self.ip_ranges = ip_ranges
         self.timeout_ms = timeout_ms
@@ -58,6 +58,15 @@ class ScanThread(QThread):
         # 规范名，`None` = 不显式设档（解析成当前进程档）。GUI 设置菜单落的值
         # 经 MainWindow 透传到这里；不传则与改造前逐字节等价。
         self.throttle_policy = throttle_policy
+        # 跨网段补齐 MAC（见 arp_mapper）：非空时扫描末尾读这台三层设备的 ARP 表，
+        # 给「在线但拿不到 MAC」的设备回填。取值三种：
+        #   ""      = 不做（用户没开这个选项）
+        #   "auto"  = 自动探测本机默认网关（见 arp_mapper.detect_default_gateway）
+        #   其它    = 用户指定的三层设备 IP
+        # **默认空**：需要 SNMP，且会在网络里产生额外 SNMP 流量，必须显式开启。
+        self.arp_gateway = arp_gateway
+        #: 本次 ARP 表补齐的结果（``arp_mapper.ArpTableResult`` 或 None），供提示用。
+        self.arp_table_result = None
         self.scanner = NetworkScanner()
 
     def _build_library_lookup(self):
@@ -131,7 +140,64 @@ class ScanThread(QThread):
         if self.name_responder and results:
             self._collect_responders(results)
 
+        # 跨网段补齐 MAC 同样必须赶在 `finished_signal` **之前**：回填结果直接
+        # 挂在 results 上，主线程收到信号后会立刻渲染 / 存快照。
+        # 顺序也刻意放在扫描**之后**：扫描的 ICMP 会促使网关 ARP 出目标的 MAC，
+        # 这时读到的表最全（ARP 条目会老化，思科默认 4 小时、华为华三常 20 分钟）。
+        if self.arp_gateway and results:
+            self._collect_arp_table(results)
+
         self.finished_signal.emit(results)
+
+    def _collect_arp_table(self, results):
+        """在本线程内读网关 ARP 表，给「在线但拿不到 MAC」的设备回填。
+
+        **必须在扫描线程内做**：整表 walk 是几十到几千次 SNMP 往返，放主线程
+        就是界面冻住。也**必须永不抛**：读不到只提示，绝不能让一次已经跑完的
+        扫描失败 —— 缺的是 MAC，不是设备。
+
+        为什么是"读网关"而不是"定点查"：`ipNetToMediaTable` 的索引是
+        `(ifIndex, IP)`，不知道 ifIndex 就没法定点 GET，只能整表 walk 一次
+        再按 IP 查表（见 `scanner/arp_mib.py`）。
+        """
+        from arp_mapper import (
+            GATEWAY_AUTO, apply_arp_table, detect_default_gateway, fetch_arp_table,
+        )
+
+        host = self.arp_gateway
+        if host == GATEWAY_AUTO:
+            # 🔴 探测不到就**如实说**，绝不退化成「本机网段 .1」的猜测 ——
+            # 猜错会静默查一台不相干的设备，然后把结果说成"网关不支持 SNMP"。
+            host = detect_default_gateway()
+            if not host:
+                self.log_signal.emit(
+                    tr("未检测到默认网关，跳过 ARP 表补齐 MAC"))
+                return
+
+        self.phase_changed.emit("arp_table", 0, 1)
+        try:
+            res = fetch_arp_table(
+                host, timeout=1.5,
+                progress_cb=lambda msg: self.log_signal.emit(msg),
+                snmp_v3_user=self.snmp_v3_user,
+            )
+        except Exception as e:      # noqa: BLE001 — 读表失败不该让扫描白跑
+            _log.warning("读取网关 ARP 表异常 %s: %s", host, e, exc_info=True)
+            self.log_signal.emit(tr("读取网关 ARP 表失败: {err}").format(err=e))
+            return
+        finally:
+            self.phase_changed.emit("arp_table", 1, 1)
+
+        self.arp_table_result = res
+        if not res.ok:
+            # 失败只提示、不中断：扫描结果原样保留（见 arp_mapper._build_error，
+            # 那里已经把"没开 SNMP"和"这是台二层交换机"分开写了）
+            self.log_signal.emit(res.error or tr("未能从网关读到 ARP 表"))
+            return
+        filled = apply_arp_table(results, res.entries)
+        self.log_signal.emit(
+            tr("已从网关 {host} 的 ARP 表补齐 {n} 台设备的 MAC").format(
+                host=host, n=filled))
 
     def _collect_switch_maps(self, results):
         """在本线程内读取各交换机转发表（供「定位查询」落库）。

@@ -5,6 +5,7 @@ import random
 import re
 import socket
 import struct
+import threading
 import time
 from typing import Dict
 
@@ -27,17 +28,135 @@ def _get_resolve_executor():
     return _resolve_executor
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  反向 DNS（PTR）的负缓存与「超时短路」
+# ══════════════════════════════════════════════════════════════════════
+#
+# 背景（2026-10-16 实测）：内网客户端网段**普遍没有反向 DNS 区**。此时
+# `socket.gethostbyaddr()` 不会立刻回 NXDOMAIN，而是走完 DNS 超时才失败
+# —— 实测 **4.67 秒**。`resolve_hostname` 只等 1 秒就放弃，但 8 个 worker
+# 的线程池会被这些 4.67 秒的调用**占满**，后面的设备连提交都要排队
+# ⇒ /24 网段光这一项就是分钟级的收尾开销，而最终**一个主机名都拿不到**。
+#
+# 三条措施（都只决定「还要不要再去问」，不影响问到的结果）：
+#   1. **负缓存**：同一个 IP 在 TTL 内不再重复问。
+#   2. **超时计数短路**：连续 `_PTR_TIMEOUT_LIMIT` 次**超时**、且累计白等
+#      超过 `_PTR_WASTE_LIMIT` 秒后，判定「本网没有反向区」，在
+#      `_PTR_DISABLE_TTL` 内直接返回空串（**连提交都不提交**）。
+#      🔴 **只有超时才计数**：DNS 服务器快速回 NXDOMAIN 说明反向区在、
+#      只是没有这条记录 —— 那种情况既不白等，也没必要短路。
+#   3. 任何一次**成功解析**立刻把短路状态清零 ⇒ 部分网段有 PTR 的环境
+#      （有线有、无线没有）不会被打死；短路本身也有 TTL，过期自动重试。
+#
+# ⚠ 短路是**启发式优化**，不是「本网一定没有 PTR」的结论。代价是短路窗口内
+# 主机名可能拿不到，所以：留 warning 日志、窗口只有 2 分钟、并且可以
+# `reset_ptr_state()` 手动清零（诊断 / 测试）。
+_PTR_MISS_TTL = 60.0        # 超时未命中的负缓存有效期（秒）
+_PTR_NXDOMAIN_TTL = 600.0   # DNS 明确回「没有这个名字」的负缓存有效期（秒）
+_PTR_DISABLE_TTL = 120.0    # 短路有效期（秒）
+_PTR_TIMEOUT_LIMIT = 8      # 连续超时多少次后短路
+_PTR_WASTE_LIMIT = 10.0     # 累计白等多少秒后短路
+
+_ptr_lock = threading.Lock()
+_ptr_neg_cache: Dict[str, float] = {}
+_ptr_timeout_streak = 0
+_ptr_wasted = 0.0
+_ptr_disabled_until = 0.0
+
+
+def reset_ptr_state() -> None:
+    """清空 PTR 负缓存与短路状态（诊断 / 测试用）。"""
+    global _ptr_timeout_streak, _ptr_wasted, _ptr_disabled_until
+    with _ptr_lock:
+        _ptr_neg_cache.clear()
+        _ptr_timeout_streak = 0
+        _ptr_wasted = 0.0
+        _ptr_disabled_until = 0.0
+
+
+def ptr_state() -> Dict[str, float]:
+    """PTR 短路 / 负缓存状态快照（诊断用；键与值都语言无关）。"""
+    with _ptr_lock:
+        return {
+            "disabled_until": _ptr_disabled_until,
+            "timeout_streak": float(_ptr_timeout_streak),
+            "wasted_s": _ptr_wasted,
+            "neg_cached": float(len(_ptr_neg_cache)),
+        }
+
+
+def _ptr_skip(now: float, ip: str) -> bool:
+    """短路生效中，或该 IP 还在负缓存里 → 不必再问。"""
+    with _ptr_lock:
+        if now < _ptr_disabled_until:
+            return True
+        return _ptr_neg_cache.get(ip, 0.0) > now
+
+
+def _ptr_note(now: float, ip: str, *, hit: bool = False, timeout: bool = False,
+              waited: float = 0.0, ttl: float = 0.0) -> None:
+    """更新负缓存与短路状态。
+
+    `hit` 命中清零；`timeout` 计入白等并推进短路；两者都不是（DNS 给了
+    确定答复）只记负缓存、并复位超时计数。
+    """
+    global _ptr_timeout_streak, _ptr_wasted, _ptr_disabled_until
+    with _ptr_lock:
+        if hit:
+            _ptr_neg_cache.pop(ip, None)
+            _ptr_timeout_streak = 0
+            _ptr_wasted = 0.0
+            _ptr_disabled_until = 0.0
+            return
+        if ttl > 0:
+            _ptr_neg_cache[ip] = now + ttl
+        if not timeout:
+            _ptr_timeout_streak = 0
+            return
+        _ptr_timeout_streak += 1
+        _ptr_wasted += waited
+        if (_ptr_timeout_streak >= _PTR_TIMEOUT_LIMIT
+                and _ptr_wasted >= _PTR_WASTE_LIMIT
+                and _ptr_disabled_until <= now):
+            _ptr_disabled_until = now + _PTR_DISABLE_TTL
+            _log.warning(
+                "反向 DNS 连续 %d 次超时（累计白等 %.1f 秒），判定本网没有"
+                "反向解析区，%d 秒内跳过 PTR 查询（这段时间主机名会留空）",
+                _ptr_timeout_streak, _ptr_wasted, int(_PTR_DISABLE_TTL))
+
+
 def resolve_hostname(ip: str, timeout: float = 1.0) -> str:
-    """反向 DNS 解析主机名（复用进程级线程池）"""
+    """反向 DNS 解析主机名（复用进程级线程池）。
+
+    带负缓存与超时短路 —— 没有反向区时**不能**让每台设备都白等满 `timeout`，
+    见本模块 `_PTR_*` 那段说明。
+    """
+    now = time.perf_counter()
+    if _ptr_skip(now, ip):
+        return ""
     try:
         future = _get_resolve_executor().submit(socket.gethostbyaddr, ip)
-        try:
-            hostname, _, _ = future.result(timeout=timeout)
-            return hostname
-        except concurrent.futures.TimeoutExpired:
-            return ""
-    except (socket.herror, socket.gaierror, Exception):
+    except Exception as e:  # noqa: BLE001
+        # 线程池已关闭 / 拒绝提交：与"查不到"同义，不推进短路
+        _log.debug("反向 DNS 提交失败 %s: %s", ip, e)
         return ""
+    try:
+        hostname, _, _ = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        # 🔴 是 ``TimeoutError`` 不是 ``TimeoutExpired`` —— 后者属于 ``subprocess``，
+        # ``concurrent.futures`` 里根本没有这个名字，写错会在**每次超时时**抛
+        # AttributeError（异常匹配阶段就炸），把"超时"变成"扫描收尾崩"。
+        _ptr_note(now, ip, timeout=True, waited=timeout, ttl=_PTR_MISS_TTL)
+        return ""
+    except Exception:  # noqa: BLE001 — socket.herror / gaierror / 其它
+        # DNS 给了确定答复（典型是 NXDOMAIN）：不白等，只记负缓存
+        _ptr_note(now, ip, ttl=_PTR_NXDOMAIN_TTL)
+        return ""
+    if hostname:
+        _ptr_note(now, ip, hit=True)
+        return hostname
+    _ptr_note(now, ip, ttl=_PTR_NXDOMAIN_TTL)
+    return ""
 
 
 def get_netbios_name(ip: str, timeout: float = 2.0) -> str:

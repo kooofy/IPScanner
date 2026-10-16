@@ -112,7 +112,7 @@ show_missing = true
 #   它**不 import PyQt5**（控件由宿主 MainWindow 建，混入只做 setText/setStyleSheet）。
 #   所以这份清单是"能钉住的"文件清单，不是"改过的"文件清单。
 [tool.pyright]
-include = ["asset_lifecycle.py", "history_store.py", "db_util.py", "report_engine.py", "credentials.py", "scanner/ndp.py", "scanner/async_ports.py", "scanner/throttle.py", "scanner/cve_snapshot.py", "scanner/exposure.py", "scanner/wifi.py", "cve_status_mixin.py"]
+include = ["asset_lifecycle.py", "history_store.py", "db_util.py", "report_engine.py", "credentials.py", "scanner/ndp.py", "scanner/async_ports.py", "scanner/throttle.py", "scanner/cve_snapshot.py", "scanner/exposure.py", "scanner/wifi.py", "cve_status_mixin.py", "arp_mapper.py", "scanner/arp_mib.py", "scanner/dns.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
 

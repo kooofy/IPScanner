@@ -37,6 +37,22 @@ class ScanResult:
     shares: List[str] = field(default_factory=list)
     # 发现方式："ping" / "arp" / "mdns" / ""（离线），用于 UI 标记与导出
     discovery_method: str = ""
+    # ── MAC 的来源（跨网段补齐，见 `arp_mapper`）──────────────────────────
+    #
+    # 规范值，目前只有 `"snmp-arp"` = 「MAC 来自网关 ARP 表（SNMP）」
+    # （见 `arp_mapper.MAC_SOURCE_SNMP_ARP`）。空串 = MAC 走的是传统路径
+    # （本机 ARP 缓存 / NBSTAT / 主动 ARP 探测）。
+    #
+    # 🔴 **不复用 `discovery_method`**：后者的语义是"这台设备是怎么被**发现**的"
+    # （ping / arp / mdns）。跨网段补齐时设备本来就是 ping 发现的，只是 MAC
+    # 从别处来 —— 混用会让两者互相覆盖，导出里"发现方式"还会变成谎话。
+    mac_source: str = ""
+    # 扫描末尾「SNMP 读网关 ARP 表补齐 MAC」是否**就地修改过**本结果。
+    #
+    # 与 `mdns_updated` 同款标记、同一个理由：结果对象在 enrich 完成时就已通过
+    # result_callback 交给 UI 渲染过一轮，补齐 MAC 发生在那之后，UI 靠这个标记
+    # 决定"扫描结束后要不要重渲染这一行"，避免对全部结果做 O(n) 重渲染。
+    mac_updated: bool = False
     # ── IPv6 可见性（v2.0 §2.4）─────────────────────────────────────────
     #
     # 本工具**只扫 IPv4**（刻意决定，见 `scanner/range.py`）。但现代网络里

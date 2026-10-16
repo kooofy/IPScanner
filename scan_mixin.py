@@ -482,6 +482,10 @@ class ScanMixin:
             switch_map=self.switch_map_check.isChecked(),
             name_responder=self.responder_check.isChecked(),
             throttle_policy=self.throttle_policy,
+            # 跨网段补齐 MAC：勾选项决定"做不做"，self.arp_gateway 决定查哪台
+            # （"auto" = 自动探测本机默认网关）。两者都不在这里解释，
+            # 见 arp_mapper 与 ui_threads.ScanThread.arp_gateway。
+            arp_gateway=(self.arp_gateway if self.arp_mac_check.isChecked() else ""),
         )
         # 启动即持久化当前扫描参数与网段 (P2-2)
         self._save_settings()
@@ -676,7 +680,7 @@ class ScanMixin:
             # 先关闭排序，避免批量添加时的性能问题
             self.table.setSortingEnabled(False)
 
-            # 只渲染"还没有行"或"扫描末尾被 mDNS 就地改过"的结果。
+            # 只渲染"还没有行"、或"扫描末尾被就地改过"的结果。
             #
             # 旧实现无条件把 results 全量再 upsert 一遍，但每行在扫描过程中已经
             # 通过 result_callback 渲染过了 —— /16 网段就是 6.5 万次无谓重渲染。
@@ -684,13 +688,17 @@ class ScanMixin:
             # 两点必须同时成立才能这样收窄，已逐一核实：
             #   1. 离线主机从未被回调（引擎只对 alive 主机提交 enrich），
             #      所以它们必然不在 _ip_item_map 里，会走"新增"分支正常入表；
-            #   2. mDNS（Phase 3）是唯一在回调之后仍会改动已渲染对象的地方，
-            #      引擎已在那些结果上打了 mdns_updated（见 ScanResult.mdns_updated）。
+            #   2. 扫描末尾**还有两个**环节会在回调之后就地改已渲染的对象，
+            #      它们各自打了标记，这里按标记补渲染：
+            #      · mDNS（Phase 3）→ `mdns_updated`
+            #      · 读网关 ARP 表补齐 MAC（扫描线程内、所有 Phase 之后）→ `mac_updated`
             for result in results:
                 if (result.ip not in self._ip_item_map
-                        or getattr(result, "mdns_updated", False)):
+                        or getattr(result, "mdns_updated", False)
+                        or getattr(result, "mac_updated", False)):
                     self._upsert_table_row(result)
                     result.mdns_updated = False
+                    result.mac_updated = False
 
             # 应用筛选（默认"在线"：扫描完成后隐藏离线终端）并刷新筛选条计数
             self._filter_results()

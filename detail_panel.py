@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 )
 
 import asset_lifecycle
+from arp_mapper import mac_source_label
 from scanner import (
     device_class_label, os_label, service_label, format_ports_display,
 )
@@ -222,6 +223,9 @@ class DeviceDetailPanel(QWidget):
 
         network = [
             (tr("MAC 地址"), r.mac.upper() if r.mac else ""),
+            # MAC 的来源（跨网段补齐时才非空）。空值会被下面的过滤丢掉，
+            # 所以传统路径（本机 ARP / NBSTAT）不会多出一行噪音。
+            (tr("MAC 来源"), mac_source_label(getattr(r, "mac_source", ""))),
             (tr("开放端口"), format_ports_display(r.open_ports)[0]),
             (tr("共享文件夹"), ", ".join(r.shares) if r.shares else ""),
             # 探测方式只在确实扫出了端口时才有意义（离线主机显示它是噪音）
