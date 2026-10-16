@@ -352,6 +352,13 @@ jobs:
           # ⚠ 两个 basename 全仓库唯一；仍按惯例带 `./` 防未来撞名。
           python -m coverage report --include="./audit_log.py" --fail-under=90
           python -m coverage report --include="./nagios_check.py" --fail-under=90
+          # v2.3 §3.4 新增：
+          #   asset_lifecycle.py 95%（纯计算模块；2026-10-15 实测 **100%** ——
+          #                        只跑 test_asset_lifecycle 一个模块就满了。
+          #                        下界留 95 是给"将来补防御分支"的余量，
+          #                        不是当前有缺口。）
+          # ⚠ basename 全仓库唯一；仍带 `./` 防未来撞名。
+          python -m coverage report --include="./asset_lifecycle.py" --fail-under=95
 
   quality-types:
     name: 类型门禁（pyright）

@@ -5,6 +5,7 @@
 re-export，保持 `from ui_dialogs import X` 与 `ui_dialogs.X` 两种既有用法不变 ——
 调用方（各 Mixin、测试）无需改动。
 """
+from .asset_edit import AssetEditDialog
 from .audit import AuditLogDialog
 from .audit_activity import AuditActivityDialog
 from .credentials import SnmpV3CredentialDialog, WmiCredentialDialog
@@ -26,4 +27,5 @@ __all__ = [
     "ConflictReportDialog", "SubnetUtilizationDialog", "ChangeReportDialog",
     "AuditLogDialog", "AuditActivityDialog", "SwitchPortDialog",
     "LocateDeviceDialog", "WifiDialog", "TrendViewDialog",
+    "AssetEditDialog",
 ]

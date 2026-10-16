@@ -210,6 +210,9 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         self._change_map: dict = {}      # {ip: [变更类型, ...]} 供行内角标与「变更」筛选
         self._timeline_cache: dict = {}  # {设备键: 历史轨迹} 写入新快照后失效
         self._exposure_cache: dict = {}  # {设备键: 端口暴露行} 同一时刻失效
+        # {设备键: 台账行}（v2.3 §3.4）—— 除写入新快照外，用户**编辑台账**后也要
+        # 单独失效（见 `library_mixin._edit_asset`）。
+        self._asset_cache: dict = {}
 
         # 配置持久化 (QSettings, Ini 格式, 存于项目目录便于查看/重置)
         self.settings = QSettings(
@@ -1702,6 +1705,8 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
         self.table.currentItemChanged.connect(self._on_current_item_changed)
         self.detail_panel.rescan_requested.connect(self._rescan_ip)
         self.detail_panel.copy_requested.connect(self._copy_to_clipboard)
+        # 「编辑资产信息…」（v2.3 §3.4）：面板只发身份键，弹窗与写库在 Mixin 里。
+        self.detail_panel.asset_edit_requested.connect(self._edit_asset)
         # 扫描参数变化时刷新空状态页的配置摘要
         self.port_scan_check.toggled.connect(lambda _c: self._update_empty_hint())
         self.mdns_check.toggled.connect(lambda _c: self._update_empty_hint())
@@ -1841,7 +1846,45 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
             self._change_notes_for(ip),
             self._device_timeline_for(result),
             self._port_exposure_for(result),
+            self._asset_for(result),
         )
+
+    def _asset_for(self, result) -> dict:
+        """该设备的**台账行**（v2.3 §3.4）；没有台账行时返回 `{}`。
+
+        与 `_device_timeline_for()` / `_port_exposure_for()` 同款缓存：详情面板
+        「每选中一行」就刷新，而台账只在**写入新快照**（回填可能补出新行）或
+        **用户编辑**后才变（`_timeline_cache` / `_asset_cache` 同点失效）。
+
+        🔴 身份键用 `asset_identity_key()`（在库里已有的键上找），**不能**
+           `identity_key(mac, ip)` 现算 —— 真键由写入端的 `resolve_identity()`
+           决定（LAA 随机 MAC 走指纹降级），现算会对不上，详情面板永远是空的
+           （v2.3 §3.3 踩过同款）。
+        """
+        if result is None:
+            return {}
+        key = (result.mac or "").upper().strip() or f"ip:{(result.ip or '')}"
+        if not key:
+            return {}
+        cache = getattr(self, "_asset_cache", None)
+        if cache is None:
+            cache = self._asset_cache = {}
+        if key in cache:
+            return cache[key]
+        rec = {}
+        try:
+            ident = history_store.asset_identity_key(
+                mac=result.mac, ip=result.ip, db_path=self.history_db)
+            if ident:
+                rec = history_store.get_asset(ident, db_path=self.history_db) or {}
+        except Exception as exc:
+            # 台账是"锦上添花"：历史库损坏 / 被占用不该让详情面板整体打不开
+            # （与 `_device_timeline_for()` 同一条）。
+            app_logging.get_logger(__name__).warning(
+                "读取资产台账失败（%s）: %s", result.ip, exc)
+            rec = {}
+        cache[key] = rec
+        return rec
 
     def _port_exposure_for(self, result, limit: int = 8) -> list:
         """该设备**当前仍开放**的端口暴露行（v2.3 §3.3）。

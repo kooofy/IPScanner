@@ -63,6 +63,12 @@ from version import __version__
 # `--help`；而且 throttle 本身零 PyQt 零三方，import 成本可忽略。
 from scanner import throttle
 
+# 资产生命周期字段（v2.3 §3.4）。同 `throttle`：放在顶层 import 而非函数内 ——
+# 下面的 `_ASSET_COLUMNS` 在**模块 import 期**就要拼上 `LIFECYCLE_COLUMNS`，
+# 函数内 import 拿不到。它本身零 PyQt、零第三方、零 DB（只有 datetime/json/re），
+# 不破坏「CLI 可在 Server Core / 容器里裸跑」这条底线。
+import asset_lifecycle
+
 # 退出码
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -97,11 +103,16 @@ _SNAPSHOT_DEVICE_COLUMNS = (
 
 # 资产表（1.1-③）：一行一台设备，按 identity_key 去重。identity_key 是资产维度
 # 的主键（MAC 优先），故放在首位；services / seen_count 是资产表独有的列。
+#
+# v2.3 §3.4 追加了 6 个**生命周期列**（采购/保修/负责人/序列号/位置树/自定义）。
+# 🔴 这里**引用** `asset_lifecycle.LIFECYCLE_COLUMNS` 而不是再抄一份字面量：
+#    抄一份的话，将来 `assets` 加第 7 个生命周期列时，CSV/JSON 会静默少一列
+#    —— 而"少一列"没有任何测试会发现（表头与列名各自独立）。
 _ASSET_COLUMNS = (
     "identity_key", "ip", "status", "mac", "hostname", "vendor",
     "device_class", "os_guess", "open_ports", "services",
     "location", "user", "remark", "first_seen", "last_seen", "seen_count",
-)
+) + tuple(asset_lifecycle.LIFECYCLE_COLUMNS)
 
 #: 表格视图在 `_ASSET_COLUMNS` 之外**多一列**「身份来源」—— 让人一眼看出这台
 #: 是靠 MAC 还是靠指纹认回来的（v2.0 §2.1：降级身份必须可解释）。
@@ -111,9 +122,32 @@ _ASSET_TABLE_COLUMNS = _ASSET_COLUMNS + ("identity_source",)
 
 #: assets 表格的中文表头。CLI 输出**不随语言切换**（本工具的定位是「脚本可解析」，
 #: 表头就是给人看的固定中文；要机器可读请用 `-f json`）。
+#: ⚠ 长度必须与 `_ASSET_TABLE_COLUMNS` **逐项对齐**：`render_table()` 按索引取
+#:   `headers[i]`，少一个就 `IndexError`（多一个则静默错位，更难发现）。
 _ASSET_TABLE_HEADERS = ("身份键", "IP", "状态", "MAC", "主机名", "厂商",
                         "设备类型", "操作系统", "开放端口", "服务", "位置",
-                        "使用者", "备注", "首见", "末见", "次数", "身份来源")
+                        "使用者", "备注", "首见", "末见", "次数",
+                        "采购日期", "保修到期", "负责人", "序列号",
+                        "位置树", "自定义字段", "身份来源")
+
+#: `assets --warranty-days` 的表格列。
+#: 故意**窄得多**：这一屏只回答「哪些机器该处理了」，把 22 列全铺开反而
+#: 找不到重点（而且终端一行会被挤到 300+ 字符）。
+_EXPIRY_COLUMNS = ("identity_key", "ip", "device_class", "owner",
+                   "warranty_end", "warranty_days_left", "warranty_status")
+_EXPIRY_HEADERS = ("身份键", "IP", "设备类型", "负责人", "保修到期",
+                   "剩余天数", "状态")
+
+#: 保修状态规范值 → CLI 显示串。
+#: ⚠ 这张表**不进** `i18n/en-US.json`、也不登记进 `test_i18n_lazy`：CLI 的
+#:   输出按设计恒为中文（不 import i18n），与 `_ASSET_TABLE_HEADERS` 同理。
+#:   真要机器可读，请用 `-f json` —— 那里给的是 `expired` 这类规范值。
+_WARRANTY_STATUS_TEXT = {
+    asset_lifecycle.WARRANTY_EXPIRED: "已过期",
+    asset_lifecycle.WARRANTY_EXPIRING: "即将到期",
+    asset_lifecycle.WARRANTY_UNSET: "未填",
+    asset_lifecycle.WARRANTY_OK: "正常",
+}
 
 
 # ────────────────────────────── 输出工具 ──────────────────────────────
@@ -1334,18 +1368,162 @@ def _fingerprint_identified(row) -> bool:
     return bool(direct) and direct != key
 
 
+def _parse_set_fields(pairs):
+    """`--field KEY=VALUE` 列表 → dict。键重复时**后者覆盖前者**。
+
+    为什么允许覆盖而不是报错：脚本里常见「先铺一批默认值、再按条件改几个」，
+    覆盖语义比报错好用；而真正的拼写错误由 `update_asset_lifecycle()` 的
+    「未知字段名 ⇒ `ValueError`」兜住，不会静默丢字段。
+    """
+    fields = {}
+    for raw in pairs or ():
+        if "=" not in raw:
+            raise ValueError("--field 需要 KEY=VALUE 形式：%r" % raw)
+        name, _, value = raw.partition("=")
+        name = name.strip()
+        if not name:
+            raise ValueError("--field 的键不能为空：%r" % raw)
+        fields[name] = value
+    return fields
+
+
+def _resolve_asset_key(selector, db) -> str:
+    """把用户给的**选择器**（身份键 / MAC / IP）解析成真实的 `identity_key`。
+
+    依次尝试三种解释，命中即返回；都没有返回 `""`。
+
+    🔴 **不能**用 `identity_key(mac, ip)` 现算：真键由写入端的
+       `resolve_identity()` 决定（LAA 随机 MAC 走**指纹降级**），现算会与库里的
+       键对不上 —— 于是"明明填对了却报找不到这台设备"（v2.3 §3.3 踩过同款）。
+       `asset_identity_key()` 是**在库里已有的键上**找，所以能认回来。
+    """
+    import history_store
+
+    raw = (selector or "").strip()
+    if not raw:
+        return ""
+    # ① 原样当身份键（最直接：`assets -f json` 里就是它）。
+    if history_store.get_asset(raw, db_path=db):
+        return raw
+    # ② 当 MAC / ③ 当 IP —— 与 `device_timeline()` / 详情面板同一套匹配规则。
+    for kwargs in ({"mac": raw}, {"ip": raw}):
+        key = history_store.asset_identity_key(db_path=db, **kwargs)
+        if key:
+            return key
+    return ""
+
+
+def _cmd_assets_warranty(args, db) -> int:
+    """`assets --warranty-days N`：列出「已过期或 N 天内到期」的资产。
+
+    🔴 未填保修日期的设备**不进结果**，但要把台数报出来（走 stderr，不污染
+       结果流）—— 不报的话，用户看到 12 台会以为**其余全部保修正常**，
+       而其中可能有一半根本没填（§3.4 验收 4）。
+    """
+    import history_store
+
+    days = int(args.warranty_days)
+    if days < 0:
+        emit("错误：--warranty-days 不能为负数（收到 %d）" % days)
+        return EXIT_ERROR
+
+    rows = history_store.list_assets(
+        device_class=args.device_class, network=args.network,
+        ip_substr=args.ip, db_path=db)
+    matched, skipped = asset_lifecycle.filter_by_warranty(rows, days=days)
+
+    if args.format == "json":
+        emit(render_json({"days": days, "count": len(matched),
+                          "skipped_unset": skipped, "assets": matched}),
+             args.output)
+    elif not matched:
+        # 不给空表：说清"为什么没有"，而不是让人怀疑命令没跑。
+        emit("没有已过期或 %d 天内到期的资产。" % days, args.output)
+    else:
+        for r in matched:
+            r["warranty_status"] = _WARRANTY_STATUS_TEXT.get(
+                r["warranty_status"], r["warranty_status"])
+        if args.format == "csv":
+            emit(render_csv(matched, _EXPIRY_COLUMNS), args.output)
+        else:
+            emit(render_table(matched, _EXPIRY_COLUMNS, _EXPIRY_HEADERS),
+                 args.output)
+
+    if skipped:
+        log("另有 %d 台未填保修日期，未纳入统计（用 "
+            "`assets --set <设备> --field warranty_end=YYYY-MM-DD` 补上）。"
+            % skipped)
+    return EXIT_OK
+
+
+def _cmd_assets_set(args, db) -> int:
+    """`assets --set 选择器 --field KEY=VALUE …`：写入人工台账字段。"""
+    import history_store
+
+    try:
+        fields = _parse_set_fields(args.field)
+    except ValueError as e:
+        emit("错误：%s" % e)
+        return EXIT_ERROR
+    if not fields:
+        emit("错误：--set 至少要带一个 --field KEY=VALUE")
+        return EXIT_ERROR
+
+    # 过滤器对写入没有意义 —— 与其静默忽略（用户以为按网段批量写了），不如出声。
+    for name, value in (("--device-class", args.device_class),
+                        ("--network", args.network), ("--ip", args.ip)):
+        if value:
+            warn("%s 对 --set 无效，已忽略" % name)
+
+    key = _resolve_asset_key(args.set, db)
+    if not key:
+        emit("错误：找不到设备 %r（可用身份键 / MAC / IP；先跑 `assets` 看看）"
+             % args.set)
+        return EXIT_ERROR
+    try:
+        changed = history_store.update_asset_lifecycle(key, db_path=db, **fields)
+    except ValueError as e:
+        emit("错误：%s" % e)
+        return EXIT_ERROR
+    if not changed:
+        emit("错误：没有更新任何行（%s）" % key)
+        return EXIT_ERROR
+    emit("已更新 %s：%s" % (key, ", ".join(
+        "%s=%s" % (k, fields[k]) for k in sorted(fields))), args.output)
+    return EXIT_OK
+
+
 def cmd_assets(args) -> int:
-    """列举资产表（一行一台设备，按 MAC 身份键去重合并后的当前状态）。
+    """列举 / 提醒 / 编辑资产表（一行一台设备，按 MAC 身份键去重）。
 
     资产表是 1.1 新增的"资产维度"视图：与 `history --query` 按 IP 聚合 `devices`
     不同，这里按 identity_key（MAC 优先）读 `assets`，换过 IP 的设备只算一台。
 
     **JSON 输出保持语言无关**（字段即 `assets` 表里的规范值，device_class 是源串），
     text 输出才翻译、并附 human-readable 首见/末见时间 —— 脚本消费 JSON，人看 text。
+
+    v2.3 §3.4 起这个子命令有三个互斥的用法：
+
+    * 默认（可配 `--count`）：列举资产；
+    * `--warranty-days N`：只列「已过期或 N 天内到期」的资产（EOL 提醒）；
+    * `--set 设备 --field KEY=VALUE`：写入采购/保修/负责人等人工台账字段。
+
+    ⚠️ 写入路径**只碰生命周期列**，绝不改扫描写入的列 —— 例行扫描也永远不会
+       覆盖人工填的值（见 `history_store._ASSET_LIFECYCLE_COLS`）。
     """
     import history_store
 
     db = _db_path(args)
+    writing = getattr(args, "set", None)
+    warranty = getattr(args, "warranty_days", None)
+
+    if writing and (args.count or warranty is not None):
+        emit("错误：--set 不能与 --count / --warranty-days 同时使用")
+        return EXIT_ERROR
+    if writing:
+        return _cmd_assets_set(args, db)
+    if warranty is not None:
+        return _cmd_assets_warranty(args, db)
 
     if args.count:
         n = history_store.asset_count(
@@ -3021,6 +3199,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多返回 N 条（按末见时间降序截取）")
     ap.add_argument("--offset", type=int, default=0, metavar="N", help="跳过前 N 条（翻页）")
     ap.add_argument("--count", action="store_true", help="只输出资产总数（应用上述过滤）")
+    # ── v2.3 §3.4：EOL / 保修到期提醒 + 人工台账写入 ──
+    ap.add_argument("--warranty-days", type=int, default=None, metavar="N",
+                    help="只列「已过期或 N 天内到期」的资产。未填保修日期的设备"
+                         "不进结果，只在 stderr 报台数（避免把「没填」当成「正常」）")
+    ap.add_argument("--set", metavar="设备",
+                    help="写入人工台账字段（采购/保修/负责人/序列号/位置树/自定义）。"
+                         "取值可以是身份键、MAC 或 IP，配合 --field 使用")
+    ap.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
+                    help="要写入的字段，可重复。可用键："
+                         + "、".join(asset_lifecycle.LIFECYCLE_COLUMNS)
+                         + "（日期用 YYYY-MM-DD；custom_json 传 JSON 对象）")
     ap.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
     ap.add_argument("-o", "--output", metavar="文件")
     ap.set_defaults(func=cmd_assets)

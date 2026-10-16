@@ -26,12 +26,16 @@ from PyQt5.QtWidgets import (
     QFrame, QSizePolicy,
 )
 
+import asset_lifecycle
 from scanner import (
     device_class_label, os_label, service_label, format_ports_display,
 )
 from scanner.wmi import transport_label
 from i18n import tr
-from ui_utils import format_exposure_rows
+from ui_utils import (
+    format_custom_fields, format_exposure_rows, format_warranty,
+    warranty_status_text,
+)
 
 
 class DeviceDetailPanel(QWidget):
@@ -41,6 +45,10 @@ class DeviceDetailPanel(QWidget):
     rescan_requested = pyqtSignal(str)
     #: 用户点击「复制」→ 携带整段纯文本
     copy_requested = pyqtSignal(str)
+    #: 用户点击「编辑资产信息…」→ 携带该设备的**身份键**（v2.3 §3.4）。
+    #: 面板只发信号、不弹对话框也不写库 —— 弹窗与写入由 `MainWindow` 负责
+    #: （面板要能在无 `MainWindow` 的单测里独立构造）。
+    asset_edit_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,6 +61,10 @@ class DeviceDetailPanel(QWidget):
         #: 该设备**当前仍开放**的端口暴露行（`trend_store.port_exposure()['open']`）。
         #: 由 `set_device(exposure=…)` 传入 —— 本面板**不碰数据库**。
         self._exposure = []
+        #: 该设备的**台账行**（`history_store.get_asset()` 的结果，v2.3 §3.4）。
+        #: 同样由 `set_device(asset=…)` 传入。空字典 = 这台设备还没有台账行
+        #: （例如刚扫到、还没落过快照）⇒ 不显示「资产信息」分区，也不给编辑入口。
+        self._asset = {}
         self._build()
 
     # ── 构建 ──────────────────────────────────────────────
@@ -68,6 +80,17 @@ class DeviceDetailPanel(QWidget):
         self.title.setObjectName("detailTitle")
         head.addWidget(self.title)
         head.addStretch(1)
+
+        # 编辑入口放在最左（其余是"看/再扫"这类只读动作）—— 它是唯一会写库的
+        # 按钮，位置独立一点不容易误点。仅在有台账行时可见（见 `_set_actions_visible`）。
+        self.btn_asset_edit = QPushButton(tr("编辑资产信息…"))
+        self.btn_asset_edit.setObjectName("detailAction")
+        self.btn_asset_edit.setToolTip(
+            tr("登记采购日期 / 保修到期 / 负责人 / 序列号 / 位置 / 自定义字段"))
+        self.btn_asset_edit.clicked.connect(
+            lambda: self.asset_edit_requested.emit(
+                (self._asset or {}).get("identity_key", "")))
+        head.addWidget(self.btn_asset_edit)
 
         self.btn_copy = QPushButton(tr("复制"))
         self.btn_copy.setObjectName("detailAction")
@@ -115,13 +138,14 @@ class DeviceDetailPanel(QWidget):
         self._change_notes = []
         self._timeline = []
         self._exposure = []
+        self._asset = {}
         self.title.setText("")
         self._clear_rows()
         self._set_actions_visible(False)
         self.hint.setVisible(True)
 
     def set_device(self, result, conflict_notes=None, change_notes=None,
-                   timeline=None, exposure=None):
+                   timeline=None, exposure=None, asset=None):
         """展示一台设备的完整信息。
 
         :param result: `scanner.models.ScanResult`
@@ -135,6 +159,12 @@ class DeviceDetailPanel(QWidget):
                                `{"port", "since", "seconds", "baseline"}`。
                                🔴 `baseline` 为真的行必须显示成「**至少** N」
                                —— 见 `ui_utils.format_exposure_rows()`。
+        :param asset:          该设备的**台账行**（`history_store.get_asset()`），
+                               形如 `{"identity_key", "purchase_date",
+                               "warranty_end", "owner", "serial",
+                               "location_tree", "custom_json"}`。传 `None` /
+                               空字典 = 还没有台账行，此时不显示「资产信息」分区、
+                               也不给「编辑资产信息…」入口。
         """
         if result is None:
             self.clear()
@@ -145,6 +175,7 @@ class DeviceDetailPanel(QWidget):
         self._change_notes = list(change_notes or [])
         self._timeline = list(timeline or [])
         self._exposure = list(exposure or [])
+        self._asset = dict(asset or {})
 
         self.hint.setVisible(False)
         self._set_actions_visible(True)
@@ -183,7 +214,10 @@ class DeviceDetailPanel(QWidget):
             (tr("制造商"), r.vendor),
             (tr("设备类型"), device_class_label(r.device_class) or r.device_type),
             (tr("设备型号"), r.device_model),
-            (tr("序列号"), r.wmi_serial),
+            # 序列号**台账优先**：人工登记的序列号（`assets.serial`，v2.3 §3.4）
+            # 比探测到的更可信（WMI 取不到序列号的机器很多，而资产标签上就印着）。
+            # 台账为空才回落到扫描值 —— 两处各显示一份会让用户分不清哪个是真的。
+            (tr("序列号"), self._asset.get("serial") or r.wmi_serial),
         ]
 
         network = [
@@ -224,6 +258,27 @@ class DeviceDetailPanel(QWidget):
 
         risk = [(tr("冲突"), note) for note in conflict_notes]
 
+        # 资产台账（v2.3 §3.4）：**标签/值两栏** —— 值都是短字段（日期、人名）。
+        # 🔴 未填保修日期显示「未填」，**绝不**显示「已过期」（§3.4 验收 4）。
+        ledger = []
+        if self._asset:
+            state = asset_lifecycle.warranty_state(self._asset.get("warranty_end"))
+            ledger = [
+                (tr("采购日期"), self._asset.get("purchase_date", "")),
+                (tr("保修到期"), format_warranty(
+                    state["end"], state["days_left"], state["status"])),
+                (tr("负责人"), self._asset.get("owner", "")),
+                (tr("位置"), self._asset.get("location_tree", "")),
+                (tr("自定义字段"), format_custom_fields(
+                    self._asset.get("custom_json", ""))),
+            ]
+            # 保修状态单独一行只在**不是"正常"**时出现：正常保修是默认预期，
+            # 每台都印一个「正常」只是噪音，而「即将到期」必须显眼。
+            if state["status"] not in (asset_lifecycle.WARRANTY_OK,
+                                       asset_lifecycle.WARRANTY_UNSET):
+                ledger.append((tr("保修状态"),
+                               warranty_status_text(state["status"])))
+
         # 端口暴露（v2.3 §3.3）：**整行文本** —— 一行就是一句
         # 「端口 23 已开放 40.2 天」。起点是"首次观测"的行由
         # `ui_utils.format_exposure_rows()` 加上「至少」，
@@ -245,6 +300,7 @@ class DeviceDetailPanel(QWidget):
             (tr("身份"), identity, False),
             (tr("网络"), network, False),
             (tr("系统"), system, False),
+            (tr("资产信息"), ledger, False),
             (tr("服务"), service, True),
             (tr("变更"), change, True),
             (tr("历史轨迹"), history, True),
@@ -342,6 +398,10 @@ class DeviceDetailPanel(QWidget):
     def _set_actions_visible(self, visible: bool):
         self.btn_copy.setVisible(visible)
         self.btn_rescan.setVisible(visible)
+        # 没有台账行就没有身份键可写（`update_asset_lifecycle()` 以 identity_key
+        # 定位）—— 与其弹个必然报"找不到设备"的框，不如不给这个入口。
+        self.btn_asset_edit.setVisible(
+            bool(visible and (self._asset or {}).get("identity_key")))
 
     def _on_copy(self):
         self.copy_requested.emit(self._plain_text())

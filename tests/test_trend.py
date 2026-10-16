@@ -327,8 +327,10 @@ class PruneIsolationTest(unittest.TestCase):
 # ─────────────────────────── 迁移 ───────────────────────────
 
 class MigrationTest(unittest.TestCase):
-    def test_schema_version_is_six(self):
-        self.assertEqual(history_store.SCHEMA_VERSION, 6)
+    def test_schema_version_is_seven(self):
+        # v6 = 趋势观测层（本文件的主角）；v7 = 资产生命周期字段（§3.4）。
+        # 故意钉死：迁移链一改，这条就红 —— 提醒"新版本要补自己的迁移测试"。
+        self.assertEqual(history_store.SCHEMA_VERSION, 7)
 
     def test_migration_is_idempotent(self):
         # 已升级到 V6 的库再 _init_db 一次：不报错、不重复建表、数据不翻倍。

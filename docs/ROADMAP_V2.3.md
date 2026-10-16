@@ -320,11 +320,35 @@ v2.3 主题 A「能看清变化」—— 趋势与生命周期
 
 **验收标准**：
 
-- [ ] 加列后**旧库升级不丢数据**
-- [ ] `custom_json` 的键**原样存取**，不经过 `tr()`
-- [ ] 保修到期计算**按本地时区**推导（⚠️ 测短时长用 `perf_counter()`；
+- [x] 加列后**旧库升级不丢数据**
+- [x] `custom_json` 的键**原样存取**，不经过 `tr()`
+- [x] 保修到期计算**按本地时区**推导（⚠️ 测短时长用 `perf_counter()`；
   `fromtimestamp()` 按本地时区 ⇒ 断言必须同时区推导）
-- [ ] 未填保修日期的设备**不报"已过期"**（区分"未填"与"已过期"）
+- [x] 未填保修日期的设备**不报"已过期"**（区分"未填"与"已过期"）
+
+**落地要点（2026-10-16）**：
+
+- **迁移**：新开 `_SQL_V7`（`SCHEMA_VERSION = 7`），`assets` 加 6 列。
+  🔴 `_LEGACY_TABLES` 用**列标记** `("assets", "custom_json", 7)` —— v7 只加列
+  不建表，用表名标记会让老库推断版本偏低 → 重放 `ALTER TABLE` → `duplicate
+  column name` → 库打不开（照 v5 `("assets", "fingerprint", 5)` 的先例）。
+- **新模块 `asset_lifecycle.py`**（纯计算：零 DB / 零 PyQt / 零 i18n / 零三方，
+  AST 守卫钉死只许 `datetime`/`json`/`re`）：`parse_date`（宽松，**读**路径）
+  vs `parse_date_strict`（**写**路径，非法当场抛）；`warranty_state()` 返回
+  语言无关规范值 `unset`/`expired`/`expiring`/`ok`；`filter_by_warranty()`；
+  `normalize_custom_json()`（键名原样）。
+- **读写分层**：`_ASSET_LIFECYCLE_COLS` 与 `_ASSET_COLS`（随观测刷新的展示
+  属性）严格分离 —— 扫描 UPSERT 绝不覆盖人工填写的台账；写入只走
+  `update_asset_lifecycle()`。
+- **CLI**：`assets --warranty-days N`（未填的**不进结果**、stderr 报跳过台数）
+  + `assets --set <键/MAC/IP> --field K=V`（非法日期/未知字段当场报错，
+  找不到资产返回 0 行由调用方报）；JSON/CSV 补 6 列。
+- **GUI**：详情面板「资产信息」分区（未填=「未填」绝不「已过期」）+「编辑
+  资产信息…」按钮 → 新 `ui_dialogs/asset_edit.py`；写入在 `library_mixin
+  ._edit_asset`（对话框本身不碰库，取消不会留半截写入）。
+- **踩到的坑**：`update_asset_lifecycle` 首版漏了 `conn.commit()` ——
+  `db_util.connection()` 只加锁 yield、**不代提交**，同进程读缓存连接能读到
+  ⇒ 单测全绿但进程一退出改动就没了。补了「关掉连接再读」的回归用例。
 
 ---
 
@@ -385,7 +409,7 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
 ├─ 3.1 趋势观测层（独立表 + 事件流，不参与 prune）        P0 ← 主题项  ✅ 已落地
 ├─ 3.2 在线率曲线与稳定性（MTBF / 抖动 / 首现告警）       P1         ✅ 已落地
 ├─ 3.3 端口长期暴露时长                                P1         ✅ 已落地
-└─ 3.4 资产生命周期字段 + EOL 提醒                      P2         ⏳ 进行中
+└─ 3.4 资产生命周期字段 + EOL 提醒                      P2         ✅ 已落地
 
 🔴 前置（已答清）：prune(max_keep=20) ⇒ devices 会被删
    ⇒ 趋势必须建在不参与 prune 的新表上（trend_observations + asset_events）
@@ -399,7 +423,7 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
   PySide6 迁移                                 →  维持 v2.0 裁定，代价继续记账
   SNMPv1 · DES · IPv6 扫描                     →  维持现状（现行为正确）
 
-状态：§3 四项已定案 · 落地中 —— 3.1 / 3.2 / 3.3 已落地，3.4 进行中   ← 现在在这里
+状态：§3 四项**全部落地** —— 3.1 / 3.2 / 3.3 / 3.4 均已提交推送（2026-10-16 收口）
 ```
 
 ---
@@ -568,3 +592,40 @@ JSON 键 + 表格一节）；GUI 在**设备详情面板**加「端口暴露」�
 （`test_baseline_wording_holds_in_both_languages`）让本机就能复现。
 🔴 教训：本机 zh-CN + CI en-US ⇒ 语言相关的缺陷**本机测不出来**，
 与「只在别的平台上错」是同一类；GUI 断言一律 `tr("…")` 或语言无关量。
+
+### 2026-10-16 · §3.4 资产生命周期字段 + EOL 提醒落地
+
+**落地**：新模块 `asset_lifecycle.py`（纯计算：零 DB / 零 PyQt / 零 i18n /
+零三方，AST 守卫钉死只许 import `datetime`/`json`/`re`）
++ `history_store` 的 `_SQL_V7`（`SCHEMA_VERSION = 7`，`assets` 加 6 列）
++ `update_asset_lifecycle()`（🔴 漏 `conn.commit()` 的坑见下）
++ CLI `assets --warranty-days N` / `assets --set <键/MAC/IP> --field K=V`
++ GUI 详情面板「资产信息」分区 + `ui_dialogs/asset_edit.py`
++ `library_mixin._edit_asset` 接线（写入在宿主，对话框不碰库）。
+测试：`tests/test_asset_lifecycle.py`（87 例）+ `tests/test_asset_edit_dialog.py`
+（27 例）；`asset_lifecycle.py` 覆盖 **100%**（CI 门禁 95）。
+
+**🔴 迁移的坑（记账）**：v7 **只加列不建表** ⇒ `_LEGACY_TABLES` 必须用
+**列标记** `("assets", "custom_json", 7)`，照 v5 `("assets", "fingerprint", 5)`
+的先例。用表名标记会让老库推断版本偏低 → 重放 `ALTER TABLE` →
+`duplicate column name` → **库打不开**。
+`test_every_migration_can_be_inferred_from_a_table` 守着这条不变式。
+
+**🔴 抓到一个真 bug（单测没覆盖到，记账）**：`update_asset_lifecycle()`
+首版漏了 `conn.commit()`。`db_util.connection()` 只是「取单例连接 + 加锁
+yield」，**不代提交** —— 同进程内紧接着读同一把缓存连接**能读到**，
+所以单测全绿；进程一退出改动就没了。修法：显式 commit +
+补一条「`close_connection()` 之后**再新建连接**读」的回归用例
+（读缓存连接等于没验）。
+
+**两处刻意的不共享（记账）**：① 保修状态文案表在 `ui_utils.WARRANTY_STATUS_TEXT`
+与 `cli._WARRANTY_STATUS_TEXT` 各一份 —— CLI 不 import i18n、输出恒为中文，
+共享会让 CLI 输出随界面语言漂移（与 §3.3 的 `format_duration` 同款理由，
+各有一条测试守着两表的键集合同步）；② `format_warranty` 的日期行与状态行
+分开 —— 「正常」是默认预期，每台都印「正常」只是噪音，而「即将到期」必须显眼。
+
+**验收**：四条全部满足 —— ① 旧库经 v7 升级不丢数据（迁移测试守着）；
+② `custom_json` 键原样存取不翻译（`normalize_custom_json` + 面板显示测试）；
+③ 保修按本地时区推导（`_as_local_date()` 用 `fromtimestamp()`，
+断言同时区推导，见 §3.4 原文要求）；④ 未填 = `unset` 状态，
+**绝不**显示「已过期」（`test_unset_warranty_never_shows_expired` 钉死）。

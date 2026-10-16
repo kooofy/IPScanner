@@ -21,6 +21,7 @@ from alert_policy import normalize_mac
 from app_paths import data_dir
 from app_logging import get_logger
 
+import asset_lifecycle
 import db_util
 import device_fingerprint
 import trend_store
@@ -259,6 +260,30 @@ _SQL_V6 = """
         CREATE INDEX IF NOT EXISTS idx_ae_key_type ON asset_events(identity_key, event_type);
 """
 
+# ── v7：资产生命周期字段（v2.3 §3.4）───────────────────────────────────
+#
+# 六列全是**人工填写的台账**，扫描永远不写它们：
+#   purchase_date / warranty_end —— 采购日期、保修到期日（`YYYY-MM-DD` 文本）
+#   owner / serial               —— 负责人、序列号（`wmi_serial` 采集到的值也落这里）
+#   location_tree                —— 位置树（"A栋/3层/机房"），比 `location` 更结构化
+#   custom_json                  —— 自定义字段（JSON 对象；🔴 **键名不翻译**）
+#
+# 🔴 为什么必须走迁移链：`CREATE TABLE IF NOT EXISTS assets (...)` 对**已有**的
+#    `assets` 表**不会补列**（它只判断表在不在），所以新列在老库上永远不会出现，
+#    查询直接报 `no such column`。见本文件顶部 L52 的注释与 `db_util` 的实现。
+#
+# ⚠ v7 与 v5 同型：**只加列、不建表** ⇒ 必须给 `_LEGACY_TABLES` 加**列标记**，
+#   否则老库推断出的版本偏低、`ALTER TABLE` 被重放 ⇒ `duplicate column name`，
+#   库直接打不开（见 `db_util.infer_legacy_version`）。
+_SQL_V7 = """
+        ALTER TABLE assets ADD COLUMN purchase_date TEXT DEFAULT '';
+        ALTER TABLE assets ADD COLUMN warranty_end  TEXT DEFAULT '';
+        ALTER TABLE assets ADD COLUMN owner         TEXT DEFAULT '';
+        ALTER TABLE assets ADD COLUMN serial        TEXT DEFAULT '';
+        ALTER TABLE assets ADD COLUMN location_tree TEXT DEFAULT '';
+        ALTER TABLE assets ADD COLUMN custom_json   TEXT DEFAULT '';
+"""
+
 MIGRATIONS = [
     (1, _SQL_V1, "snapshots / devices + 三个索引"),
     (2, _SQL_V2, "switch_map / port_map + 三个索引"),
@@ -266,6 +291,7 @@ MIGRATIONS = [
     (4, _SQL_V4, "assets + devices.identity_key（资产表）"),
     (5, _SQL_V5, "assets/devices.fingerprint（指纹降级身份）"),
     (6, _SQL_V6, "trend_observations / asset_events（趋势观测层）"),
+    (7, _SQL_V7, "assets 生命周期字段（采购/保修/负责人/序列号/位置树/自定义）"),
 ]
 
 #: 本程序支持的 schema 版本（= 迁移链最后一版）。
@@ -287,6 +313,9 @@ _LEGACY_TABLES = (
     # v6 是**建表**（不是只加列），用表名标记就够 —— 与 `_SQL_V5` 必须用列
     # 标记是两种情形，别照抄（见 `db_util.infer_legacy_version`）。
     ("trend_observations", 6),
+    # v7 同 v5：**只加列不建表** ⇒ 只能用列标记。取最后一列 `custom_json`：
+    # 六列是同一条迁移一次性加的，探其中任意一列就等价于探整版。
+    ("assets", "custom_json", 7),
 )
 
 
@@ -376,6 +405,45 @@ _ASSET_COLS = (
     "mac", "ip", "status", "hostname", "vendor", "device_class", "os_guess",
     "open_ports", "services", "location", "user", "remark",
 )
+
+#: `assets` 里**人工填写的台账**列（v7，v2.3 §3.4）。
+#:
+#: 🔴 与 `_ASSET_COLS` 是**两回事**，绝不能合并：那一组会被扫描的 UPSERT
+#:    「最近一次非空才覆盖」地刷新；这一组扫描**根本不知道**（扫描仪不知道
+#:    采购日期、负责人），一旦混进去，一次例行扫描就会把用户填的值抹掉 ——
+#:    而且抹得**静默**（UPSERT 的 CASE 分支），比报错难查得多。
+#:
+#: 因此它们既不在 `_ASSET_UPSERT` 的列里，也不在 DO UPDATE 的合并规则里：
+#: 只由 `update_asset_lifecycle()` 显式写入。
+_ASSET_LIFECYCLE_COLS = asset_lifecycle.LIFECYCLE_COLUMNS
+
+
+def _assets_have_lifecycle(conn) -> bool:
+    """库里的 `assets` 有没有 v7 的生命周期列（老库 / 降级路径）。
+
+    正常情况下 `_conn()` 已经跑过迁移、列**一定**在；这里再探一次是为了
+    **优雅降级** —— `_table_has_assets()` 的注释说得很清楚：资产表是增强而非
+    前置条件，读路径不该因为缺列而抛 `no such column`。
+    """
+    return db_util._column_exists(conn, "assets", "custom_json")
+
+
+def _asset_read_cols(has_fp, has_lifecycle=True) -> list:
+    """读 `assets` 时该 SELECT 哪些列（按库的实际结构裁剪）。
+
+    🔴 抽成**一处**而不是在 `_read_assets()` / `get_asset()` 各写一遍：两处必须
+       永远返回同一组列。各写一遍的话，"列表里有这个字段、点开详情却没有"
+       会变成很难发现的静默差异 —— 列名拼错时 `sqlite3.Row` 要到有人点开
+       那台设备才 KeyError。
+    """
+    cols = ["identity_key"]
+    if has_fp:
+        cols.append("fingerprint")
+    cols += list(_ASSET_COLS)
+    if has_lifecycle:
+        cols += list(_ASSET_LIFECYCLE_COLS)
+    return cols
+
 
 # 写入用 UPSERT：同一身份键第二次出现时**只推进时间、不覆盖好值**。
 #
@@ -1913,10 +1981,8 @@ def _read_assets(device_class=None, network=None, first_seen_after=None,
         where.append("first_seen <= ?")
         params.append(first_seen_before)
 
-    base_cols = ["identity_key", "fingerprint"] + list(_ASSET_COLS)
-
-    def _select_sql(has_fp):
-        cols = base_cols if has_fp else (["identity_key"] + list(_ASSET_COLS))
+    def _select_sql(has_fp, has_lifecycle):
+        cols = _asset_read_cols(has_fp, has_lifecycle)
         sql = ("SELECT " + ", ".join(cols) +
                ", first_seen, last_seen, seen_count FROM assets")
         if where:
@@ -1929,8 +1995,9 @@ def _read_assets(device_class=None, network=None, first_seen_after=None,
         if not _table_has_assets(conn):
             return []
         has_fp = db_util._column_exists(conn, "assets", "fingerprint")
+        has_life = _assets_have_lifecycle(conn)
         rows = []
-        for r in conn.execute(_select_sql(has_fp), params):
+        for r in conn.execute(_select_sql(has_fp, has_life), params):
             rec = {
                 "identity_key": r["identity_key"],
                 # 「这台设备的身份是不是靠指纹认回来的」必须可解释（v2.0 §2.1）——
@@ -1942,6 +2009,10 @@ def _read_assets(device_class=None, network=None, first_seen_after=None,
             }
             for c in _ASSET_COLS:
                 rec[c] = r[c] or ""
+            # 生命周期列（v7）始终出现在结果里（缺列时留空串），调用方
+            # `row.get("warranty_end")` 不必再判 `has_life`。
+            for c in _ASSET_LIFECYCLE_COLS:
+                rec[c] = (r[c] or "") if has_life else ""
             rows.append(rec)
 
     # ── Python 侧过滤（判定权始终留在这，对齐 query_history）─────────────────
@@ -1965,7 +2036,10 @@ def list_assets(device_class=None, network=None, first_seen_after=None,
 
     返回字段：identity_key, mac, ip, status, hostname, vendor, device_class,
     os_guess, open_ports, services, location, user, remark, first_seen,
-    last_seen, seen_count。按 last_seen 降序（最近活跃的排在前）。
+    last_seen, seen_count，外加 v7 的**生命周期列**（purchase_date /
+    warranty_end / owner / serial / location_tree / custom_json —— 见
+    `asset_lifecycle`；旧库缺列时这 6 个键仍在，值为空串）。
+    按 last_seen 降序（最近活跃的排在前）。
 
     Args:
         device_class:   按规范设备类型子串过滤（留 Python 侧，跨语言）。
@@ -1999,7 +2073,7 @@ def get_asset(identity_key, db_path=None) -> dict | None:
     """按身份键取单台设备的资产记录；不存在或身份键为空返回 None。
 
     identity_key 是 `assets` 的主键（MAC 优先，见 `identity_key()`）。
-    返回字段与 `list_assets` 单行一致。
+    返回字段与 `list_assets` 单行一致（含 v7 生命周期列）。
     """
     key = (identity_key or "").strip()
     if not key:
@@ -2008,7 +2082,8 @@ def get_asset(identity_key, db_path=None) -> dict | None:
         if not _table_has_assets(conn):
             return None
         has_fp = db_util._column_exists(conn, "assets", "fingerprint")
-        cols = ["identity_key"] + (["fingerprint"] if has_fp else []) + list(_ASSET_COLS)
+        has_life = _assets_have_lifecycle(conn)
+        cols = _asset_read_cols(has_fp, has_life)
         row = conn.execute(
             "SELECT " + ", ".join(cols) +
             ", first_seen, last_seen, seen_count FROM assets WHERE identity_key = ?",
@@ -2026,4 +2101,80 @@ def get_asset(identity_key, db_path=None) -> dict | None:
     }
     for c in _ASSET_COLS:
         rec[c] = row[c] or ""
+    for c in _ASSET_LIFECYCLE_COLS:
+        rec[c] = (row[c] or "") if has_life else ""
     return rec
+
+
+# ── 生命周期写入（v2.3 §3.4）──────────────────────────────────────────
+
+#: 写入生命周期时**允许**的字段（= v7 的六列）。表驱动而不是散写，是为了让
+#: 拼错字段名**当场报错**而不是静默忽略 —— `owner` 写成 `ower` 却"写入成功"，
+#: 用户会以为填好了。
+_LIFECYCLE_FIELDS = frozenset(_ASSET_LIFECYCLE_COLS)
+
+#: 需要按日期解析的字段（写入前 `parse_date_strict()`，非法即抛）。
+_LIFECYCLE_DATE_FIELDS = frozenset(("purchase_date", "warranty_end"))
+
+
+def update_asset_lifecycle(identity_key, db_path=None, **fields) -> int:
+    """写入一台资产的**人工台账**字段（v2.3 §3.4）。返回受影响行数。
+
+    只允许 `_ASSET_LIFECYCLE_COLS` 里的字段（拼错字段名抛 `ValueError`，
+    不静默忽略）。语义：
+
+    * **不传**的字段 = 不动（不是清空）；
+    * 传 `None` / 空串 = 清空该字段；
+    * `purchase_date` / `warranty_end` 走 `asset_lifecycle.parse_date_strict()`
+      —— 非法日期**当场抛 `ValueError`**，不静默存成空串（那等于悄悄丢了
+      用户刚填的东西）；
+    * `custom_json` 走 `asset_lifecycle.normalize_custom_json()` —— 接受 dict
+      或 JSON 文本，🔴 **键名原样保留、不翻译**。
+
+    返回 0 表示**没有这台资产**（身份键不存在或为空）—— 调用方应据此报错，
+    而不是当作"写成功了"。
+
+    🔴 这里**不碰** `_ASSET_UPSERT`：生命周期字段不进扫描的 UPSERT 列，
+       扫描永远不可能覆盖用户填的值（见 `_ASSET_LIFECYCLE_COLS` 的注释）。
+    """
+    key = (identity_key or "").strip()
+    if not key:
+        return 0
+    if not fields:
+        return 0
+    unknown = sorted(set(fields) - _LIFECYCLE_FIELDS)
+    if unknown:
+        raise ValueError("不支持的生命周期字段：%s（可用：%s）"
+                         % (", ".join(unknown),
+                            ", ".join(sorted(_LIFECYCLE_FIELDS))))
+
+    sets, params = [], []
+    for name, raw in fields.items():
+        if name in _LIFECYCLE_DATE_FIELDS:
+            parsed = asset_lifecycle.parse_date_strict(raw, field=name)
+            value = "" if parsed is None else parsed.isoformat()
+        elif name == "custom_json":
+            value = asset_lifecycle.normalize_custom_json(raw)
+        else:
+            value = "" if raw is None else str(raw).strip()
+        sets.append(name + " = ?")
+        params.append(value)
+    params.append(key)
+
+    with _conn(db_path) as conn:
+        if not _table_has_assets(conn) or not _assets_have_lifecycle(conn):
+            # 老库（或"新版建的库被旧版打开"）没有 v7 的列：**报 0 行**而不是
+            # 抛 `no such column`。调用方看到"没找到这台资产"即可，与
+            # `_read_assets()` 的优雅降级同一口径。
+            return 0
+        cur = conn.execute(
+            "UPDATE assets SET " + ", ".join(sets) + " WHERE identity_key = ?",
+            params,
+        )
+        # 🔴 必须显式 commit：`db_util.connection()` 只是「取单例连接 + 加锁
+        #    yield」，**不代提交**。漏了这句的表现极其阴险 —— 同进程内紧接着
+        #    读**同一把缓存连接**能读到刚写的值，测试全绿；但进程一退出
+        #    （`db_util.shutdown()` 直接 close，不回滚不提交）改动就消失了，
+        #    而用户看到的是"填完保存了、下次打开全没了"。
+        conn.commit()
+        return cur.rowcount

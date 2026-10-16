@@ -76,6 +76,10 @@ class HistoryMixin:
             # 同一时刻失效 —— 这次扫描刚开的端口必须立刻出现在详情面板里。
             getattr(self, "_timeline_cache", {}).clear()
             getattr(self, "_exposure_cache", {}).clear()
+            # 台账行（`_asset_for`，v2.3 §3.4）同样失效：首次落库时
+            # `_backfill_assets()` 会给"扫到但还没进过台账"的设备补出新行 ——
+            # 不清的话那台设备点开还是没有「编辑资产信息…」入口。
+            getattr(self, "_asset_cache", {}).clear()
         except Exception as e:
             print(tr("保存历史快照失败:"), e)
 

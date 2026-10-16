@@ -331,6 +331,10 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         from ui_utils import (
             DURATION_INSUFFICIENT_TEXT, DURATION_UNIT_TEXT,
         )
+        # v2.3 §3.4：资产保修状态的显示名表。同上是**字面量表**（取用时过
+        # `tr()`），漏登记就会在英文界面显示中文状态。
+        # ⚠️ 键是 `asset_lifecycle.WARRANTY_*` 规范值，这里只收集值（中文那些）。
+        from ui_utils import WARRANTY_STATUS_TEXT
         return {
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
@@ -407,6 +411,11 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             # `trend_view` 与 `detail_panel` 共用这一份（见上方的 import 注释）。
             "ui_utils.DURATION_UNIT_TEXT": list(DURATION_UNIT_TEXT.values()),
             "ui_utils.DURATION_INSUFFICIENT_TEXT": [DURATION_INSUFFICIENT_TEXT],
+            # ui_utils（v2.3 §3.4）：保修状态显示名表 —— 详情面板「资产信息」
+            # 分区经 `tr()` 取用，漏登记英文界面显示「已过期/即将到期」中文。
+            # ⚠️ 与 `cli._WARRANTY_STATUS_TEXT` 是两份（CLI 不 import i18n），
+            # 另有测试守着两表的键集合同步。
+            "ui_utils.WARRANTY_STATUS_TEXT": list(WARRANTY_STATUS_TEXT.values()),
         }
 
     def test_all_table_labels_are_translated(self):

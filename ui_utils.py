@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """通用工具函数：网关探测、快照对比、IP 校验与排序键、时长显示。"""
 import ipaddress
+import json
 
+import asset_lifecycle
 import trend_store
 from i18n import tr
 from scanner.constants import device_class_label
@@ -171,3 +173,70 @@ def format_exposure_rows(rows) -> list:
         else:
             out.append(tr("端口 {port} 已开放 {dur}").format(port=port, dur=dur))
     return out
+
+
+# ── 资产台账显示（v2.3 §3.4）──────────────────────────────────────────
+#
+# 🔴 这张表与 `cli._WARRANTY_STATUS_TEXT` 是**两份**，且**刻意不共享**：
+#    `ui_utils` 依赖 `i18n`，而 CLI 不 import `i18n`（它的输出恒为中文）。
+#    两处的键都取自 `asset_lifecycle.WARRANTY_STATUSES`，并且各有一条测试守着
+#    「每个规范值都有显示名」—— 将来新增一个状态时，两边会**同时**红，
+#    不会出现"CLI 认、界面不认"这种只在一侧暴露的静默漏项。
+#
+# 本表是**字面量标签表**（模块顶层不能调 `tr()`，否则会被冻成导入期语言），
+# 必须登记进 `tests/test_i18n_lazy.py::_label_tables()`。
+WARRANTY_STATUS_TEXT = {
+    asset_lifecycle.WARRANTY_EXPIRED: "已过期",
+    asset_lifecycle.WARRANTY_EXPIRING: "即将到期",
+    asset_lifecycle.WARRANTY_UNSET: "未填",
+    asset_lifecycle.WARRANTY_OK: "正常",
+}
+
+
+def warranty_status_text(status) -> str:
+    """保修状态规范值 → 显示串。未知值**原样返回**（不吞、不猜）。"""
+    text = WARRANTY_STATUS_TEXT.get(status)
+    return tr(text) if text else (status or "")
+
+
+def format_warranty(end, days_left, status) -> str:
+    """保修到期 → 一行：`2030-01-01（还剩 1553 天）`。
+
+    🔴 未填（`unset`）**绝不能**显示成"已过期"（§3.4 验收 4）：没登记就说
+       "未填"，否则用户会把「还没填」当成「保修没了」，进而去查一个不存在的
+       问题。这也是 `--warranty-days` 不把未填项算进结果的理由。
+    """
+    if status == asset_lifecycle.WARRANTY_UNSET or not end:
+        return tr(WARRANTY_STATUS_TEXT[asset_lifecycle.WARRANTY_UNSET])
+    if days_left is None:
+        return str(end)
+    if days_left < 0:
+        return tr("{end}（已过期 {days} 天）").format(end=end, days=-days_left)
+    if days_left == 0:
+        return tr("{end}（今天到期）").format(end=end)
+    return tr("{end}（还剩 {days} 天）").format(end=end, days=days_left)
+
+
+def format_custom_fields(raw) -> str:
+    """`custom_json` → 一行：`键=值；键=值`（按键名排序，顺序稳定）。
+
+    🔴 键名**原样**显示，绝不翻译（§3.4 验收 2）—— 用户写的键是拿来比较的。
+    坏 JSON / 非对象一律当空（读取路径必须容忍脏值）。
+    """
+    data = asset_lifecycle.parse_custom_json(raw)
+    if not data:
+        return ""
+    parts = []
+    for key in sorted(data, key=lambda k: str(k)):
+        parts.append("%s=%s" % (key, _custom_value_text(data[key])))
+    return "；".join(parts)
+
+
+def _custom_value_text(value) -> str:
+    """自定义字段的值 → 短文本（字符串原样，其余走 JSON 字面量）。"""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
