@@ -20,6 +20,7 @@ from ui_icons import get_pc_icons
 from theme_tokens import token
 from favorites import favorite_key, star_icon
 from mac_library import MacMatcher
+from oui_database import is_randomized_mac
 import risk_rules
 from styles import _FONT_CONSOLAS_10, _FONT_CONSOLAS_9, _FONT_YAHEI_BOLD_9
 from ui_utils import _ip_to_int
@@ -585,16 +586,21 @@ class TreeMixin:
         item.setFont(3, _FONT_CONSOLAS_10)
 
         manufacturer_text = "—"
-        has_manufacturer = False
         if result.vendor:
             manufacturer_text = result.vendor
-            has_manufacturer = True
+        elif is_randomized_mac(result.mac):
+            # 随机 MAC（本地管理位=1）的前缀不属于任何厂商，OUI 查询必然为空。
+            # 这里刻意**不**显示成「—」：`—` 应该只表示"我们不知道"，
+            # 而"随机 MAC"是一个**确定的事实**（这台设备开了隐私地址）。
+            # 两者对用户的意义完全不同 —— 前者要排查，后者不用管。
+            manufacturer_text = tr("随机 MAC")
         if result.device_type:
-            if has_manufacturer:
-                manufacturer_text = f"{manufacturer_text} · {result.device_type}"
-            else:
+            # 已经有内容（厂商名 / 随机 MAC 标记）时用 " · " 拼接，与原有格式一致；
+            # 否则直接显示设备类型。两段信息都保留，不互相吞掉。
+            if manufacturer_text == "—":
                 manufacturer_text = result.device_type
-                has_manufacturer = True
+            else:
+                manufacturer_text = f"{manufacturer_text} · {result.device_type}"
         item.setText(4, manufacturer_text)
         # 链接色与字重的判据集中在 _apply_manufacturer_mark()，与切主题刷新共用，
         # 避免两处判据漂移（漂移的后果见该函数的说明）。

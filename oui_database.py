@@ -63,6 +63,32 @@ def get_mac_vendor(mac: str) -> str:
     return _query_oui(oui)
 
 
+def is_randomized_mac(mac: str) -> bool:
+    """判断 MAC 是否为「随机 / 本地管理」地址（IEEE 802 的 U/L 位 = 1）。
+
+    首字节的 bit 1（掩码 0x02）是 U/L 位：**0 = 全局唯一**（厂商出厂烧录），
+    **1 = 本地管理**（由操作系统生成）。手机 / 笔记本的「随机硬件地址」、
+    虚拟网卡、部分热点的软 AP 都属于后者。
+
+    🔴 为什么需要这个判据：随机 MAC 的前缀**不属于任何厂商**，`get_mac_vendor()`
+    对它必然返回空串。界面若把"随机 MAC"和"OUI 库没收录"都显示成 `—`，
+    用户就无法区分「这台是开了隐私地址的手机」和「这台是库里没收录的陌生设备」。
+    两者该采取的动作完全不同，所以必须分开表达。
+
+    容错：接受 `AA:BB:..` / `AA-BB-..`，大小写不敏感；空串与非法输入返回 False
+    （**不**把无法解析的值当成随机 MAC —— 宁可显示 `—` 也不要误导）。
+    """
+    if not mac:
+        return False
+    head = mac.strip().replace("-", ":").split(":")[0]
+    if len(head) != 2:
+        return False
+    try:
+        return bool(int(head, 16) & 0x02)
+    except ValueError:
+        return False
+
+
 def reload_db():
     """关闭并重新打开数据库连接（OUI 更新后调用）。"""
     global _conn, _db_path_cache

@@ -1131,5 +1131,7 @@
 
   "未能从网关读到 ARP 表": "Could not read the ARP table from the gateway",
 
-  "已从网关 {host} 的 ARP 表补齐 {n} 台设备的 MAC": "Back-filled MACs for {n} device(s) from the ARP table of gateway {host}"
+  "已从网关 {host} 的 ARP 表补齐 {n} 台设备的 MAC": "Back-filled MACs for {n} device(s) from the ARP table of gateway {host}",
+
+  "随机 MAC": "Random MAC"
 }
