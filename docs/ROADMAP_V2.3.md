@@ -428,6 +428,16 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
           产物 IPScanner_2.3.0-win64.zip / IPScanner_cli_2.3.0.exe /
           SHA256SUMS.txt；Release run 38832913623 success、
           CI run 38832909636 十 job 全绿）
+
+补丁轨道 v2.3.1（2026-10-21 收口，**不改 §3 范围、不占里程碑名额**）：
+          三项跨网段可观测性 / 可读性补齐 —— 跨网段补 MAC（读网关 ARP 表，
+          scanner/arp_mib.py + arp_mapper.py，GUI 勾选项 + CLI arp-mac）、
+          PTR 负缓存与连续超时短路（scanner/dns.py）、
+          制造商列区分「随机 MAC」（oui_database.is_randomized_mac）
+          release 419053327 + 注解 tag v2.3.1；
+          产物 IPScanner_2.3.1-win64.zip / IPScanner_cli_2.3.1.exe /
+          SHA256SUMS.txt；Release run 39528229420 success、
+          CI run 39528125407 十 job 全绿
 ```
 
 ---
