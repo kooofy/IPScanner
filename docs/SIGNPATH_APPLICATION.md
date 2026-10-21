@@ -2,8 +2,11 @@
 
 > **目的**：让发行版带上**可与仓库相互验证**的签名，消掉「Windows 已保护你的电脑 / 未知发布者」。
 > **依据**：`docs/ROADMAP_V1.8.md` §1.4 第 2 项、`docs/ROADMAP_V2.2.md` §1.4 / §3.4.1。
-> **状态**：**已提交**（2026-10-14，北京时间上午；HubSpot 回执原文
-> 「Form submitted — Thank you, we'll be in touch soon.」，截图存档于本机临时目录）。
+> **状态**：**已提交**（2026-10-14 上午，北京时间；回执截图的文件时间戳为
+> **10:51:20**，这是目前**最精确**的时刻锚点 —— 截图本身就是提交成功后拍的）。
+> HubSpot 回执原文「Form submitted — Thank you, we'll be in touch soon.」，
+> 回执截图已归档入库：`docs/screenshots/signpath-application-receipt-2026-10-14.png`
+> （2026-10-19 补归档；此前只存在本机临时目录，随临时目录清理而丢失过）。
 > 用户提供联系邮箱 `kooofy@gmail.com` 与姓名 **Xiaohua Lv**，发现渠道填
 > Developer platforms (e.g. GitHub)。提交由助手经浏览器完成：
 > 全部字段按 §3 / §3.0 填好后，reCAPTCHA Enterprise 图片挑战
@@ -64,6 +67,51 @@ SignPath Foundation 对开源项目的要求（来源：`signpath.org/apply.html
 支持签名 EXE / MSI / Docker 镜像 / Office 宏等，CI 侧支持 GitHub Actions / Azure DevOps / Jenkins。
 本项目只需要 GitHub Actions —— 产物构建已经落在
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) 里了。
+
+### 2.1 条款级自查（`terms.html`，2026-10-19 补做）
+
+⚠️ 上面那张表是照 `apply.html` 做的，**不完整** —— 真正有约束力的细则在
+<https://signpath.org/terms.html>「SignPath Foundation conditions for Open Source
+projects」。2026-10-19 补做条款级自查，**发现一条可能致命**：
+
+| 条款 | IPScanner 现状 | 判定 |
+|---|---|:---:|
+| 🔴 **No hacking tools** | 核心功能是"扫网段 → 列开放端口 → 服务暴露面风险分 + CVE 候选"，与条款举例「identifying unprotected network ports」几乎字面重合 | **硬风险** |
+| No malware | 无恶意代码 | ✅ |
+| No proprietary code | 全 GPL-3.0，无闭源组件 | ✅ |
+| Maintained / Released / Documented | 2.1.x 在推进、13 个 Release、README 有功能说明 | ✅ |
+| Code signing policy（须用官方措辞） | `CODE_SIGNING_POLICY.md` 已用官方原句 | ✅ |
+| Team roles（Authors / Reviewers / Approvers） | 同文件「Team roles (single-maintainer project)」已列 | ✅ |
+| Privacy policy | 同文件「Privacy policy」已写"不发遥测、数据不出本机" | ✅ |
+| Announce system changes / Provide uninstallation | 免安装包（解压即用、无安装器、不改系统配置）；⚠️ 但有 **Wake-on-LAN**（用户手动触发） | ⚠️ 需说明 |
+| MFA（SignPath + 代码仓） | 仓库侧已开；SignPath 账号待用户本人确认 | ⚠️ 用户自证 |
+| Artifact metadata restrictions | 未配置 | ⏳ 获批后才需要 |
+
+🔴 **`No hacking tools` 原文**：
+
+> Software must not include features designed to identify or exploit security
+> vulnerabilities or circumvent security measures of their execution environment.
+> **This includes security diagnosis tools that actively scan for and highlight
+> exploitable vulnerabilities, e.g. by identifying unprotected network ports,
+> missing password protection etc.**
+
+**为什么这是硬风险**：本项目扫端口、按服务暴露面打 0–100 风险分、匹配 CVE 候选、
+检测弱 TLS 与 SMB1 —— 这些正是条款所说的 "highlight exploitable vulnerabilities"。
+`apply.html` 上**完全没有提这条**，所以 2026-10-14 提交时并不知道。
+
+**可用的抗辩**（官方明确写过 "We will listen to arguments about your specific
+situation"）：
+
+1. 定位是**资产台账 / 巡检**（README 对标 Advanced IP Scanner、SoftPerfect、TNI），
+   不是漏洞利用或渗透测试工具；
+2. **零利用**：不做 exploit、不做凭据爆破、不绕过认证（已核实：仓库无
+   `brute` / `wordlist` 相关代码）；
+3. 结果用于**变更追踪与文档化**，不用于攻击。
+
+**但如实记账**：不排除被拒，且这可能是比 `Reputation` **更硬**的拒绝理由。
+若被拒，备选路线（未选）：自购 OV 代码签名证书 / Azure Trusted Signing（需组织资质）/
+维持未签名发布并在 README 如实说明。跟进邮件草稿见
+[`SIGNPATH_FOLLOWUP_EMAIL.md`](SIGNPATH_FOLLOWUP_EMAIL.md)。
 
 ---
 
@@ -239,6 +287,13 @@ HubSpot 回执：「Form submitted — Thank you, we'll be in touch soon.」
 地址 → 提交。）
 
 ### 5.2 提交之后
+
+> **跟进状态（2026-10-19 核查）**：提交后 **5 天未收到任何邮件**
+> （`kooofy@gmail.com`，已核对垃圾邮件与「促销/更新」标签）。
+> 已排除"邮箱填错"：文档记录、git 提交者、用户本人复述三者**逐字符一致**。
+> SignPath 官网**没有公布审核时长**（`apply.html` 与首页均未写，`faq.html` 返回 404）
+> ⇒ **5 天不构成异常**，但已到可以礼貌跟进的程度。
+> ⚠️ 回执当时只是**页面文字**，不能拿"没收到确认信"当异常信号。
 
 1. **审核期间保持邮箱畅通**，可能收到补充提问；若问使用量，按 §3.1 的口径如实回复。
 2. 获批后：在 SignPath 里建项目 → 接 GitHub 集成 → 设计签名政策（逐次审批）。

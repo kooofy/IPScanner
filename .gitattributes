@@ -20,6 +20,9 @@
 *.xlsx binary
 *.xls  binary
 *.exe  binary
+# .eml 必须原样保存：RFC 5322 要求 CRLF 行尾，被规范化成 LF 后
+# 部分邮件客户端会打不开或把正文读成一行。它也不适合 diff。
+*.eml  binary
 
 # 语言包 / 清单类 JSON 用 diff 查看更友好
 *.json text eol=lf

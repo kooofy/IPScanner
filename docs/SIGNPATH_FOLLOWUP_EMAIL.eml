@@ -1,0 +1,47 @@
+To: support@signpath.io
+Subject: Application status — IPScanner (submitted 14 Oct 2026)
+X-Unsent: 1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Dear SignPath Foundation team,
+
+I applied for a free SignPath.io subscription for my open-source project on
+14 October 2026 and received the form confirmation, but I have not heard back
+since. Could you let me know whether the application is being processed, and
+whether you need any additional information from me?
+
+Details of the application:
+
+- Project: IPScanner — https://github.com/kooofy/IPScanner
+- Contact email entered in the form: kooofy@gmail.com
+- Submission date: 14 October 2026
+  (form confirmation: "Form submitted — Thank you, we'll be in touch soon.")
+- License: GPL-3.0
+
+For context: IPScanner is a local-network asset inventory tool for everyday IT
+operations. It discovers hosts on a subnet, records which services are
+reachable, and keeps a history of what changed between scans. It is used for
+asset audits, IP-conflict troubleshooting and internal network documentation.
+It runs entirely on the operator's own machine — no account, no cloud service —
+and it does not exploit vulnerabilities, perform credential attacks, or bypass
+authentication.
+
+One point I would like to raise proactively: I read the condition regarding
+security diagnosis tools, and I want to be transparent about where IPScanner
+sits. It is an inventory and visibility tool, not a testing or exploitation
+tool — it never attempts to exploit what it finds, and it is meant to be run
+by administrators on networks they are responsible for. If that distinction
+is relevant to eligibility, I would be glad to discuss it. If the project
+falls outside the scope of a Foundation certificate, please tell me and I will
+not take up more of your time.
+
+I am happy to provide anything that would help the review — build instructions,
+release artifacts, or details on how the project is maintained.
+
+Thank you for your time.
+
+Best regards,
+Xiaohua Lv
+https://github.com/kooofy/IPScanner
