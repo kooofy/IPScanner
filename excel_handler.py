@@ -146,6 +146,11 @@ def _read_rows(file_path: str) -> List[tuple]:
         return rows
 
 
+#: 公开别名。`asset_import.read_table()` 也要读 Excel，不该去 import 私有名字
+#: （私有名字随时可能被重构掉）。行为与 `_read_rows` 完全一致。
+read_rows = _read_rows
+
+
 def export_results(results: list, file_path: str) -> Tuple[bool, str]:
     """
     将扫描结果导出到 Excel。

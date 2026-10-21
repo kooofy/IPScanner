@@ -339,8 +339,19 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
         # 同上是字面量表（`mac_source_label()` 取用时过 tr()），漏登记就会在
         # 英文界面把「网关 ARP 表（SNMP）」原样显示成中文。
         from arp_mapper import MAC_SOURCE_TEXT as _MAC_SOURCE_TEXT
+        # v2.3.1：台账批量导入的报告文案。三张都是**字面量表**（取用时过
+        # `tr()`），AST 收集不到 —— 漏登记就会在英文界面把「找不到设备」
+        # 原样显示成中文。
+        from ui_dialogs.asset_import_preview import (
+            _PROBLEM_TEXT as _IMPORT_PROBLEM,
+            _REASON_TEXT as _IMPORT_REASON,
+            _STATUS_TEXT as _IMPORT_STATUS,
+        )
         return {
             "arp_mapper.MAC_SOURCE_TEXT": list(_MAC_SOURCE_TEXT.values()),
+            "ui_dialogs.asset_import_preview._STATUS_TEXT": list(_IMPORT_STATUS.values()),
+            "ui_dialogs.asset_import_preview._REASON_TEXT": list(_IMPORT_REASON.values()),
+            "ui_dialogs.asset_import_preview._PROBLEM_TEXT": list(_IMPORT_PROBLEM.values()),
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
             "main_window.COLUMN_LABELS": list(COLUMN_LABELS),

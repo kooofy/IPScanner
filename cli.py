@@ -69,6 +69,12 @@ from scanner import throttle
 # 不破坏「CLI 可在 Server Core / 容器里裸跑」这条底线。
 import asset_lifecycle
 
+# 台账批量导入（v2.3.1）。同样放在顶层：下面 `_IMPORT_REASON_TEXT` /
+# `_IMPORT_COUNT_TEXT` 在**模块 import 期**就要引用 `asset_import.REASON_*` /
+# `ST_*` 常量来建表，函数内 import 拿不到。它零 PyQt、零第三方、零 DB
+# （`apply_plan()` 里才惰性 import `history_store`），不破坏 CLI 的裸跑底线。
+import asset_import
+
 # 退出码
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -1567,6 +1573,170 @@ def cmd_assets(args) -> int:
         emit(render_table(rows, _ASSET_TABLE_COLUMNS, _ASSET_TABLE_HEADERS),
              args.output)
     return EXIT_OK
+
+
+#: 台账导入的文本报告里，失败明细最多列多少条。
+#: 4000 行全错时逐条打印等于把终端刷爆、还把真正的第一条冲走 ——
+#: 剩下的用 `-f json` 取（那里一条不漏）。
+_IMPORT_DETAIL_LIMIT = 20
+
+#: 导入失败原因 → 中文说明。**CLI 输出恒为中文**（与 `_ASSET_TABLE_HEADERS` 同口径），
+#: 因此这张表**不进** `i18n/en-US.json`、也不登记 `test_i18n_lazy`。
+#: GUI 侧的同一批原因另有一份 `tr()` 文案（`library_mixin._import_reason_text`）。
+_IMPORT_REASON_TEXT = {
+    asset_import.REASON_BAD_DATE: "日期格式无效（应为 YYYY-MM-DD）",
+    asset_import.REASON_BAD_JSON: "自定义字段不是合法的 JSON 对象",
+    asset_import.REASON_NO_IDENTITY: "这一行没有身份键 / MAC，认不出是哪台设备",
+    asset_import.REASON_UNKNOWN_DEVICE: "资产表里找不到这台设备",
+    asset_import.REASON_IP_NOT_ALLOWED:
+        "只有 IP 不能安全匹配（IP 会被 DHCP 换给别的设备）；"
+        "请加一列 MAC 或身份键，或显式加 --allow-ip",
+    asset_import.REASON_DUPLICATE_ROW: "同一台设备在表里出现了多次，只取第一行",
+    asset_import.REASON_NO_FIELDS: "这一行没有可写入的字段",
+    asset_import.REASON_ALREADY_EQUAL: "与库里已有值一致，无需写入",
+    asset_import.REASON_WRITE_FAILED: "写入被拒绝",
+}
+
+#: 计划级问题 → 中文说明。
+_IMPORT_PROBLEM_TEXT = {
+    asset_import.PROBLEM_EMPTY: "文件里连表头都没有（空文件？）",
+    asset_import.PROBLEM_NO_COLUMNS:
+        "没有识别到任何可写入的列。可用的列名："
+        + "、".join(asset_lifecycle.LIFECYCLE_COLUMNS)
+        + "（也可用中文表头：采购日期 / 保修到期 / 负责人 / 序列号 / 位置树 / 自定义字段）。"
+          "最省事的办法是先跑 `assets -f csv -o 台账.csv` 拿到标准表头。",
+    asset_import.PROBLEM_NO_IDENTITY_COLUMN:
+        "表里既没有 identity_key 列也没有 MAC 列，认不出要写哪台设备。"
+        "先跑 `assets -f csv -o 台账.csv` 就有 identity_key 了。",
+}
+
+
+def _import_line_text(item) -> str:
+    """一条计划项 → 一行中文说明（含行号与身份线索）。"""
+    head = "第 %d 行" % item.get("line", 0)
+    detail = (item.get("detail") or "").strip()
+    if item.get("identity_key"):
+        head += " %s" % item["identity_key"]
+    elif detail:
+        head += " %s" % detail
+    reason = _IMPORT_REASON_TEXT.get(item.get("reason") or "", "")
+    # 非法行要把被拒的值显示出来（与 GUI 报告同口径）：只说「日期格式无效」
+    # 而不说是哪个值，用户还得回表里逐格找。
+    if (item.get("status") == asset_import.ST_INVALID
+            and item.get("identity_key") and detail):
+        reason = "%s：%s" % (reason, detail)
+    if item.get("field"):
+        reason = "%s（字段 %s）" % (reason, item["field"])
+    return "%s：%s" % (head, reason or item.get("reason") or "失败")
+
+
+def cmd_assets_import(args) -> int:
+    """从 CSV / Excel 批量导入资产台账字段（v2.3.1）。
+
+    三个语义要点（与 `asset_import` 模块头一致）：
+
+    * **空单元格默认跳过**，不覆盖库里已有的值；`--clear-empty` 才清空；
+    * **只按身份键 / MAC 认设备**（`--allow-ip` 才放开 IP，且明确告知风险）；
+    * **先编译计划、再写入** —— `--dry-run` 就停在编译之后，可以放心先看一眼。
+
+    退出码：0 = 全部成功（或无事可做）；1 = 有失败行 / 表用不了 / 读不了文件。
+    """
+    import history_store
+
+    db = _db_path(args)
+    try:
+        headers, body = asset_import.read_table(args.file)
+    except ValueError as e:
+        emit("错误：读不了文件 %s：%s" % (args.file, e))
+        return EXIT_ERROR
+    except Exception as e:  # noqa: BLE001 - 缺 openpyxl / 文件被占用 / 不是有效工作簿
+        emit("错误：读不了文件 %s：%s" % (args.file, e))
+        return EXIT_ERROR
+
+    rows = [headers] + list(body)
+    assets = history_store.list_assets(db_path=db)
+    plan = asset_import.build_plan(
+        rows, assets,
+        clear_empty=getattr(args, "clear_empty", False),
+        allow_ip=getattr(args, "allow_ip", False),
+    )
+
+    problem = plan.get("problem") or ""
+    if problem:
+        emit("错误：%s" % _IMPORT_PROBLEM_TEXT.get(problem, problem))
+        return EXIT_ERROR
+
+    written = 0
+    if not getattr(args, "dry_run", False):
+        try:
+            result = asset_import.apply_plan(plan, db_path=db)
+        except Exception as e:  # noqa: BLE001 - 库层故障：如实报，不假装写完
+            emit("错误：写入台账时失败：%s" % e)
+            return EXIT_ERROR
+        written = result["written"]
+
+    counts = asset_import.summarize(plan)
+    if args.format == "json":
+        emit(render_json({
+            "file": args.file,
+            "dry_run": bool(getattr(args, "dry_run", False)),
+            "total": plan.get("total", 0),
+            "columns": sorted(plan.get("columns") or {}),
+            "ignored_columns": plan.get("ignored") or [],
+            "counts": counts,
+            "written": written,
+            "items": plan.get("items") or [],
+        }), args.output)
+        return EXIT_ERROR if _import_failed(counts) else EXIT_OK
+
+    # ── 文本报告 ──
+    lines = []
+    cols = sorted(plan.get("columns") or {})
+    lines.append("已读取 %s：识别 %d 列（%s）"
+                 % (args.file, len(cols), "、".join(cols) or "无"))
+    if plan.get("ignored"):
+        lines.append("忽略 %d 列（不是台账字段）：%s"
+                     % (len(plan["ignored"]), "、".join(plan["ignored"])))
+    parts = ["%s %d 台" % (_IMPORT_COUNT_TEXT.get(st, st), n)
+             for st, n in counts.items()]
+    lines.append("共 %d 行：%s" % (plan.get("total", 0), "、".join(parts) or "无"))
+    if getattr(args, "dry_run", False):
+        lines.append("（--dry-run：只编译了计划，没有写入任何数据）")
+    elif written:
+        lines.append("已写入 %d 台设备的台账字段。" % written)
+
+    bad = [it for it in plan.get("items") or ()
+           if it.get("status") in (asset_import.ST_NOTFOUND,
+                                   asset_import.ST_INVALID,
+                                   asset_import.ST_DUPLICATE)]
+    if bad:
+        lines.append("")
+        lines.append("需要处理的行：")
+        for item in bad[:_IMPORT_DETAIL_LIMIT]:
+            lines.append("  " + _import_line_text(item))
+        if len(bad) > _IMPORT_DETAIL_LIMIT:
+            lines.append("  ……另有 %d 条，用 `-f json` 查看全部。"
+                         % (len(bad) - _IMPORT_DETAIL_LIMIT))
+    emit("\n".join(lines), args.output)
+    return EXIT_ERROR if _import_failed(counts) else EXIT_OK
+
+
+#: 计数里的状态 → 中文标签。同上，**恒为中文**，不进语言包。
+_IMPORT_COUNT_TEXT = {
+    asset_import.ST_WRITTEN: "已写入",
+    asset_import.ST_OK: "将写入",
+    asset_import.ST_NOCHANGE: "无需改动",
+    asset_import.ST_DUPLICATE: "重复行",
+    asset_import.ST_EMPTY: "空行",
+    asset_import.ST_NOTFOUND: "找不到设备",
+    asset_import.ST_INVALID: "格式/身份有误",
+}
+
+
+def _import_failed(counts) -> bool:
+    """计数里有没有「需要用户处理」的行（决定退出码）。"""
+    return any(counts.get(st) for st in (asset_import.ST_NOTFOUND,
+                                          asset_import.ST_INVALID))
 
 
 def cmd_export(args) -> int:
@@ -3329,6 +3499,30 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table")
     ap.add_argument("-o", "--output", metavar="文件")
     ap.set_defaults(func=cmd_assets)
+
+    # ── assets-import（v2.3.1：台账批量导入）──
+    aip = sub.add_parser(
+        "assets-import", help="从 CSV / Excel 批量导入资产台账字段",
+        parents=[common],
+        description="把一张表（CSV / xlsx / xls）里的采购日期 / 保修到期 / "
+                    "负责人 / 序列号 / 位置树 / 自定义字段批量写进资产台账。"
+                    "列名可以是英文字段名（与 `assets -f csv` 的产出一致），"
+                    "也可以是中文表头（采购日期 / 保修到期 / 负责人 / 序列号 / "
+                    "位置树 / 自定义字段）。"
+                    "🔴 空单元格默认**跳过**，不会覆盖库里已有的值；"
+                    "要批量清空必须显式加 --clear-empty。"
+                    "只写人工台账列，绝不碰扫描写入的列。")
+    aip.add_argument("file", metavar="文件", help="CSV / xlsx / xls 文件路径")
+    aip.add_argument("--dry-run", action="store_true",
+                     help="只编译计划并报告，不写库（放心先看一眼）")
+    aip.add_argument("--clear-empty", action="store_true",
+                     help="把空单元格当作「清空该字段」（默认跳过空单元格）")
+    aip.add_argument("--allow-ip", action="store_true",
+                     help="允许只凭 IP 匹配设备。默认禁止 —— IP 会被 DHCP 回收后"
+                          "分给另一台机器，按 IP 认设备可能把 A 的负责人写到 B 头上")
+    aip.add_argument("-f", "--format", choices=("table", "json"), default="table")
+    aip.add_argument("-o", "--output", metavar="文件")
+    aip.set_defaults(func=cmd_assets_import)
 
     # ── export ──
     xp = sub.add_parser("export", help="导出资产表为互操作格式", parents=[common],

@@ -677,6 +677,17 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
 
         file_menu.addSeparator()
 
+        # v2.3.1：台账字段批量导入（采购日期 / 保修到期 / 负责人 / 序列号 /
+        # 位置树 / 自定义字段）。与「导入地址库」是两回事 —— 那个导入的是
+        # MAC→设备类型 的对照表，这个写的是资产表的人工台账列。
+        self.act_import_assets = QAction(tr("导入资产信息..."), self)
+        self.act_import_assets.setIcon(_mi(QStyle.SP_ArrowDown))
+        self.act_import_assets.setShortcut(QKeySequence("Ctrl+Alt+I"))
+        self.act_import_assets.triggered.connect(self._import_assets)
+        file_menu.addAction(self.act_import_assets)
+
+        file_menu.addSeparator()
+
         act_exit = QAction(tr("退出"), self)
         act_exit.setIcon(_mi(QStyle.SP_DialogCloseButton))
         act_exit.setShortcut(QKeySequence("Alt+F4"))

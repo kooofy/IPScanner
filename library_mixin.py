@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """MAC 地址库管理混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
-from PyQt5.QtWidgets import QDialog, QMessageBox
-from ui_dialogs import AssetEditDialog, MacLibraryDialog, DeviceEditDialog
+import os
+
+from PyQt5.QtWidgets import QDialog, QFileDialog, QMessageBox
+from ui_dialogs import (
+    AssetEditDialog, AssetImportPreviewDialog, MacLibraryDialog, DeviceEditDialog,
+)
+from ui_dialogs import asset_import_preview
+import asset_import
 import audit_log
 import history_store
 from app_logging import get_logger
-from ui_msg import msg_ask, msg_warn
+from ui_msg import msg_ask, msg_info, msg_warn
 from i18n import tr
 
 _log = get_logger(__name__)
@@ -62,6 +68,91 @@ class LibraryMixin:
         self._refresh_detail_panel(self.table.currentItem())
         self._audit(audit_log.CAT_LIBRARY, tr("编辑资产信息"), key)
         self.status_bar.showMessage(tr("资产信息已保存"))
+
+    def _import_assets(self):
+        """批量导入台账字段（v2.3.1）：选文件 → 编译计划 → **预览确认** → 写入。
+
+        为什么中间非要有「预览」这一步：批量导入一次能改几十上百台设备的
+        人工台账，而且**没有撤销**。选错文件、把「位置」当成「位置树」、
+        误开清空开关，都会一次改掉一大片。所以界面上**从不**选完文件直接写。
+
+        🔴 写入只走 `history_store.update_asset_lifecycle()`（经
+           `asset_import.apply_plan()`），只碰生命周期列。
+        🔴 判定逻辑与 CLI `assets-import` 是**同一份** `asset_import` ——
+           两处口径不一致会让「界面说 12 台、命令行说 13 台」。
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("选择台账文件（CSV 或 Excel）"), "",
+            tr("台账文件 (*.csv *.xlsx *.xls);;所有文件 (*.*)"))
+        if not path:
+            return
+        try:
+            headers, body = asset_import.read_table(path)
+        except Exception as e:  # noqa: BLE001 - 缺 openpyxl / 文件被占用 / 不是工作簿
+            _log.warning("读取台账文件失败（%s）: %s", path, e)
+            msg_warn(self, tr("无法读取台账文件"), str(e))
+            return
+        try:
+            assets = history_store.list_assets(db_path=self.history_db)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("读取资产表失败: %s", e)
+            msg_warn(self, tr("无法读取资产表"), tr("读取失败，详情见日志。"))
+            return
+
+        plan = asset_import.build_plan([headers] + list(body), assets)
+        problem = plan.get("problem") or ""
+        if problem:
+            msg_warn(self, tr("这张表用不了"),
+                     asset_import_preview.problem_text(problem) + "\n\n"
+                     + tr("最省事的办法：先导出一次资产表"
+                          "（命令行 `assets -f csv -o 台账.csv`），在它上面改。"))
+            return
+
+        name = os.path.basename(path)
+        pending = asset_import.pending_count(plan)
+        report = asset_import_preview.build_report(plan)
+        dlg = AssetImportPreviewDialog(
+            report, file_label=tr("文件：{name}").format(name=name),
+            can_apply=pending > 0, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        try:
+            result = asset_import.apply_plan(plan, db_path=self.history_db)
+        except Exception as e:  # noqa: BLE001 - 库层故障：如实报，不假装写完
+            _log.warning("导入台账失败（%s）: %s", name, e)
+            msg_warn(self, tr("导入失败"), str(e))
+            return
+
+        written = result["written"]
+        failed = result["failed"]
+        # 缓存与详情面板必须刷新，否则用户导入完看到的还是旧值 ——
+        # 那会让人以为"没导进去"，然后反复导（与 `_edit_asset` 同一条教训）。
+        getattr(self, "_asset_cache", {}).clear()
+        self._refresh_detail_panel(self.table.currentItem())
+        self._audit(
+            audit_log.CAT_LIBRARY, tr("导入资产信息"),
+            f"{name} · 写入 {written} 台" + (f" · 失败 {len(failed)} 台"
+                                             if failed else ""),
+        )
+
+        if failed:
+            # 有失败行就把完整报告再摊开一次（只读、只有「关闭」）——
+            # 用一句 msg_info 报"部分失败"等于把要改哪几行藏起来了。
+            again = AssetImportPreviewDialog(
+                asset_import_preview.build_report(plan, written=written),
+                file_label=tr("文件：{name}").format(name=name),
+                can_apply=False, parent=self)
+            again.exec_()
+            self.status_bar.showMessage(
+                tr("导入完成：写入 {n} 台，{f} 台需要处理").format(
+                    n=written, f=len(failed)))
+            return
+
+        msg_info(self, tr("导入完成"),
+                 tr("已写入 {n} 台设备的台账字段。").format(n=written))
+        self.status_bar.showMessage(
+            tr("导入完成：写入 {n} 台").format(n=written))
 
     def _add_to_library(self, ip: str = "", mac: str = ""):
         dlg = DeviceEditDialog(self.library, parent=self, ip=ip, mac=mac)

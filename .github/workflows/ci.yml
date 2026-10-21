@@ -373,6 +373,15 @@ jobs:
           # ⚠ 两个 basename 全仓库唯一；仍按惯例带 `./` 防未来撞名。
           python -m coverage report --include="./scanner/arp_mib.py" --fail-under=95
           python -m coverage report --include="./arp_mapper.py" --fail-under=90
+          # v2.3.1 新增：
+          #   asset_import.py    95%（纯逻辑模块：表头识别 → 身份解析 → 字段校验
+          #                        → 编译导入计划。2026-10-21 实测 **100%** ——
+          #                        只跑 test_asset_import 一个模块就满了。下界留
+          #                        95 是给"将来补防御分支"的余量，不是当前有缺口。）
+          # ⚠ basename 全仓库唯一：对话框模块特意命名 `asset_import_preview.py`，
+          #   就是为了不撞 `--include` 的**后缀匹配**（撞了会让下界同时作用在两个
+          #   文件上，数字看着还行、其实谁都没达标）。仍按惯例带 `./`。
+          python -m coverage report --include="./asset_import.py" --fail-under=95
 
   quality-types:
     name: 类型门禁（pyright）
