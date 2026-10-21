@@ -438,6 +438,15 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
           产物 IPScanner_2.3.1-win64.zip / IPScanner_cli_2.3.1.exe /
           SHA256SUMS.txt；Release run 39528229420 success、
           CI run 39528125407 十 job 全绿
+
+补丁轨道 v2.3.2（2026-10-21 收口，同样**不改 §3 范围、不占名额**）：
+          资产台账批量导入（CSV / Excel）—— asset_import.py（纯逻辑，
+          覆盖率 100%）+ GUI 文件菜单「导入资产信息...」（预览后才写）+
+          CLI assets-import（--dry-run / --clear-empty / --allow-ip）
+          release 419238452 + 注解 tag v2.3.2；
+          产物 IPScanner_2.3.2-win64.zip / IPScanner_cli_2.3.2.exe /
+          SHA256SUMS.txt；Release run 39556861316 success、
+          CI run 39556809078 十 job 全绿
 ```
 
 ---
