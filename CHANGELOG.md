@@ -16,6 +16,18 @@
 
 ## [Unreleased]
 
+（暂无）
+
+---
+
+## [2.3.2] - 2026-10-21
+
+> 一项**人工台账**的可用性补齐（2026-10-21 用户问「资产信息能批量导入么」）。
+> 那 6 个台账字段此前只能逐台填，设备上百台时这些字段最终就是空的；
+> 而 `assets -f csv` 本来就把它们一起导出来了 —— 「导出 → 改 → 导回去」
+> 这条回路一直只差**导入**这一半。补丁版本，不改 v2.3 主题范围、
+> 不占里程碑名额。
+
 ### 新增
 
 - **资产台账批量导入（CSV / Excel）**。
@@ -939,7 +951,8 @@ v1.8 路线图的四项全部落地（定位查询 / 被动发现 / 历史查询
 
 ---
 
-[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.3.1...HEAD
+[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.3.2...HEAD
+[2.3.2]: https://github.com/kooofy/IPScanner/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/kooofy/IPScanner/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/kooofy/IPScanner/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/kooofy/IPScanner/compare/v2.1.0...v2.2.0
