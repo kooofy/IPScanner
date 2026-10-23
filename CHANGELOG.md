@@ -16,6 +16,17 @@
 
 ## [Unreleased]
 
+（暂无）
+
+---
+
+## [2.3.3] - 2026-10-23
+
+> 一项**交付物**的补齐（2026-10-23 用户问「资产导入没有模板么」→ 建完再问
+> 「模板在哪，没看到」）。2.3.2 已经把批量导入做出来了，但用户手上装的是
+> v2.3.1 的 exe —— 功能在源码里、不在发布物里，对他来说就等于不存在。
+> 补丁版本，不改 v2.3 主题范围、不占里程碑名额。
+
 ### 新增
 
 - **台账导入模板**（CLI `assets-template` / 文件菜单「导出台账模板...」）。
@@ -965,7 +976,8 @@ v1.8 路线图的四项全部落地（定位查询 / 被动发现 / 历史查询
 
 ---
 
-[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.3.2...HEAD
+[Unreleased]: https://github.com/kooofy/IPScanner/compare/v2.3.3...HEAD
+[2.3.3]: https://github.com/kooofy/IPScanner/compare/v2.3.2...v2.3.3
 [2.3.2]: https://github.com/kooofy/IPScanner/compare/v2.3.1...v2.3.2
 [2.3.1]: https://github.com/kooofy/IPScanner/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/kooofy/IPScanner/compare/v2.2.0...v2.3.0
