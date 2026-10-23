@@ -1739,6 +1739,64 @@ def _import_failed(counts) -> bool:
                                           asset_import.ST_INVALID))
 
 
+#: 模板「说明」页的文案（只有 xlsx 有第二页；CSV 装不下）。
+#: **恒为中文**、不进语言包 —— 与 `_ASSET_TABLE_HEADERS` 同口径。
+_TEMPLATE_NOTES = (
+    "本表用于「导入资产信息」（GUI：文件 → 导入资产信息...；CLI：assets-import）。",
+    "",
+    "1. 认设备：identity_key 优先，其次 mac。两个都没有时只写 ip 不行 ——"
+    " IP 会被 DHCP 回收后分给别的设备，确实要按 IP 必须显式加 --allow-ip。",
+    "2. 空单元格 = 跳过，不会清空库里已有的值。要批量清空某几列，加 --clear-empty。",
+    "3. 日期写 YYYY-MM-DD；也接受 2026/5/1、20260501、2026年5月1日。",
+    '4. 自定义字段写 JSON 对象，例如 {"机架": "A3"}；键名原样保存，不会被翻译。',
+    "5. 只写这 6 个人工台账列。扫描写出来的列（主机名 / 厂商 / 设备类型 …）"
+    "一律不会被改动，写进模板也会被忽略。",
+    "6. 想先看一遍会写什么，先跑：assets-import 本文件 --dry-run",
+)
+
+
+def cmd_assets_template(args) -> int:
+    """生成台账导入模板（v2.3.3）。
+
+    默认把**当前资产一台一行**铺出来（身份键 / MAC / IP 填好、六个台账列留空）——
+    已有部署直接拿到一张「待填清单」，不用自己查身份键。`--empty` 只写表头，
+    给「还没有任何资产」的场景用。
+
+    🔴 模板里**不放示例行**：示例一旦被漏删就会跟着导入（产生 notfound），
+       更糟的是有人照着假数据改了真设备。说明只写在 xlsx 的第二页。
+    """
+    import history_store
+
+    db = _db_path(args)
+    assets = []
+    if not getattr(args, "empty", False):
+        try:
+            assets = history_store.list_assets(db_path=db)
+        except Exception as e:  # noqa: BLE001 - 库坏了要如实报，不假装生成了模板
+            emit("错误：读取资产表失败：%s" % e)
+            return EXIT_ERROR
+    try:
+        n = asset_import.write_template(
+            args.file, assets=assets, notes=_TEMPLATE_NOTES,
+            sheet_title="资产台账", notes_title="说明")
+    except ValueError as e:
+        emit("错误：%s" % e)
+        return EXIT_ERROR
+    except Exception as e:  # noqa: BLE001 - 目录不存在 / 文件被 Excel 占用
+        emit("错误：写不了文件 %s：%s" % (args.file, e))
+        return EXIT_ERROR
+
+    if n:
+        emit("已生成模板 %s：%d 台设备待填。填好后跑 "
+             "`assets-import %s --dry-run` 先看一眼。" % (args.file, n, args.file))
+    elif getattr(args, "empty", False):
+        emit("已生成模板 %s：只有表头（按 --empty）。" % args.file)
+    else:
+        emit("已生成模板 %s：只有表头（库里还没有资产，先扫一次再来会铺出待填清单）。"
+             % args.file)
+    return EXIT_OK
+
+
 def cmd_export(args) -> int:
     """导出资产表为互操作格式（Nmap XML / Zabbix LLD / NetBox CSV / Oxidized router.db）。
 
@@ -3523,6 +3581,21 @@ def build_parser() -> argparse.ArgumentParser:
     aip.add_argument("-f", "--format", choices=("table", "json"), default="table")
     aip.add_argument("-o", "--output", metavar="文件")
     aip.set_defaults(func=cmd_assets_import)
+
+    # ── assets-template（v2.3.3：台账导入模板）──
+    atp = sub.add_parser(
+        "assets-template", help="生成台账导入模板（CSV / xlsx）",
+        parents=[common],
+        description="生成一张可以直接填的台账导入模板。默认把**当前资产**"
+                    "一台一行铺出来（身份键 / MAC / IP 已填好，六个台账列留空）——"
+                    "已有部署拿到的就是一张待填清单；库里还没有资产时只写表头。"
+                    "🔴 模板只含导入真正会读的 9 列：`assets -f csv` 那 22 列里"
+                    "有 16 个扫描写入列，导入时一律被忽略，摆在表里只会误导。"
+                    "xlsx 会多一个「说明」页写清三条语义红线。")
+    atp.add_argument("file", metavar="文件", help="输出路径（.csv 或 .xlsx）")
+    atp.add_argument("--empty", action="store_true",
+                     help="只写表头，不铺当前资产（给「还没有任何资产」的场景用）")
+    atp.set_defaults(func=cmd_assets_template)
 
     # ── export ──
     xp = sub.add_parser("export", help="导出资产表为互操作格式", parents=[common],

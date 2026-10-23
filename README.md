@@ -364,9 +364,9 @@ python cli.py assets --device-class 交换机 --format json
 
 # 台账字段批量导入（CSV / Excel）：采购日期 / 保修到期 / 负责人 / 序列号 /
 # 位置树 / 自定义字段。列名用英文字段名或中文表头都行。
-python cli.py assets -f csv -o 台账.csv            # 先导出，拿到标准表头
-python cli.py assets-import 台账.csv --dry-run     # 先看一眼计划，不写库
-python cli.py assets-import 台账.csv               # 确认无误后写入
+python cli.py assets-template 台账模板.xlsx         # 生成模板：每台设备一行，待填
+python cli.py assets-import 台账模板.xlsx --dry-run  # 先看一眼计划，不写库
+python cli.py assets-import 台账模板.xlsx           # 确认无误后写入
 # ⚠ 空单元格默认「跳过」、不覆盖已有值；要批量清空某列请显式加 --clear-empty。
 # ⚠ 默认只按身份键 / MAC 认设备；只有 IP 的表要加 --allow-ip（IP 会被 DHCP 换走）。
 

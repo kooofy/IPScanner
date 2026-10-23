@@ -58,6 +58,23 @@ _PROBLEM_TEXT = {
 #: 报告里最多列多少条待处理行（与 CLI 的 `_IMPORT_DETAIL_LIMIT` 同口径）。
 DETAIL_LIMIT = 20
 
+#: 模板「说明」页的文案（xlsx 的第二个 sheet）。**字面量表**，取用时过
+#: `tr()`；已登记进 `tests/test_i18n_lazy.py::_label_tables()`。
+#: ⚠️ CLI 侧有一份**等价的中文副本**（`cli._TEMPLATE_NOTES`）：CLI 不 import
+#:    PyQt，而本模块顶层 import 了它 —— 与 `_REASON_TEXT` 的双份实现同一条理由。
+TEMPLATE_NOTES = (
+    "本表用于「导入资产信息」（GUI：文件 → 导入资产信息...；CLI：assets-import）。",
+    "",
+    "1. 认设备：identity_key 优先，其次 mac。两个都没有时只写 ip 不行 ——"
+    " IP 会被 DHCP 回收后分给别的设备，确实要按 IP 必须显式加 --allow-ip。",
+    "2. 空单元格 = 跳过，不会清空库里已有的值。要批量清空某几列，加 --clear-empty。",
+    "3. 日期写 YYYY-MM-DD；也接受 2026/5/1、20260501、2026年5月1日。",
+    '4. 自定义字段写 JSON 对象，例如 {"机架": "A3"}；键名原样保存，不会被翻译。',
+    "5. 只写这 6 个人工台账列。扫描写出来的列（主机名 / 厂商 / 设备类型 …）"
+    "一律不会被改动，写进模板也会被忽略。",
+    "6. 想先看一遍会写什么，先跑：assets-import 本文件 --dry-run",
+)
+
 #: 「需要用户处理」的状态（重复行也算 —— 它意味着表里有重复数据要清）。
 _BAD_STATUSES = (asset_import.ST_NOTFOUND, asset_import.ST_INVALID,
                  asset_import.ST_DUPLICATE)

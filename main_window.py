@@ -677,6 +677,15 @@ class MainWindow(TreeMixin, ScanMixin, ExportMixin, HistoryMixin, LibraryMixin,
 
         file_menu.addSeparator()
 
+        # v2.3.3：台账导入模板。默认把当前资产一台一行铺出来（身份键/MAC/IP
+        # 填好、六个台账列留空）—— 身份键是 MAC 派生的，用户没法自己编，
+        # 空表等于逼他先去命令行查一遍。
+        self.act_asset_template = QAction(tr("导出台账模板..."), self)
+        self.act_asset_template.setIcon(_mi(QStyle.SP_DialogSaveButton))
+        self.act_asset_template.setShortcut(QKeySequence("Ctrl+Alt+T"))
+        self.act_asset_template.triggered.connect(self._export_asset_template)
+        file_menu.addAction(self.act_asset_template)
+
         # v2.3.1：台账字段批量导入（采购日期 / 保修到期 / 负责人 / 序列号 /
         # 位置树 / 自定义字段）。与「导入地址库」是两回事 —— 那个导入的是
         # MAC→设备类型 的对照表，这个写的是资产表的人工台账列。

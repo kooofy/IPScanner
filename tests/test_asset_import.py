@@ -677,5 +677,113 @@ class ApplyPlanEdgeTest(_DbCase):
         self.assertEqual(self._reload()[KEY_PHONE]["owner"], "李四")
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  模板
+# ══════════════════════════════════════════════════════════════════════
+
+class TemplateTest(_DbCase):
+    """模板必须**只含导入真正会读的列**，且原样导回去不产生任何写入。
+
+    后者是这张表的核心承诺：模板 → 填值 → 导入，未填的格子必须一个都不动。
+    """
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        lang = i18n.current_lang()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(argv)
+        finally:
+            i18n.init(lang)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_columns_are_exactly_the_nine(self):
+        """模板只含 3 个认设备的列 + 6 个台账列 —— 扫描写入的 16 列一个都不许进来。"""
+        self.assertEqual(asset_import.TEMPLATE_COLUMNS, (
+            "identity_key", "mac", "ip", "purchase_date", "warranty_end",
+            "owner", "serial", "location_tree", "custom_json"))
+
+    def test_header_only_when_no_assets(self):
+        rows = asset_import.build_template_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(tuple(rows[0]), asset_import.TEMPLATE_COLUMNS)
+
+    def test_fills_identity_but_leaves_lifecycle_blank(self):
+        rows = asset_import.build_template_rows(self.assets)
+        self.assertEqual(len(rows), 1 + len(self.assets))
+        for row in rows[1:]:
+            self.assertTrue(row[0], msg="identity_key 必须填好（用户编不出来）")
+            self.assertEqual(row[3:], [""] * 6, msg="台账列必须留空")
+
+    def test_junk_assets_are_skipped(self):
+        rows = asset_import.build_template_rows([None, "x", {"identity_key": "k"}])
+        self.assertEqual(len(rows), 2)
+
+    def test_csv_roundtrip_writes_nothing(self):
+        path = os.path.join(self.tmp, "tpl.csv")
+        n = asset_import.write_template(path, assets=self.assets)
+        self.assertEqual(n, 3)
+        headers, body = asset_import.read_table(path)
+        self.assertEqual(tuple(headers), asset_import.TEMPLATE_COLUMNS)
+        plan = asset_import.build_plan([headers] + list(body), self.assets)
+        self.assertEqual(plan["problem"], "")
+        for item in plan["items"]:
+            self.assertEqual(item["status"], asset_import.ST_NOCHANGE)
+
+    def test_csv_ignores_notes(self):
+        """CSV 装不下第二个 sheet —— notes 必须被丢弃，不能变成一行脏数据。"""
+        path = os.path.join(self.tmp, "tpl2.csv")
+        asset_import.write_template(path, assets=self.assets, notes=["说明行"])
+        headers, body = asset_import.read_table(path)
+        self.assertEqual(len(body), len(self.assets))
+
+    def test_xlsx_has_a_notes_sheet(self):
+        import openpyxl
+        path = os.path.join(self.tmp, "tpl.xlsx")
+        n = asset_import.write_template(
+            path, assets=self.assets, notes=["第一行", "", "第三行"],
+            sheet_title="台账", notes_title="说明")
+        self.assertEqual(n, len(self.assets))
+        wb = openpyxl.load_workbook(path)
+        try:
+            self.assertEqual(wb.sheetnames, ["台账", "说明"])
+            ws = wb["台账"]
+            self.assertEqual(ws.max_column, len(asset_import.TEMPLATE_COLUMNS))
+            self.assertEqual(ws.freeze_panes, "A2")
+            ns = wb["说明"]
+            self.assertEqual(ns.cell(row=1, column=1).value, "第一行")
+            self.assertEqual(ns.cell(row=3, column=1).value, "第三行")
+        finally:
+            wb.close()
+
+    def test_unsupported_extension_raises(self):
+        with self.assertRaises(ValueError):
+            asset_import.write_template(os.path.join(self.tmp, "tpl.pdf"))
+
+    def test_cli_writes_template(self):
+        path = os.path.join(self.tmp, "cli_tpl.csv")
+        code, out, _ = self._run(["assets-template", path, "--db", self.db])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("3 台设备待填", out)
+        headers, body = asset_import.read_table(path)
+        self.assertEqual(len(body), 3)
+
+    def test_cli_empty_flag_writes_header_only(self):
+        path = os.path.join(self.tmp, "cli_empty.csv")
+        code, out, _ = self._run(
+            ["assets-template", path, "--db", self.db, "--empty"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("--empty", out)
+        headers, body = asset_import.read_table(path)
+        self.assertEqual(tuple(headers), asset_import.TEMPLATE_COLUMNS)
+        self.assertEqual(body, [])
+
+    def test_cli_bad_extension_exits_nonzero(self):
+        code, out, _ = self._run(
+            ["assets-template", os.path.join(self.tmp, "x.pdf"), "--db", self.db])
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("只支持", out)
+
+
 if __name__ == "__main__":
     unittest.main()

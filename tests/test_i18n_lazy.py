@@ -346,12 +346,16 @@ class TableDrivenLabelCoverageTest(unittest.TestCase):
             _PROBLEM_TEXT as _IMPORT_PROBLEM,
             _REASON_TEXT as _IMPORT_REASON,
             _STATUS_TEXT as _IMPORT_STATUS,
+            TEMPLATE_NOTES as _IMPORT_TEMPLATE_NOTES,
         )
         return {
             "arp_mapper.MAC_SOURCE_TEXT": list(_MAC_SOURCE_TEXT.values()),
             "ui_dialogs.asset_import_preview._STATUS_TEXT": list(_IMPORT_STATUS.values()),
             "ui_dialogs.asset_import_preview._REASON_TEXT": list(_IMPORT_REASON.values()),
             "ui_dialogs.asset_import_preview._PROBLEM_TEXT": list(_IMPORT_PROBLEM.values()),
+            # 模板「说明」页：空行不参与（不是文案）。
+            "ui_dialogs.asset_import_preview.TEMPLATE_NOTES":
+                [s for s in _IMPORT_TEMPLATE_NOTES if s.strip()],
             "filter_bar.FILTERS": [label for _k, label in FILTERS],
             "main_window.COLUMN_PRESETS": [lbl for _k, lbl, _c in COLUMN_PRESETS],
             "main_window.COLUMN_LABELS": list(COLUMN_LABELS),

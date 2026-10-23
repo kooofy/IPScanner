@@ -1177,5 +1177,21 @@
   "文件里连表头都没有（空文件？）": "No header row at all (empty file?)",
   "没有识别到任何可写入的列": "No writable column recognized",
   "表里既没有身份键列，也没有 MAC 列": "The table has neither an identity-key nor a MAC column",
-  "{reason}：{value}": "{reason}: {value}"
+  "{reason}：{value}": "{reason}: {value}",
+  "导出台账模板...": "Export Asset Template...",
+  "导出台账模板": "Export Asset Template",
+  "导出台账模板失败": "Export Asset Template Failed",
+  "模板已生成": "Template Created",
+  "Excel 工作簿 (*.xlsx);;CSV 文件 (*.csv)": "Excel workbook (*.xlsx);;CSV file (*.csv)",
+  "读取资产表失败，详情见日志。": "Failed to read the asset table; see the log for details.",
+  "资产台账": "Asset Records",
+  "共 {n} 台设备待填。填好后用「导入资产信息...」导回。": "{n} device(s) to fill in. When done, import it back with \"Import Asset Info...\".",
+  "已生成台账模板：{n} 台待填": "Template created: {n} device(s) to fill in",
+  "本表用于「导入资产信息」（GUI：文件 → 导入资产信息...；CLI：assets-import）。": "This sheet is for \"Import Asset Info\" (GUI: File -> Import Asset Info...; CLI: assets-import).",
+  "1. 认设备：identity_key 优先，其次 mac。两个都没有时只写 ip 不行 —— IP 会被 DHCP 回收后分给别的设备，确实要按 IP 必须显式加 --allow-ip。": "1. Device matching: identity_key first, then mac. If neither is present, ip alone is not enough - DHCP may reassign it to another device; to match by IP you must pass --allow-ip explicitly.",
+  "2. 空单元格 = 跳过，不会清空库里已有的值。要批量清空某几列，加 --clear-empty。": "2. An empty cell means \"skip\" and never clears the stored value. To clear columns in bulk, pass --clear-empty.",
+  "3. 日期写 YYYY-MM-DD；也接受 2026/5/1、20260501、2026年5月1日。": "3. Dates use YYYY-MM-DD; 2026/5/1, 20260501 and 2026-05-01 are also accepted.",
+  "4. 自定义字段写 JSON 对象，例如 {\"机架\": \"A3\"}；键名原样保存，不会被翻译。": "4. Custom fields take a JSON object, e.g. {\"rack\": \"A3\"}; key names are stored verbatim and never translated.",
+  "5. 只写这 6 个人工台账列。扫描写出来的列（主机名 / 厂商 / 设备类型 …）一律不会被改动，写进模板也会被忽略。": "5. Only these 6 manual asset-record columns are written. Columns produced by scanning (hostname / vendor / device class ...) are never touched - putting them here has no effect.",
+  "6. 想先看一遍会写什么，先跑：assets-import 本文件 --dry-run": "6. To preview what would be written, run: assets-import <this file> --dry-run"
 }

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """MAC 地址库管理混入类。从 main_window.py 拆分出来，通过 Mixin 模式供 MainWindow 继承。"""
 import os
+from datetime import datetime
 
 from PyQt5.QtWidgets import QDialog, QFileDialog, QMessageBox
 from ui_dialogs import (
@@ -68,6 +69,45 @@ class LibraryMixin:
         self._refresh_detail_panel(self.table.currentItem())
         self._audit(audit_log.CAT_LIBRARY, tr("编辑资产信息"), key)
         self.status_bar.showMessage(tr("资产信息已保存"))
+
+    def _export_asset_template(self):
+        """生成台账导入模板（v2.3.3）：当前资产一台一行铺出来，六个台账列留空。
+
+        为什么默认**铺出当前资产**而不是给一张空表：身份键 `identity_key` 是
+        从 MAC 派生的，用户没法自己编 —— 空表等于逼他先去命令行查一遍。
+        铺出来之后，他只需要在右边六列填值。
+
+        🔴 模板里**不放示例行**：示例一旦漏删就会跟着导入（产生 notfound），
+           更糟的是有人照着示例的假数据改了真设备。说明只写在 xlsx 的第二页。
+        """
+        default = "资产台账模板_%s.xlsx" % datetime.now().strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("导出台账模板"), default,
+            tr("Excel 工作簿 (*.xlsx);;CSV 文件 (*.csv)"))
+        if not path:
+            return
+        try:
+            assets = history_store.list_assets(db_path=self.history_db)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("读取资产表失败: %s", e)
+            msg_warn(self, tr("导出台账模板失败"), tr("读取资产表失败，详情见日志。"))
+            return
+        try:
+            count = asset_import.write_template(
+                path, assets=assets,
+                notes=[tr(s) for s in asset_import_preview.TEMPLATE_NOTES],
+                sheet_title=tr("资产台账"), notes_title=tr("说明"))
+        except Exception as e:  # noqa: BLE001 - 目录不存在 / 文件被 Excel 占用
+            _log.warning("生成台账模板失败（%s）: %s", path, e)
+            msg_warn(self, tr("导出台账模板失败"), str(e))
+            return
+        self._audit(audit_log.CAT_EXPORT, tr("导出台账模板"),
+                    f"{os.path.basename(path)} · {count} 台待填")
+        msg_info(self, tr("模板已生成"),
+                 tr("共 {n} 台设备待填。填好后用「导入资产信息...」导回。").format(
+                     n=count))
+        self.status_bar.showMessage(
+            tr("已生成台账模板：{n} 台待填").format(n=count))
 
     def _import_assets(self):
         """批量导入台账字段（v2.3.1）：选文件 → 编译计划 → **预览确认** → 写入。

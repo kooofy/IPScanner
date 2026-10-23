@@ -448,3 +448,117 @@ def apply_plan(plan, db_path=None) -> dict:
         item["status"] = ST_WRITTEN
         written += 1
     return {"written": written, "failed": failed}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  模板
+# ══════════════════════════════════════════════════════════════════════
+#
+# 为什么需要专门的模板（而不是"拿 `assets -f csv` 的产物当模板"）
+# --------------------------------------------------------------
+# `assets -f csv` 是 **22 列**：16 个扫描写入列 + 6 个台账列。导入时那 16 列
+# 一律被忽略 —— 摆在表里只会让人以为"这些也要填"，填了还没用。
+# 模板只保留**导入真正会读**的列：3 个认设备的 + 6 个要填的。
+#
+# 🔴 模板里**不放示例行**。示例行一旦被漏删就会跟着导入，产生一条
+#    `notfound`（示例 MAC 在库里当然不存在）；更糟的是有人照着示例的
+#    假数据改了真设备。示例只写在 xlsx 的「说明」页里，数据页永远是干净的。
+
+#: 模板列：认设备的三列 + 六个台账列。顺序即表格里的列顺序。
+TEMPLATE_COLUMNS = (("identity_key", "mac", "ip")
+                    + tuple(asset_lifecycle.LIFECYCLE_COLUMNS))
+
+
+def build_template_rows(assets=()):
+    """模板的二维数据（**第一行是表头**）。
+
+    给了 `assets` 就把当前资产一台一行铺出来（身份键 / MAC / IP 填好、
+    六个台账列留空）—— 这才是实际好用的形态：已有部署直接拿到一张
+    「待填清单」，不用自己去查身份键。`assets` 为空时只返回表头。
+    """
+    rows = [[str(col) for col in TEMPLATE_COLUMNS]]
+    blanks = ["" for _ in asset_lifecycle.LIFECYCLE_COLUMNS]
+    for asset in assets or ():
+        if not isinstance(asset, dict):
+            continue
+        rows.append([
+            (asset.get("identity_key") or "").strip(),
+            (asset.get("mac") or "").strip(),
+            (asset.get("ip") or "").strip(),
+        ] + list(blanks))
+    return rows
+
+
+def write_template(path, assets=(), notes=(), sheet_title="assets",
+                   notes_title="readme") -> int:
+    """写模板文件，返回**数据行数**（不含表头）。
+
+    * ``.csv``：UTF-8 **带 BOM**（Excel 双击不乱码），只写数据页；
+      `notes` 会被忽略 —— CSV 装不下第二个 sheet，硬塞进去会变成一行脏数据。
+    * ``.xlsx``：数据页 + 说明页（`notes` 逐行写进去，自动换行）。
+
+    ⚠️ 本模块**零 i18n**，所以 `notes` / `sheet_title` / `notes_title`
+       都由调用方给**已翻译好**的文本；不传就用英文默认值。
+    """
+    ext = os.path.splitext(path or "")[1].lower()
+    rows = build_template_rows(assets)
+    if ext in (".csv", ".txt"):
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            csv.writer(f, lineterminator="\n").writerows(rows)
+        return len(rows) - 1
+    if ext == ".xlsx":
+        _write_xlsx_template(path, rows, notes, sheet_title, notes_title)
+        return len(rows) - 1
+    raise ValueError("模板只支持 .csv 或 .xlsx（收到 %r）"
+                     % (ext or "无扩展名"))
+
+
+def _write_xlsx_template(path, rows, notes, sheet_title, notes_title):
+    """写 xlsx：数据页（带表头样式）+ 说明页。"""
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    # 🔴 用 `worksheets[0]` 而不是 `wb.active`：后者类型上是 `Worksheet | None`
+    #    （类型检查会要求每处都判空），而新建的工作簿**必然**恰好有一张表。
+    ws = wb.worksheets[0]
+    ws.title = sheet_title
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB",
+                              fill_type="solid")
+    centered = Alignment(horizontal="center", vertical="center")
+    border = Border(left=Side(style="thin", color="D1D5DB"),
+                    right=Side(style="thin", color="D1D5DB"),
+                    top=Side(style="thin", color="D1D5DB"),
+                    bottom=Side(style="thin", color="D1D5DB"))
+
+    for row_idx, values in enumerate(rows, 1):
+        for col_idx, value in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = border
+            if row_idx == 1:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = centered
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    widths = {"identity_key": 26, "mac": 20, "ip": 16, "purchase_date": 14,
+              "warranty_end": 14, "owner": 12, "serial": 18,
+              "location_tree": 20, "custom_json": 28}
+    for col_idx, name in enumerate(TEMPLATE_COLUMNS, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(name, 18)
+    # 冻结表头：往下翻时列名一直看得见（填几十行时这个很要紧）。
+    ws.freeze_panes = "A2"
+
+    if notes:
+        ns = wb.create_sheet(notes_title)
+        ns.column_dimensions["A"].width = 100
+        for row_idx, line in enumerate(notes, 1):
+            cell = ns.cell(row=row_idx, column=1, value=line)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    wb.save(path)
+    wb.close()
