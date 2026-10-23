@@ -447,6 +447,16 @@ v2.3 主题：A「能看清变化」—— 趋势与生命周期（用户 2026-1
           产物 IPScanner_2.3.2-win64.zip / IPScanner_cli_2.3.2.exe /
           SHA256SUMS.txt；Release run 39556861316 success、
           CI run 39556809078 十 job 全绿
+
+补丁轨道 v2.3.3（2026-10-23 收口，同样**不改 §3 范围、不占名额**）：
+          台账导入模板 —— asset_import.TEMPLATE_COLUMNS（9 列：identity_key /
+          mac / ip + 六个台账列）+ build_template_rows / write_template
+          （.csv / .xlsx，xlsx 多一张「说明」页）+ GUI 文件菜单
+          「导出台账模板...」(Ctrl+Alt+T) + CLI assets-template [--empty]
+          release 421477855 + 注解 tag v2.3.3；
+          产物 IPScanner_2.3.3-win64.zip / IPScanner_cli_2.3.3.exe /
+          SHA256SUMS.txt；Release run 39904863359 success、
+          CI run 39904843531 十 job 全绿
 ```
 
 ---
